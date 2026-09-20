@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
 
@@ -36,8 +37,31 @@ var stateMark = map[projectctl.State]string{
 	projectctl.StateSuperseded: "~",
 }
 
+// Screen 是渲染时要知道的界面状态。零值就是平时那副样子。
+type Screen struct {
+	// 光标停在第几个节点上，负数表示不显示光标。
+	Cursor int
+	// 是不是正在挑模型。
+	Picking bool
+	// 可选的模型与当前挑中的那个。
+	Candidates []dispatch.Model
+	Pick       int
+	// 上一次动作的结果，成败都显示。
+	Notice   string
+	NoticeOK bool
+}
+
 // Render 把快照画成一屏。width 是终端宽度。
 func Render(s projectctl.Snapshot, width int) string {
+	return RenderScreen(s, width, Screen{Cursor: -1})
+}
+
+// RenderScreen 按给定的界面状态画一屏。
+func RenderScreen(s projectctl.Snapshot, width int, sc Screen) string {
+	return renderWith(s, width, sc)
+}
+
+func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	if width < 60 {
 		width = 60
 	}
@@ -101,10 +125,44 @@ func Render(s projectctl.Snapshot, width int) string {
 	// 全部节点。
 	counts, unknown := s.Counts()
 	w("%s", styleSection.Render(fmt.Sprintf("全部节点（%d）%s", len(s.Nodes), countsText(counts, unknown))))
-	for _, n := range s.Nodes {
-		w("  %s", nodeRow(n, width))
+	for i, n := range s.Nodes {
+		marker := "  "
+		row := nodeRow(n, width)
+		if i == sc.Cursor {
+			marker = styleTitle.Render("▸ ")
+			row = styleTitle.Render(row)
+		}
+		w("%s%s", marker, row)
 	}
 	w("")
+
+	// 正在挑模型时，把候选摆出来。
+	if sc.Picking {
+		w("%s", styleSection.Render("挑一个模型派工"))
+		if len(sc.Candidates) == 0 {
+			w("  %s", styleAlert.Render("档位表里没有满足这个节点的模型"))
+		}
+		for i, c := range sc.Candidates {
+			mark := "  "
+			line := fmt.Sprintf("%-28s %-10s %s", c.ID, c.Class, c.Tool)
+			if i == sc.Pick {
+				mark = styleTitle.Render("▸ ")
+				line = styleTitle.Render(line)
+			}
+			w("%s%s", mark, line)
+		}
+		w("  %s", styleDim.Render("↑↓ 选，回车派工，Esc 取消"))
+		w("")
+	}
+
+	// 上一次动作的结果。
+	if sc.Notice != "" {
+		if sc.NoticeOK {
+			w("%s", styleOK.Render(sc.Notice))
+		} else {
+			w("%s", styleAlert.Render(sc.Notice))
+		}
+	}
 
 	// 脚注：新鲜度与问题。
 	if s.Fresh.Stale {
@@ -115,7 +173,7 @@ func Render(s projectctl.Snapshot, width int) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
-	w("%s", styleDim.Render("只读界面，不派工、不接管、不写账本。r 刷新，q 退出。"))
+	w("%s", styleDim.Render("↑↓ 选节点，d 派工，r 刷新，q 退出。不接管终端、不写 Graph 账本。"))
 	return b.String()
 }
 

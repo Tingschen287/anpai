@@ -14,6 +14,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/binding"
+	"github.com/Tingschen287/terminal-deck/work/internal/config"
+	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 	"github.com/Tingschen287/terminal-deck/work/internal/ui"
 )
@@ -45,6 +49,9 @@ func main() {
 
 	reader := projectctl.NewReader(root, pc)
 
+	// 派工能力是可选的：没配好就只看不派，按 d 时界面会说清楚缺什么。
+	dispatcher, dispatchErr := buildDispatcher(root)
+
 	if *once != "" {
 		width := 100
 		if _, err := fmt.Sscanf(*once, "%d", &width); err != nil {
@@ -63,9 +70,49 @@ func main() {
 		return
 	}
 
-	if _, err := tea.NewProgram(ui.New(reader), tea.WithAltScreen()).Run(); err != nil {
+	model := ui.New(reader)
+	if dispatcher != nil {
+		model = model.WithDispatcher(dispatcher)
+	} else if dispatchErr != nil {
+		fmt.Fprintf(os.Stderr, "work: 派工未启用：%v\n", dispatchErr)
+	}
+	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fail("界面异常退出：%v", err)
 	}
+}
+
+// buildDispatcher 按配置装配派工能力。
+//
+// 配置缺失不是错误，只是没有派工：Work Deck 照样能看。但配置写错了要说出来，
+// 不能让人按了 d 之后对着一句没头没脑的提示发呆。
+func buildDispatcher(projectRoot string) (ui.Dispatcher, error) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	table, err := cfg.RouteTable()
+	if err != nil {
+		return nil, err
+	}
+	// token 只从环境变量来，配置文件里没有这个字段。
+	client, err := agentdeck.NewClient(cfg.UpstreamBinary, cfg.Profile, cfg.UpstreamAddr, config.Token())
+	if err != nil {
+		return nil, err
+	}
+	store, err := binding.Open(filepath.Join(filepath.Dir(path), "bindings.json"))
+	if err != nil {
+		return nil, err
+	}
+	return &dispatch.Dispatcher{
+		Deck:    client,
+		Store:   store,
+		Table:   table,
+		LogPath: filepath.Join(filepath.Dir(path), "dispatch-log.jsonl"),
+	}, nil
 }
 
 func fail(format string, args ...any) {

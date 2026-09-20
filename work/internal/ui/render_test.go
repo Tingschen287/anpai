@@ -156,15 +156,36 @@ func TestStaleProjectionIsCalledOutOnScreen(t *testing.T) {
 	}
 }
 
-// 界面上不能出现任何会让人以为可以派工或接管的字样。
-func TestScreenAdvertisesItselfAsReadOnly(t *testing.T) {
+// 界面要在自己的说明行里讲清楚能做什么、不能做什么。
+//
+// 早先这条测试查的是整屏里有没有「只读」两个字，结果被夹具数据喂饱了：
+// blocked 节点的 owner 动作里恰好写着「另开只读账号」，于是界面说明改掉之后
+// 它照样通过。现在只认底部那一行确切的说明，不认满屏碰运气的字符串。
+func TestFooterStatesWhatTheScreenCanAndCannotDo(t *testing.T) {
 	out := Render(sample(), 100)
-	if !strings.Contains(out, "只读") {
-		t.Error("界面没有声明自己是只读的")
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	footer := lines[len(lines)-1]
+
+	// 能做的：选节点、派工、刷新、退出。
+	for _, want := range []string{"d 派工", "r 刷新", "q 退出"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("说明行里没讲 %q：%q", want, footer)
+		}
 	}
-	for _, forbidden := range []string{"派工中", "已接管", "已发送", "写入账本"} {
+	// 不能做的，必须明说，不能靠人猜。
+	for _, want := range []string{"不接管终端", "不写 Graph 账本"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("说明行里没讲清楚边界 %q：%q", want, footer)
+		}
+	}
+}
+
+// 界面不该声称自己做了本轮做不到的事。
+func TestScreenNeverClaimsToAttachOrWriteLedger(t *testing.T) {
+	out := Render(sample(), 100)
+	for _, forbidden := range []string{"已接管", "已发送", "写入账本", "已验收"} {
 		if strings.Contains(out, forbidden) {
-			t.Errorf("界面上出现了本轮不该有的动作字样：%s", forbidden)
+			t.Errorf("界面上出现了本轮做不到的动作字样：%s", forbidden)
 		}
 	}
 }

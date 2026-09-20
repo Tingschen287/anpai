@@ -5,7 +5,11 @@
 
 它和 Agent Deck、Host Deck 住在同一个仓，但**不是**同一个程序：那两个是 Python
 写的启动器，这个是 Go 写的终端应用，有自己的 `go.mod`，互不影响。用 Go 是因为
-它将来要对接的 agent-deck 也是 Go，同语言省一层来回。
+它将来要对接的 **upstream agent-deck**（`github.com/asheshgoplani/agent-deck`）也是 Go，
+同语言省一层来回。
+
+注意这里说的是上游那个开源项目，和本仓自己的 Agent Deck 重名但不是一个东西，
+约定见项目里的 `2.code/link.md`。
 
 ## 现在能做什么
 

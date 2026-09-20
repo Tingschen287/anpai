@@ -80,9 +80,35 @@ func TestExecHappensOnlyInClient(t *testing.T) {
 	}
 }
 
-// 包外的代码一律不许自己去 exec projectctl，也不许直接读账本文件。
-func TestNoOneOutsideThisPackageTouchesTheLedger(t *testing.T) {
+// 每个 adapter 只许碰自己那个上游，别处一个都不许碰。
+//
+// 仓里有两个 adapter：本包对 Graph 控制器，internal/agentdeck 对 upstream agent-deck。
+// 它们各自是唯一的出口，互相之间也不越界——agentdeck 不许碰账本，
+// 本包不许 exec 上游那个二进制。除这两个包之外，任何地方都不准出现 exec。
+func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 	root := moduleRoot(t)
+
+	// 接口标识 -> 只允许出现在这个包里。
+	//
+	// 这里查的是「真的在调它」的证据：账本文件名、控制器脚本、上游的 HTTP 路径
+	// 和环境变量。光在注释或错误文案里提到上游的名字不算越界，那反而是在说明
+	// 边界在哪；真要绕过 adapter 去 exec 它，会被上面那条 exec 检查抓住。
+	owner := map[string]string{
+		"events.jsonl":     "internal/projectctl",
+		"ledger-head.json": "internal/projectctl",
+		"projectctl.py":    "internal/projectctl",
+		// 用上游真实的变量名，不用 AGENTDECK_ 前缀：Work Deck 自己的
+		// WORKDECK_AGENTDECK_TOKEN 也含那个前缀，那是本方配置不是在碰上游。
+		"AGENTDECK_PROFILE": "internal/agentdeck",
+		"/api/sessions":    "internal/agentdeck",
+		"/events/menu":     "internal/agentdeck",
+	}
+	// exec 只许出现在这两个包各自的 client.go 里。
+	execAllowed := map[string]bool{
+		"internal/projectctl/client.go": true,
+		"internal/agentdeck/client.go":  true,
+	}
+
 	var offenders []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -94,21 +120,23 @@ func TestNoOneOutsideThisPackageTouchesTheLedger(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if strings.Contains(filepath.ToSlash(path), "/internal/projectctl/") {
-			return nil
-		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		text := string(data)
-		for _, bad := range []string{"exec.Command", "events.jsonl", "ledger-head.json", "projectctl.py"} {
-			if strings.Contains(text, bad) {
-				rel, _ := filepath.Rel(root, path)
-				offenders = append(offenders, rel+" 含 "+bad)
+
+		if strings.Contains(text, "exec.Command") && !execAllowed[rel] {
+			offenders = append(offenders, rel+" 含 exec.Command，只有两个 adapter 的 client.go 可以")
+		}
+		for needle, pkg := range owner {
+			if strings.Contains(text, needle) && !strings.HasPrefix(rel, pkg+"/") {
+				offenders = append(offenders, rel+" 含 "+needle+"，那是 "+pkg+" 的地盘")
 			}
 		}
 		return nil
@@ -117,7 +145,7 @@ func TestNoOneOutsideThisPackageTouchesTheLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(offenders) > 0 {
-		t.Errorf("projectctl 包之外出现了对控制器或账本的直接访问：%v", offenders)
+		t.Errorf("有代码越过了 adapter 边界：%v", offenders)
 	}
 }
 
