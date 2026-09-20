@@ -50,6 +50,7 @@ type Client struct {
 	// 目标项目根目录。
 	Project string
 	// 单条命令的超时。超时按「读不到」处理，不猜。
+	// 控制器对项目目录加锁，节点多的时候单条命令要排很久的队，所以给得宽。
 	Timeout time.Duration
 }
 
@@ -59,7 +60,7 @@ func NewClient(project, script string) *Client {
 		Python:  "python3",
 		Script:  script,
 		Project: project,
-		Timeout: 20 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 }
 

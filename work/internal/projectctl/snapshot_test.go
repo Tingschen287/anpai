@@ -334,3 +334,100 @@ func treeDigest(t *testing.T, root string) string {
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// 先行快照不为任何单个节点去问控制器。
+//
+// 夹具里投影的三张分类表覆盖了 running / submitted / blocked / failed / ready
+// 五个节点，它们的状态必须直接可用；accepted 和 planned 两个投影写不到，
+// 必须老实标成查询中，而不是猜一个。
+func TestFastSnapshotUsesProjectionAndDefersTheRest(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.FastSnapshot(context.Background())
+
+	fromProjection := map[string]State{
+		"f02_build_core":     StateRunning,
+		"f03_write_report":   StateSubmitted,
+		"f04_external_probe": StateBlocked,
+		"f05_legacy_path":    StateFailed,
+		"f06_owner_gate":     StateReady,
+	}
+	deferred := map[string]bool{
+		"f01_collect_inputs": true, // accepted，投影里没有
+		"f07_ship_result":    true, // planned，投影里没有
+	}
+
+	for _, n := range snap.Nodes {
+		got, ok := n.State.Get()
+		switch {
+		case fromProjection[n.ID] != "":
+			if !ok {
+				t.Errorf("节点 %s 的状态投影里写着，不该还要去问控制器：%s", n.ID, n.State.Reason())
+				continue
+			}
+			if got != fromProjection[n.ID] {
+				t.Errorf("节点 %s 状态是 %s，期望 %s", n.ID, got, fromProjection[n.ID])
+			}
+		case deferred[n.ID]:
+			if ok {
+				t.Errorf("节点 %s 投影里没有，先行快照不该已经知道它是 %s", n.ID, got)
+			}
+			if n.State.Reason() != "查询中" {
+				t.Errorf("节点 %s 应标成查询中，实际是 %q", n.ID, n.State.Reason())
+			}
+		}
+	}
+
+	// 等 owner 的条目全部来自投影，先行快照里就该是齐的。
+	if len(snap.WaitingOnOwner()) != 3 {
+		t.Errorf("先行快照里等 owner 的条目有 %d 条，期望 3 条", len(snap.WaitingOnOwner()))
+	}
+	// 预算同样来自投影，先行快照里就该有数。
+	for _, b := range snap.Budgets {
+		if b.Label == "elapsed" {
+			continue
+		}
+		if !b.Used.IsKnown() {
+			t.Errorf("先行快照里 %s 的已用量应当可用：%s", b.Label, b.Used.Reason())
+		}
+	}
+}
+
+// 终态问过一次就记住，下一次先行快照直接给得出来。
+func TestFinalStatesAreRememberedAcrossRefreshes(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+
+	// 先行快照拿不到 accepted 的那个节点。
+	first := r.FastSnapshot(context.Background())
+	if st, ok := stateOf(first, "f01_collect_inputs"); ok {
+		t.Fatalf("第一次先行快照就知道 f01 是 %s，缓存测试前提不成立", st)
+	}
+
+	// 完整取一次，把终态问出来。
+	full := r.Snapshot(context.Background())
+	if st, ok := stateOf(full, "f01_collect_inputs"); !ok || st != StateAccepted {
+		t.Fatalf("完整快照没把 f01 查成 accepted：%v %v", st, ok)
+	}
+
+	// 再来一次先行快照，这次不问控制器也该知道。
+	again := r.FastSnapshot(context.Background())
+	st, ok := stateOf(again, "f01_collect_inputs")
+	if !ok {
+		t.Error("终态没有被记住，先行快照又把 f01 标成了未知")
+	} else if st != StateAccepted {
+		t.Errorf("记住的状态是 %s，期望 accepted", st)
+	}
+
+	// planned 不是终态，不该被记住。
+	if st, ok := stateOf(again, "f07_ship_result"); ok {
+		t.Errorf("f07 是 planned，不是终态，不该被记住，却拿到了 %s", st)
+	}
+}
+
+func stateOf(s Snapshot, id string) (State, bool) {
+	for _, n := range s.Nodes {
+		if n.ID == id {
+			return n.State.Get()
+		}
+	}
+	return "", false
+}

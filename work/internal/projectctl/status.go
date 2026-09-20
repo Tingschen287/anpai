@@ -30,6 +30,10 @@ type Projection struct {
 	BudgetUsed  map[string]float64
 	BudgetLimit map[string]float64
 
+	// 投影的三张分类表直接写明了状态的那些节点。
+	// 有了它们，这部分节点就不必再逐个去问控制器——真实项目里一次 brief 要两三秒。
+	States map[string]State
+
 	// 每个节点最近一次 node_started 的时间，来自投影的「最近事件」表。
 	// 那张表只列最近若干条，所以开工较早的节点可能查不到，查不到就是未知。
 	StartedAt map[string]time.Time
@@ -60,6 +64,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 		RequiredActions: map[string]string{},
 		BudgetUsed:      map[string]float64{},
 		BudgetLimit:     map[string]float64{},
+		States:          map[string]State{},
 		StartedAt:       map[string]time.Time{},
 	}
 
@@ -93,12 +98,19 @@ func LoadProjection(projectRoot string) (Projection, error) {
 			continue
 		}
 		switch section {
+		case "下一可执行节点":
+			// 这张表里的节点按定义就是 ready。表为空时占位行写的是 none。
+			if len(cells) < 1 || cells[0] == "id" || cells[0] == "none" {
+				continue
+			}
+			p.States[cells[0]] = StateReady
 		case "执行中与待评审":
 			// id | status | actor | attempt | latest evidence
 			if len(cells) < 5 || cells[0] == "id" {
 				continue
 			}
 			id := cells[0]
+			p.States[id] = State(cells[1])
 			p.Actors[id] = cells[2]
 			if n, err := strconv.Atoi(cells[3]); err == nil {
 				p.Attempts[id] = n
@@ -109,6 +121,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 			if len(cells) < 4 || cells[0] == "id" {
 				continue
 			}
+			p.States[cells[0]] = State(cells[1])
 			p.Reasons[cells[0]] = cells[2]
 			p.RequiredActions[cells[0]] = cells[3]
 		case "最近事件":

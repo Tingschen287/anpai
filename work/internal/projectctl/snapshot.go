@@ -14,21 +14,71 @@ import (
 const projectionTolerance = 2 * time.Second
 
 // Reader 一次性把界面要的东西全取回来。
+//
+// 它记着已经查到的终态。真实项目里一次 brief 要两三秒，而控制器对项目目录加了锁，
+// 实测并发 1、4、8、16 跑同样 12 个节点都是 33 到 35 秒——并发一点用都没有，
+// 唯一能省时间的办法是少问几次。accepted、failed、superseded 不会再变回去，
+// 问过一次就记住。
 type Reader struct {
 	client *Client
 	root   string
+
+	mu    sync.Mutex
+	final map[string]State
 }
 
 // NewReader 按项目根构造。script 是 projectctl.py 的路径。
 func NewReader(projectRoot, script string) *Reader {
-	return &Reader{client: NewClient(projectRoot, script), root: projectRoot}
+	return &Reader{
+		client: NewClient(projectRoot, script),
+		root:   projectRoot,
+		final:  map[string]State{},
+	}
 }
 
-// Snapshot 取一次完整快照。
+// isFinal 说明一个状态到没到头。到头的状态不会自己变回去，可以记住。
+func isFinal(s State) bool {
+	switch s {
+	case StateAccepted, StateFailed, StateSuperseded:
+		return true
+	}
+	return false
+}
+
+func (r *Reader) cached(id string) (State, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, ok := r.final[id]
+	return st, ok
+}
+
+func (r *Reader) remember(id string, st State) {
+	if !isFinal(st) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.final[id] = st
+}
+
+// FastSnapshot 只用状态投影和账本体检取数，一次控制器查询都不为单个节点发。
+//
+// 投影的三张分类表已经写明了 ready、running、submitted、blocked、failed 这五类
+// 节点的状态，等 owner 的条目、运行中的 attempt 和预算也全在里面。界面先拿这一份
+// 立刻画出来，剩下那些只能靠逐个查的节点标成「查询中」，再由 Snapshot 补。
+func (r *Reader) FastSnapshot(ctx context.Context) Snapshot {
+	return r.snapshot(ctx, false)
+}
+
+// Snapshot 取一次完整快照，会为投影覆盖不到的节点逐个问控制器。
 //
 // 任何一路取数失败都不会让整次刷新失败：拿不到的部分标成未知，原因记进 Problems，
 // 其余照常显示。宁可让人看见半张表加一行原因，也不给一个空屏或一组编出来的数。
 func (r *Reader) Snapshot(ctx context.Context) Snapshot {
+	return r.snapshot(ctx, true)
+}
+
+func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 	snap := Snapshot{ProjectRoot: r.root, TakenAt: time.Now()}
 
 	graph, err := LoadGraph(r.root)
@@ -56,7 +106,7 @@ func (r *Reader) Snapshot(ctx context.Context) Snapshot {
 	snap.Health = proj.Health
 	snap.Fresh = freshness(proj, chain)
 
-	snap.Nodes = r.nodes(ctx, graph, proj, snap.Fresh, &snap.Problems)
+	snap.Nodes = r.nodes(ctx, graph, proj, snap.Fresh, probe, &snap.Problems)
 	snap.Budgets = budgets(graph, proj, snap.Fresh)
 	return snap
 }
@@ -88,13 +138,16 @@ func freshness(p Projection, chain ChainStatus) Freshness {
 }
 
 // nodes 把静态清单、实时状态和投影补充信息合成一张表。
-func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, problems *[]string) []Node {
+//
+// 状态按三步取，一步比一步贵：投影里写明的直接用，记住的终态直接用，
+// 剩下的才去问控制器。probe 为 false 时最后一步不做，那些节点标成「查询中」。
+func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, probe bool, problems *[]string) []Node {
 	out := make([]Node, len(g.Nodes))
 	now := time.Now()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	// 每个节点要单独问一次 projectctl，节点多的时候串行会很慢，这里限并发跑。
-	sem := make(chan struct{}, 8)
+	// 控制器对项目目录加锁，并发提高并不会更快，这里只留一点重叠。
+	sem := make(chan struct{}, 4)
 
 	for i, gn := range g.Nodes {
 		n := Node{
@@ -131,6 +184,26 @@ func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, 
 				n.Elapsed = Unknown[time.Duration]("拿不到开工时刻，无法算耗时")
 			}
 		}
+
+		// 第一步：投影新鲜且写明了状态，直接用，省一次查询。
+		if st, ok := p.States[gn.ID]; ok && !f.Stale {
+			n.State = Known(st)
+			r.remember(gn.ID, st)
+			out[i] = n
+			continue
+		}
+		// 第二步：之前问到过的终态，不会再变。
+		if st, ok := r.cached(gn.ID); ok {
+			n.State = Known(st)
+			out[i] = n
+			continue
+		}
+		// 第三步：只能去问控制器了。
+		if !probe {
+			n.State = Unknown[State]("查询中")
+			out[i] = n
+			continue
+		}
 		out[i] = n
 
 		wg.Add(1)
@@ -147,6 +220,7 @@ func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, 
 				return
 			}
 			out[idx].State = Known(state)
+			r.remember(id, state)
 		}(i, gn.ID)
 	}
 	wg.Wait()

@@ -17,6 +17,9 @@ const refreshInterval = 5 * time.Second
 
 type snapshotMsg projectctl.Snapshot
 
+// fastSnapshotMsg 是那份不问控制器的先行快照。
+type fastSnapshotMsg projectctl.Snapshot
+
 type tickMsg time.Time
 
 // Model 是 Work Deck 的界面状态。
@@ -36,14 +39,25 @@ func New(reader *projectctl.Reader) Model {
 	return Model{reader: reader, width: 100, height: 40, loading: true}
 }
 
-// Init 一上来就取一次，然后开始定时刷新。
+// Init 先取一份不问控制器的快照把屏幕点亮，再去补剩下的状态。
+//
+// 真实项目里逐个问节点状态要一两分钟，不能让人对着空屏等。投影里已经有等 owner
+// 的条目、运行中的 attempt 和预算，这些先画出来，其余节点标「查询中」慢慢填。
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetch(), tick())
+	return tea.Batch(m.fetchFast(), m.fetch(), tick())
+}
+
+func (m Model) fetchFast() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return fastSnapshotMsg(m.reader.FastSnapshot(ctx))
+	}
 }
 
 func (m Model) fetch() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		return snapshotMsg(m.reader.Snapshot(ctx))
 	}
@@ -66,6 +80,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.loading = true
 			return m, m.fetch()
+		}
+		return m, nil
+	case fastSnapshotMsg:
+		// 先行快照只在完整快照还没到的时候顶上，不覆盖已经查全的结果。
+		if m.loading {
+			m.snap = projectctl.Snapshot(msg)
 		}
 		return m, nil
 	case snapshotMsg:

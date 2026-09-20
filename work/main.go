@@ -23,6 +23,7 @@ func main() {
 		project = flag.String("project", ".", "Graph 项目根目录")
 		script  = flag.String("projectctl", "", "Graph 控制器脚本路径，留空则按工作区布局自动查找")
 		once    = flag.String("once", "", "只渲染一次就退出，值是输出宽度，例如 100")
+		fast    = flag.Bool("fast", false, "配合 --once：只用状态投影取数，不逐个问控制器，快但有节点会显示查询中")
 	)
 	flag.Parse()
 
@@ -49,9 +50,16 @@ func main() {
 		if _, err := fmt.Sscanf(*once, "%d", &width); err != nil {
 			fail("--once 需要一个宽度数字：%v", err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		// 节点多的项目要逐个问控制器，给足时间，别中途被砍。
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		fmt.Print(ui.Render(reader.Snapshot(ctx), width))
+		var snap projectctl.Snapshot
+		if *fast {
+			snap = reader.FastSnapshot(ctx)
+		} else {
+			snap = reader.Snapshot(ctx)
+		}
+		fmt.Print(ui.Render(snap, width))
 		return
 	}
 
