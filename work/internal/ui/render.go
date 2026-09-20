@@ -46,6 +46,8 @@ type Screen struct {
 	// 可选的模型与当前挑中的那个。
 	Candidates []dispatch.Model
 	Pick       int
+	// 这次挑模型是为了派评审。
+	PickingReviewer bool
 	// 上一次动作的结果，成败都显示。
 	Notice   string
 	NoticeOK bool
@@ -189,7 +191,11 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 
 	// 正在挑模型时，把候选摆出来。
 	if sc.Picking {
-		w("%s", styleSection.Render("挑一个模型派工"))
+		what := "挑一个模型派工"
+		if sc.PickingReviewer {
+			what = "挑一个模型派评审"
+		}
+		w("%s", styleSection.Render(what))
 		if len(sc.Candidates) == 0 {
 			w("  %s", styleAlert.Render("档位表里没有满足这个节点的模型"))
 		}

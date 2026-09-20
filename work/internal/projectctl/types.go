@@ -46,6 +46,11 @@ type Node struct {
 	RouteClass string
 	OwnerRole  string
 	DependsOn  []string
+	// 这个节点对评审的要求，派评审时照着它来。
+	ReviewRequired      bool
+	ReviewerRole        string
+	ReviewRouteClass    string
+	ReviewIndependent   bool
 
 	State Value[State]
 

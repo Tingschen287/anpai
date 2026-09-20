@@ -13,6 +13,12 @@ type Session struct {
 	GroupPath    string `json:"groupPath"`
 	ProjectPath  string `json:"projectPath"`
 	TmuxSession  string `json:"tmuxSession"`
+	// TmuxSocketName 是 tmux -L 选择器，上游在会话创建时定下。
+	//
+	// 它带 omitempty：用默认 tmux server 时值为空，字段整个不出现。
+	// 只看一个默认 socket 的会话就断言「接口不暴露它」是错的，
+	// 本包此前正是这么错过一次。
+	TmuxSocketName string `json:"tmuxSocketName"`
 	Command      string `json:"command"`
 	CreatedAt    string `json:"createdAt"`
 	LastAccessed string `json:"lastAccessedAt"`

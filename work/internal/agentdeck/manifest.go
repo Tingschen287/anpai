@@ -33,7 +33,7 @@ var LaunchFields = []string{
 // SessionFields 是 Work Deck 从 /api/sessions 与菜单事件的 session 对象里读的字段。
 var SessionFields = []string{
 	"id", "title", "tool", "status", "groupPath", "projectPath",
-	"tmuxSession", "command", "createdAt", "lastAccessedAt",
+	"tmuxSession", "tmuxSocketName", "command", "createdAt", "lastAccessedAt",
 }
 
 // MenuFields 是 Work Deck 从菜单事件顶层读的字段。

@@ -77,25 +77,28 @@ profile 上，一次覆盖掉 36 个生产会话。所以这里不接受默认�
 - Work Deck **只读**这个名字，从 `tmuxSession`（`/api/menu`）或 `tmux_session`
   （`list --json`）字段取，不自己按标题推算
 
-### socket 名：两个接口都不给
+### socket 名：有，但默认值时看不见
 
-n037 的规格原本假设 `tmux_socket_name` 可以从 `GET /api/menu` 取到。**实测不成立**：
-
-| 来源 | 有会话名 | 有 socket 名 |
+| 来源 | 会话名 | socket 名 |
 |---|---|---|
-| `GET /api/menu` 的 session | `tmuxSession` ✅ | ❌ |
-| `list --json` 的行 | `tmux_session` ✅ | ❌ |
+| `GET /api/menu` 的 session 对象 | `tmuxSession` | **`tmuxSocketName`** |
+| `list --json` 的行 | `tmux_session` | 无 |
 
-socket 名只存在于上游自己的配置里（`config.toml` 的 `[tmux].socket_name`，
-源码注释：`tmux -L value; "" means user's default server`），而本清单第 6 节
-明确规定 adapter 不读上游的配置文件。
+`tmuxSocketName` 是 `tmux -L` 的选择器，上游在会话创建时定下
+（`--tmux-socket` 参数优先，其次 `config.toml` 的 `[tmux].socket_name`，都没有则为空）。
 
-**处置**：
+**它带 `omitempty`。** 会话跑在默认 tmux server 上时值为空，整个字段不出现在 JSON 里。
 
-1. 主路径走 `session attach`——上游自己知道该会话在哪个 socket 上，不必猜。
-2. 直连 tmux 只在能**探测确认**时提供：用 `tmux has-session -t <name>` 问默认
-   server 有没有这个会话，有就直连，没有就说明它在别的 socket 上，
-   明确报「直连不可用，请走 session attach」，不去猜一个 socket 名。
+> 本包此前在这里错过一次：只探测了一个用默认 socket 的会话，没看到字段，
+> 就断言「两个接口都不暴露 socket 名」，并据此实现了一套探测默认 server 的绕行方案。
+> 独立评审读源码发现了 `omitempty`，随后用 `--tmux-socket` 造一个非默认 socket 的
+> 会话做阳性对照，字段立刻出现。
+>
+> 教训：**字段没出现，可能是它为空，不代表它不存在。** 判断「某个东西不存在」
+> 之前，先造一个它应该存在的场景看看。
+
+用法：`tmuxSocketName` 非空就带 `-L <socket>`，为空就是默认 server，不带。
+参数按 argv 逐个传，不拼 shell 字符串——socket 名来自上游数据。
 
 ### 嵌套
 

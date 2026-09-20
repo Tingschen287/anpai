@@ -29,13 +29,25 @@ type Graph struct {
 
 // GraphNode 是节点的静态契约部分。
 type GraphNode struct {
-	ID         string   `yaml:"id"`
-	Title      string   `yaml:"title"`
-	Kind       string   `yaml:"kind"`
-	Risk       string   `yaml:"risk"`
-	RouteClass string   `yaml:"route_class"`
-	OwnerRole  string   `yaml:"owner_role"`
-	DependsOn  []string `yaml:"depends_on"`
+	ID           string       `yaml:"id"`
+	Title        string       `yaml:"title"`
+	Kind         string       `yaml:"kind"`
+	Risk         string       `yaml:"risk"`
+	RouteClass   string       `yaml:"route_class"`
+	OwnerRole    string       `yaml:"owner_role"`
+	DependsOn    []string     `yaml:"depends_on"`
+	ReviewPolicy ReviewPolicy `yaml:"review_policy"`
+}
+
+// ReviewPolicy 是节点对评审的要求。
+//
+// 派评审时必须照着它来：要什么档位、评审者能不能是执行者本人。
+// 这些是 Graph 说了算的事，不是派工方随口定的。
+type ReviewPolicy struct {
+	Required             bool   `yaml:"required"`
+	ReviewerRole         string `yaml:"reviewer_role"`
+	RouteClass           string `yaml:"route_class"`
+	IndependentFromExec  bool   `yaml:"independent_from_executor"`
 }
 
 // LoadGraph 读项目的 work-graph.yaml。

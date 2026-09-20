@@ -77,8 +77,9 @@ func TestManualRefreshIsIgnoredWhileOneIsInFlight(t *testing.T) {
 // fakeDispatcher 记下被请求的派工，并按脚本回应。
 type fakeDispatcher struct {
 	cands []dispatch.Model
-	got   []dispatch.Request
-	err   error
+	got     []dispatch.Request
+	reviews []dispatch.ReviewRequest
+	err     error
 }
 
 func (f *fakeDispatcher) Candidates(required dispatch.RouteClass) []dispatch.Model {
@@ -89,6 +90,17 @@ func (f *fakeDispatcher) Candidates(required dispatch.RouteClass) []dispatch.Mod
 		}
 	}
 	return out
+}
+
+func (f *fakeDispatcher) DispatchReviewer(ctx context.Context, req dispatch.ReviewRequest) (binding.Binding, error) {
+	f.reviews = append(f.reviews, req)
+	if f.err != nil {
+		return binding.Binding{}, f.err
+	}
+	return binding.Binding{
+		NodeID: dispatch.ReviewerKey(req.NodeID), Attempt: req.Attempt,
+		SessionID: "review-sess", Model: req.ModelID, RouteClass: string(req.RequiredClass),
+	}, nil
 }
 
 func (f *fakeDispatcher) Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error) {
@@ -140,7 +152,7 @@ func TestDispatchRefusalsAlwaysExplainThemselves(t *testing.T) {
 			name:   "节点不是 ready",
 			nodes:  []projectctl.Node{nodeWith("n1", projectctl.StateAccepted, "frontier")},
 			disp:   fd,
-			expect: "只有 ready 的节点能派工",
+			expect: "submitted 的能派评审",
 		},
 		{
 			name:   "没配派工能力",
@@ -158,7 +170,7 @@ func TestDispatchRefusalsAlwaysExplainThemselves(t *testing.T) {
 			name:   "档位表里没有够格的模型",
 			nodes:  []projectctl.Node{nodeWith("n1", projectctl.StateReady, "human")},
 			disp:   fd,
-			expect: "拒绝降档派工",
+			expect: "拒绝降档",
 		},
 	}
 
@@ -493,5 +505,215 @@ func TestPreviewFailureIsShownNotSwallowed(t *testing.T) {
 	}
 	if !strings.Contains(after.notice, "会话没了") {
 		t.Errorf("没把错误说出来：%q", after.notice)
+	}
+}
+
+// 每一条用户看得见的拒绝，都必须给出可执行的下一步。
+//
+// 独立评审指出上一版只测了两条路径就宣称「每种拒绝都带出路」。这次把
+// attach 与 preview 的全部拒绝分支列成表，逐条要求提示里含一个动作。
+func TestEveryRefusalPathOffersANextStep(t *testing.T) {
+	// 能当作「下一步」的动作词。提示里至少要含其中之一。
+	actions := []string{"按 d", "按 r", "按 p", "↑↓", "config.json", "work-graph.yaml"}
+	hasAction := func(s string) bool {
+		for _, a := range actions {
+			if strings.Contains(s, a) {
+				return true
+			}
+		}
+		return false
+	}
+
+	fa := &fakeAttacher{}
+	okBinds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "s"}}
+
+	cases := []struct {
+		name  string
+		key   rune
+		build func() Model
+	}{
+		{"没有选中节点", 'a', func() Model {
+			m := modelWithAttacher(t, nil, fa, okBinds)
+			m.cursor = 0
+			return m
+		}},
+		{"未配置进入", 'a', func() Model {
+			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
+			m.attacher = nil
+			return m
+		}},
+		{"未配置绑定", 'a', func() Model {
+			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
+			m.bindings = nil
+			return m
+		}},
+		{"attempt 未知", 'a', func() Model {
+			return modelWithAttacher(t, []projectctl.Node{
+				nodeWith("n1", projectctl.StateRunning, "frontier")}, fa, okBinds)
+		}},
+		{"没有绑定", 'a', func() Model {
+			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
+		}},
+		{"绑定里没有会话号", 'a', func() Model {
+			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa,
+				fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1}})
+		}},
+		{"造不出进入命令", 'a', func() Model {
+			bad := &fakeAttacher{cmdErr: fmt.Errorf("上游不在")}
+			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, bad, okBinds)
+		}},
+		{"预览未配置", 'p', func() Model {
+			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
+			m.attacher = nil
+			return m
+		}},
+		{"预览没有绑定", 'p', func() Model {
+			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			after, _ := press(c.build(), c.key)
+			if after.notice == "" {
+				t.Fatal("拒绝了却什么都没说")
+			}
+			if after.noticeOK {
+				t.Error("拒绝不该标成成功")
+			}
+			if !hasAction(after.notice) {
+				t.Errorf("提示没给出下一步该干嘛：%q", after.notice)
+			}
+		})
+	}
+}
+
+// 预览取数失败也要带出路。
+func TestPreviewFailureOffersANextStep(t *testing.T) {
+	fa := &fakeAttacher{textErr: fmt.Errorf("会话没了")}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "s"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+	_, cmd := press(m, 'p')
+	next, _ := m.Update(cmd())
+	after := next.(Model)
+	if !strings.Contains(after.notice, "按 r") {
+		t.Errorf("预览失败没给下一步：%q", after.notice)
+	}
+}
+
+func submittedNode(id string, attempt int, actor string) projectctl.Node {
+	n := nodeWith(id, projectctl.StateSubmitted, "frontier")
+	n.Attempt = projectctl.Known(attempt)
+	n.Actor = projectctl.Known(actor)
+	n.ReviewRequired = true
+	n.ReviewRouteClass = "frontier"
+	n.ReviewIndependent = true
+	return n
+}
+
+// 从 submitted 节点派评审，这条路必须在界面上走得通。
+//
+// 上一版只有 domain 层的 DispatchReviewer，界面根本没有入口，
+// owner 选中 submitted 节点按 d 会被当成派工拒掉。
+func TestSubmittedNodeDispatchesAReviewerNotAnExecutor(t *testing.T) {
+	fd := &fakeDispatcher{cands: []dispatch.Model{
+		{ID: "claude-opus-5", Tool: "claude", Class: dispatch.Frontier},
+	}}
+	m := modelWithDispatcher(t, []projectctl.Node{
+		submittedNode("n1", 2, "executor-a1"),
+	}, fd)
+
+	m = pressD(m)
+	if m.mode != ModePickModel {
+		t.Fatalf("submitted 节点按 d 应当进入挑模型，实际提示：%q", m.notice)
+	}
+	if !m.pickingReviewer {
+		t.Error("这次挑模型是为了派评审，界面没记住")
+	}
+	// 屏幕上要说清楚在挑什么。
+	out := RenderScreen(m.snap, 100, Screen{
+		Picking: true, PickingReviewer: m.pickingReviewer, Candidates: m.candidates,
+	})
+	if !strings.Contains(out, "派评审") {
+		t.Error("挑模型时没说清是在派评审还是派工")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("回车应当真的派出评审")
+	}
+	msg := cmd()
+	done, ok := msg.(dispatchDoneMsg)
+	if !ok || !done.ok {
+		t.Fatalf("派评审不该失败：%+v", msg)
+	}
+	// 走的必须是评审那条路，不是派工那条。
+	if len(fd.reviews) != 1 {
+		t.Fatalf("应当派出一次评审，实际 %d 次", len(fd.reviews))
+	}
+	if len(fd.got) != 0 {
+		t.Error("submitted 节点不该走派工那条路")
+	}
+	r := fd.reviews[0]
+	if r.ExecutorActor != "executor-a1" {
+		t.Errorf("没把执行者是谁传下去：%q", r.ExecutorActor)
+	}
+	if !r.IndependentRequired {
+		t.Error("节点要求独立评审，这个要求没传下去")
+	}
+	if r.RequiredClass != dispatch.Frontier {
+		t.Errorf("评审档位是 %s，期望 frontier", r.RequiredClass)
+	}
+	_ = next
+}
+
+// 要求独立评审但不知道执行者是谁，就不能派。
+func TestReviewDispatchRefusedWhenExecutorUnknown(t *testing.T) {
+	fd := &fakeDispatcher{cands: []dispatch.Model{
+		{ID: "claude-opus-5", Tool: "claude", Class: dispatch.Frontier},
+	}}
+	n := submittedNode("n1", 2, "")
+	n.Actor = projectctl.Unknown[string]("状态投影已过期")
+	m := modelWithDispatcher(t, []projectctl.Node{n}, fd)
+
+	after := pressD(m)
+	if after.mode == ModePickModel {
+		t.Fatal("执行者未知时不该进入挑模型")
+	}
+	if !strings.Contains(after.notice, "无法判断独立性") {
+		t.Errorf("没说清为什么不派：%q", after.notice)
+	}
+	if !strings.Contains(after.notice, "按 r") {
+		t.Errorf("拒绝没给下一步：%q", after.notice)
+	}
+}
+
+// 不要求评审的节点，不给派。
+func TestNodeThatNeedsNoReviewIsNotDispatchable(t *testing.T) {
+	fd := &fakeDispatcher{cands: []dispatch.Model{{ID: "m", Tool: "t", Class: dispatch.Frontier}}}
+	n := submittedNode("n1", 1, "a1")
+	n.ReviewRequired = false
+	after := pressD(modelWithDispatcher(t, []projectctl.Node{n}, fd))
+	if after.mode == ModePickModel {
+		t.Error("不要求评审的节点不该进入挑模型")
+	}
+	if !strings.Contains(after.notice, "不要求评审") {
+		t.Errorf("没说清原因：%q", after.notice)
+	}
+}
+
+// 既不是 ready 也不是 submitted 的，两条都不给走，且要说清哪些能走。
+func TestOtherStatesExplainWhichStatesAreDispatchable(t *testing.T) {
+	fd := &fakeDispatcher{cands: []dispatch.Model{{ID: "m", Tool: "t", Class: dispatch.Frontier}}}
+	after := pressD(modelWithDispatcher(t, []projectctl.Node{
+		nodeWith("n1", projectctl.StateBlocked, "frontier"),
+	}, fd))
+	if after.mode == ModePickModel {
+		t.Error("blocked 节点不该能派")
+	}
+	for _, want := range []string{"ready", "submitted"} {
+		if !strings.Contains(after.notice, want) {
+			t.Errorf("没说清哪些状态能派（缺 %q）：%q", want, after.notice)
+		}
 	}
 }

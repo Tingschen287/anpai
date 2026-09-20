@@ -249,28 +249,6 @@ func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
 	}
 }
 
-// 直连 tmux 探不到 socket 时，要明说探不到，而不是猜一个。
-func TestDirectTmuxAttachRefusesWhenSessionIsNotOnDefaultServer(t *testing.T) {
-	c, err := NewClient("/bin/true", "_test", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = c.DirectTmuxAttachCommand(context.Background(), "这个会话一定不存在-"+randHex(t))
-	if err == nil {
-		t.Fatal("探不到的会话必须拒绝直连")
-	}
-	if !strings.Contains(err.Error(), "socket 名上游接口不暴露") {
-		t.Errorf("拒绝理由没说清为什么探不到：%v", err)
-	}
-	if !strings.Contains(err.Error(), "session attach") {
-		t.Error("拒绝时应当指出还有 session attach 这条路")
-	}
-
-	if _, err := c.DirectTmuxAttachCommand(context.Background(), ""); err == nil {
-		t.Error("没有 tmux 会话名时必须拒绝")
-	}
-}
-
 // 预览是只读的：命令里不许出现任何会改动会话的动作。
 func TestPreviewPathIsReadOnly(t *testing.T) {
 	src := readPackageSource(t)
@@ -293,4 +271,81 @@ func TestStripANSILeavesReadableText(t *testing.T) {
 func randHex(t *testing.T) string {
 	t.Helper()
 	return randomHex(t, 4)
+}
+
+// socket 名要真的传进 tmux 的参数里。
+//
+// 这个字段在上游带 omitempty：默认 server 时不出现，非默认时才有。
+// 本包此前只看了一个默认 socket 的会话就断言「接口不暴露它」，那是假阴性。
+func TestDirectAttachPassesSocketNameAsArgv(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 非默认 socket：必须带 -L。
+	cmd, err := c.DirectTmuxAttachCommand(context.Background(), "agentdeck_x_1", "mysock")
+	if err != nil {
+		t.Fatalf("有 socket 名时不该拒绝：%v", err)
+	}
+	want := []string{"tmux", "-L", "mysock", "attach-session", "-t", "agentdeck_x_1"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
+	}
+
+	// 默认 server：socket 名为空是正常的，不带 -L。
+	cmd, err = c.DirectTmuxAttachCommand(context.Background(), "agentdeck_y_2", "")
+	if err != nil {
+		t.Fatalf("默认 socket 时不该拒绝：%v", err)
+	}
+	want = []string{"tmux", "attach-session", "-t", "agentdeck_y_2"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
+	}
+
+	// 没有会话名才是真的没法直连。
+	if _, err := c.DirectTmuxAttachCommand(context.Background(), "", "sock"); err == nil {
+		t.Error("没有 tmux 会话名时必须拒绝")
+	}
+}
+
+// 菜单里要能取出 socket 名，取不到和为空是两回事。
+func TestTmuxTargetOfDistinguishesEmptySocketFromMissingSession(t *testing.T) {
+	ev := MenuEvent{Items: []MenuItem{
+		{Type: "session", Session: &Session{ID: "a", TmuxSession: "t_a", TmuxSocketName: "s1"}},
+		{Type: "session", Session: &Session{ID: "b", TmuxSession: "t_b"}},
+	}}
+	if sess, sock, ok := ev.TmuxTargetOf("a"); !ok || sess != "t_a" || sock != "s1" {
+		t.Errorf("取 a 得到 %q %q %v", sess, sock, ok)
+	}
+	// socket 为空表示默认 server，仍然是「取到了」。
+	if sess, sock, ok := ev.TmuxTargetOf("b"); !ok || sess != "t_b" || sock != "" {
+		t.Errorf("取 b 得到 %q %q %v", sess, sock, ok)
+	}
+	if _, _, ok := ev.TmuxTargetOf("不存在"); ok {
+		t.Error("不存在的会话不该报告取到了")
+	}
+}
+
+// 依赖清单必须列出 socket 名字段，否则下次又会有人以为它不存在。
+func TestManifestListsSocketName(t *testing.T) {
+	var listed bool
+	for _, f := range SessionFields {
+		if f == "tmuxSocketName" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("依赖清单没列 tmuxSocketName")
+	}
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := string(data)
+	if !strings.Contains(md, "tmuxSocketName") {
+		t.Error("MANIFEST.md 没提 tmuxSocketName")
+	}
+	if !strings.Contains(md, "omitempty") {
+		t.Error("MANIFEST.md 没说明该字段为什么会看不见")
+	}
 }

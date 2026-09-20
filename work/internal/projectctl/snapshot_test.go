@@ -2,6 +2,7 @@ package projectctl
 
 import (
 	"context"
+	"encoding/json"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -487,4 +488,79 @@ func TestCorruptCacheDoesNotBreakTheReader(t *testing.T) {
 	}
 	r := NewReader(root, scriptPath(t)).WithCache(cache)
 	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+}
+
+// failed 不是终态，绝不能被缓存成永久事实。
+//
+// 控制器的状态机允许 node_resumed 把 failed 转回 ready，也允许转成 superseded。
+// 把它当终态记住，节点恢复之后界面会一直显示旧的 failed——缓存说谎比慢更糟。
+func TestFailedIsNeverCachedBecauseItCanBeResumed(t *testing.T) {
+	if isFinal(StateFailed) {
+		t.Error("failed 被当成了终态，但控制器允许 node_resumed 把它转回 ready")
+	}
+	if !isFinal(StateAccepted) {
+		t.Error("accepted 应当是终态")
+	}
+	if !isFinal(StateSuperseded) {
+		t.Error("superseded 应当是终态")
+	}
+	for _, st := range []State{StateReady, StateRunning, StateSubmitted, StateRework, StateBlocked, StatePlanned} {
+		if isFinal(st) {
+			t.Errorf("%s 不该被当成终态", st)
+		}
+	}
+
+	// 端到端：夹具里 f05 是 failed，完整取数后不该进缓存文件。
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "f05_legacy_path") {
+		t.Error("failed 的节点被写进了缓存文件")
+	}
+	if !strings.Contains(string(data), "f01_collect_inputs") {
+		t.Error("accepted 的节点应当进缓存")
+	}
+}
+
+// 账本往前走过，整份缓存作废。
+//
+// 只要多了一条事件，就可能有节点被 resume 或 superseded 了。逐个判断不如
+// 全部重查来得诚实。
+func TestCacheIsDiscardedWhenTheLedgerMovedOn(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+
+	first := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, first.Snapshot(context.Background()))
+
+	// 把缓存记录的事件数改成一个旧值，模拟账本此后又长了。
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f cacheFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.Events <= 0 {
+		t.Fatal("缓存没记下账本事件数，无法判断新旧")
+	}
+	f.Events--
+	out, _ := json.Marshal(f)
+	if err := os.WriteFile(cache, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 事件数对不上，缓存整份不采用：先行快照里 accepted 应当又变回未知。
+	second := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := second.FastSnapshot(context.Background())
+	if st, ok := stateOf(snap, "f01_collect_inputs"); ok {
+		t.Errorf("账本已经走过，缓存仍被采用，拿到了 %s", st)
+	}
 }

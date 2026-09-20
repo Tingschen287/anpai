@@ -50,16 +50,21 @@ func NewReader(projectRoot, script string) *Reader {
 // 缓存坏了或读不出来不算错误：大不了重新问一遍，不能因为缓存而打不开。
 func (r *Reader) WithCache(path string) *Reader {
 	r.cachePath = path
-	r.loadCache()
 	return r
 }
 
 type cacheFile struct {
 	Project string           `json:"project"`
 	States  map[string]State `json:"states"`
+	// Events 是写缓存时账本里的事件条数。
+	//
+	// 缓存只在账本没往前走时才可信。账本一旦有新事件，任何一个节点都可能
+	// 已经改了状态，此时宁可全部重查，也不能拿旧值糊弄人。
+	Events int `json:"events"`
 }
 
-func (r *Reader) loadCache() {
+// loadCache 读缓存。events 是账本当前的事件条数，用来判断缓存还新不新。
+func (r *Reader) loadCache(events int) {
 	if r.cachePath == "" {
 		return
 	}
@@ -75,6 +80,11 @@ func (r *Reader) loadCache() {
 	if f.Project != r.root {
 		return
 	}
+	// 账本往前走过就整份作废。哪怕只多了一条事件，也可能是某个节点
+	// 被 resume 或 superseded 了，逐个判断不如全部重查来得诚实。
+	if events <= 0 || f.Events != events {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, st := range f.States {
@@ -84,13 +94,26 @@ func (r *Reader) loadCache() {
 	}
 }
 
+// dropStale 把与权威状态不符的缓存踢掉。
+//
+// 投影或控制器说某个节点不是终态了，缓存里那条就是错的，立刻扔掉，
+// 不要等到下次重启。
+func (r *Reader) dropStale(id string, actual State) {
+	if isFinal(actual) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.final, id)
+}
+
 // saveCache 把终态写盘。调用方不得持有锁。
-func (r *Reader) saveCache() {
+func (r *Reader) saveCache(events int) {
 	if r.cachePath == "" {
 		return
 	}
 	r.mu.Lock()
-	f := cacheFile{Project: r.root, States: make(map[string]State, len(r.final))}
+	f := cacheFile{Project: r.root, Events: events, States: make(map[string]State, len(r.final))}
 	for id, st := range r.final {
 		f.States[id] = st
 	}
@@ -123,9 +146,15 @@ func (r *Reader) saveCache() {
 }
 
 // isFinal 说明一个状态到没到头。到头的状态不会自己变回去，可以记住。
+//
+// failed **不在此列**。控制器的状态机允许 node_resumed 把 failed 转回 ready，
+// 也允许它转成 superseded（projectctl.py 的 TRANSITIONS）。把它当终态缓存，
+// 节点恢复之后界面会一直显示旧的 failed——缓存说谎比慢更糟。
+//
+// accepted 与 superseded 在该状态机里没有任何出边，是真正到头的。
 func isFinal(s State) bool {
 	switch s {
-	case StateAccepted, StateFailed, StateSuperseded:
+	case StateAccepted, StateSuperseded:
 		return true
 	}
 	return false
@@ -185,6 +214,9 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 	}
 	snap.Chain = chain
 
+	// 账本条数决定缓存还能不能信，所以体检之后才读缓存。
+	r.loadCache(chain.Events)
+
 	proj, err := LoadProjection(r.root)
 	if err != nil {
 		snap.Problems = append(snap.Problems, err.Error())
@@ -196,7 +228,7 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 	snap.Budgets = budgets(graph, proj, snap.Fresh)
 	if probe {
 		// 问过一轮就把终态记到盘上，下次开就不用再问了。
-		r.saveCache()
+		r.saveCache(chain.Events)
 	}
 	return snap
 }
@@ -243,6 +275,10 @@ func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, 
 		n := Node{
 			ID: gn.ID, Title: gn.Title, Kind: gn.Kind, Risk: gn.Risk,
 			RouteClass: gn.RouteClass, OwnerRole: gn.OwnerRole, DependsOn: gn.DependsOn,
+			ReviewRequired:    gn.ReviewPolicy.Required,
+			ReviewerRole:      gn.ReviewPolicy.ReviewerRole,
+			ReviewRouteClass:  gn.ReviewPolicy.RouteClass,
+			ReviewIndependent: gn.ReviewPolicy.IndependentFromExec,
 		}
 		// 投影里的补充信息，只有投影还新鲜时才采用。
 		if f.Stale {
@@ -279,6 +315,8 @@ func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, 
 		if st, ok := p.States[gn.ID]; ok && !f.Stale {
 			n.State = Known(st)
 			r.remember(gn.ID, st)
+			// 权威说它不是终态，缓存里若还留着旧的终态，当场扔掉。
+			r.dropStale(gn.ID, st)
 			out[i] = n
 			continue
 		}

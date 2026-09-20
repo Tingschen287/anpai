@@ -56,6 +56,8 @@ type Model struct {
 	// 当前节点可选的模型，按档位从低到高排。
 	candidates []dispatch.Model
 	pick       int
+	// 这次挑模型是为了派评审，不是派工。
+	pickingReviewer bool
 	// 上一次动作的结果，直接显示给人看，成功失败都显示。
 	notice   string
 	noticeOK bool
@@ -83,6 +85,7 @@ type Model struct {
 // 不会去动别的东西。
 type Dispatcher interface {
 	Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error)
+	DispatchReviewer(ctx context.Context, req dispatch.ReviewRequest) (binding.Binding, error)
 	Candidates(required dispatch.RouteClass) []dispatch.Model
 }
 
@@ -175,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case previewDoneMsg:
 		if msg.err != nil {
 			m.preview, m.previewFrom = "", ""
-			m.notice, m.noticeOK = "预览取不到："+msg.err.Error(), false
+			m.notice, m.noticeOK = "预览取不到："+msg.err.Error()+"。按 r 刷新，或确认那个会话还活着", false
 			return m, nil
 		}
 		m.preview, m.previewFrom = msg.text, msg.sessionID
@@ -238,6 +241,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q":
 			m.mode = ModeBrowse
+			m.pickingReviewer = false
 			m.notice = "已取消派工"
 			m.noticeOK = false
 			return m, nil
@@ -337,7 +341,7 @@ func (m Model) toggleDetail() (tea.Model, tea.Cmd) {
 // sessionOf 找出选中节点这次 attempt 跑在哪个会话里。
 func (m Model) sessionOf(node projectctl.Node) (string, error) {
 	if m.bindings == nil {
-		return "", fmt.Errorf("没有配置会话绑定：先派工才谈得上进入")
+		return "", fmt.Errorf("没有配置会话绑定。先写好 ~/.config/work-deck/config.json，再按 d 派工")
 	}
 	attempt, ok := node.Attempt.Get()
 	if !ok {
@@ -349,7 +353,7 @@ func (m Model) sessionOf(node projectctl.Node) (string, error) {
 			node.ID)
 	}
 	if b.SessionID == "" {
-		return "", fmt.Errorf("%s 的绑定里没有会话号", node.ID)
+		return "", fmt.Errorf("%s 的绑定里没有会话号，这条绑定是坏的。按 d 重新派一次工", node.ID)
 	}
 	return b.SessionID, nil
 }
@@ -358,11 +362,11 @@ func (m Model) sessionOf(node projectctl.Node) (string, error) {
 func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
 	if !ok {
-		m.notice, m.noticeOK = "没有选中任何节点", false
+		m.notice, m.noticeOK = "没有选中任何节点。用 ↑↓ 选一个再按键", false
 		return m, nil
 	}
 	if m.attacher == nil {
-		m.notice, m.noticeOK = "没有配置进入会话：需要先写好上游路径与 profile", false
+		m.notice, m.noticeOK = "没有配置进入会话。先写好 ~/.config/work-deck/config.json 里的 upstream_binary 与 profile", false
 		return m, nil
 	}
 	sessionID, err := m.sessionOf(node)
@@ -373,7 +377,7 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 
 	cmd, err := m.attacher.AttachCommand(context.Background(), sessionID)
 	if err != nil {
-		m.notice, m.noticeOK = "进不去："+err.Error(), false
+		m.notice, m.noticeOK = "进不去："+err.Error()+"。可以先按 p 看一眼画面", false
 		return m, nil
 	}
 	// 前缀键的事必须在进去之前讲：进去之后就看不见 Work Deck 了。
@@ -389,11 +393,11 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 func (m Model) beginPreview() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
 	if !ok {
-		m.notice, m.noticeOK = "没有选中任何节点", false
+		m.notice, m.noticeOK = "没有选中任何节点。用 ↑↓ 选一个再按键", false
 		return m, nil
 	}
 	if m.attacher == nil {
-		m.notice, m.noticeOK = "没有配置会话预览：需要先写好上游路径与 profile", false
+		m.notice, m.noticeOK = "没有配置会话预览。先写好 ~/.config/work-deck/config.json 里的 upstream_binary 与 profile", false
 		return m, nil
 	}
 	sessionID, err := m.sessionOf(node)
@@ -425,40 +429,70 @@ func (m Model) selected() (projectctl.Node, bool) {
 func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
 	if !ok {
-		m.notice = "没有选中任何节点"
+		m.notice = "没有选中任何节点。用 ↑↓ 选一个再按键"
 		m.noticeOK = false
 		return m, nil
 	}
 	if m.dispatcher == nil {
-		m.notice = "没有配置派工：需要先写好上游路径、profile 和模型档位表"
+		m.notice = "没有配置派工。先写好 ~/.config/work-deck/config.json 里的 upstream_binary、profile 和 models"
 		m.noticeOK = false
 		return m, nil
 	}
 	state, known := node.State.Get()
 	if !known {
-		m.notice = fmt.Sprintf("%s 的状态还不知道（%s），不派", node.ID, node.State.Reason())
-		m.noticeOK = false
-		return m, nil
-	}
-	if state != projectctl.StateReady {
-		m.notice = fmt.Sprintf("%s 现在是 %s，只有 ready 的节点能派工", node.ID, state)
-		m.noticeOK = false
-		return m, nil
-	}
-	if node.RouteClass == "" {
-		m.notice = fmt.Sprintf("%s 没写 route class，拒绝派工，不猜", node.ID)
+		m.notice = fmt.Sprintf("%s 的状态还不知道（%s），不派。等它查出来再按 d", node.ID, node.State.Reason())
 		m.noticeOK = false
 		return m, nil
 	}
 
-	cands := m.dispatcher.Candidates(dispatch.RouteClass(node.RouteClass))
+	// submitted 的节点派的是评审，不是执行者。这是两件事，别混。
+	reviewing := state == projectctl.StateSubmitted
+	if !reviewing && state != projectctl.StateReady {
+		m.notice = fmt.Sprintf("%s 现在是 %s。ready 的能派工，submitted 的能派评审，别的状态都不行",
+			node.ID, state)
+		m.noticeOK = false
+		return m, nil
+	}
+
+	required := node.RouteClass
+	if reviewing {
+		if !node.ReviewRequired {
+			m.notice = fmt.Sprintf("%s 不要求评审，不派", node.ID)
+			m.noticeOK = false
+			return m, nil
+		}
+		required = node.ReviewRouteClass
+		if required == "" {
+			m.notice = fmt.Sprintf("%s 没写评审要求的 route class，拒绝派评审，不猜。"+
+				"去 work-graph.yaml 补 review_policy.route_class", node.ID)
+			m.noticeOK = false
+			return m, nil
+		}
+		// 独立性要拿执行者是谁来判，判不了就不派。
+		if node.ReviewIndependent {
+			if _, ok := node.Actor.Get(); !ok {
+				m.notice = fmt.Sprintf("%s 要求独立评审，但不知道执行者是谁（%s），无法判断独立性。"+
+					"按 r 刷新，或确认状态投影是否过期", node.ID, node.Actor.Reason())
+				m.noticeOK = false
+				return m, nil
+			}
+		}
+	}
+	if required == "" {
+		m.notice = fmt.Sprintf("%s 没写 route class，拒绝派工，不猜。去 work-graph.yaml 补上", node.ID)
+		m.noticeOK = false
+		return m, nil
+	}
+
+	cands := m.dispatcher.Candidates(dispatch.RouteClass(required))
 	if len(cands) == 0 {
-		m.notice = fmt.Sprintf("档位表里没有能满足 %s 的模型，拒绝降档派工", node.RouteClass)
+		m.notice = fmt.Sprintf("档位表里没有能满足 %s 的模型，拒绝降档。去配置里补一个够档的模型", required)
 		m.noticeOK = false
 		return m, nil
 	}
 	m.candidates = cands
 	m.pick = 0
+	m.pickingReviewer = reviewing
 	m.mode = ModePickModel
 	m.notice = ""
 	return m, nil
@@ -477,6 +511,36 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		// ready 节点还没开工，这次派的就是第一次 attempt。
 		attempt = 1
 	}
+
+	if m.pickingReviewer {
+		executor, _ := node.Actor.Get()
+		rreq := dispatch.ReviewRequest{
+			NodeID:              node.ID,
+			Attempt:             attempt,
+			RequiredClass:       dispatch.RouteClass(node.ReviewRouteClass),
+			ModelID:             chosen.ID,
+			ExecutorActor:       executor,
+			ReviewerActor:       "work-deck-reviewer-" + chosen.ID,
+			IndependentRequired: node.ReviewIndependent,
+			ProjectPath:         m.snap.ProjectRoot,
+			Title:               node.ID + "-review",
+			DispatchedBy:        "work-deck",
+		}
+		d := m.dispatcher
+		m.pickingReviewer = false
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			b, err := d.DispatchReviewer(ctx, rreq)
+			if err != nil {
+				return dispatchDoneMsg{ok: false, text: "派评审被拒：" + err.Error()}
+			}
+			return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
+				"已为 %s attempt %d 派出评审 → 会话 %s（%s / %s）",
+				node.ID, b.Attempt, b.SessionID, b.Model, b.RouteClass)}
+		}
+	}
+
 	req := dispatch.Request{
 		NodeID:        node.ID,
 		Attempt:       attempt,
@@ -507,7 +571,8 @@ func (m Model) View() string {
 	}
 	return RenderScreen(m.snap, m.width, Screen{
 		Cursor:     m.cursor,
-		Picking:    m.mode == ModePickModel,
+		Picking:         m.mode == ModePickModel,
+		PickingReviewer: m.pickingReviewer,
 		Candidates: m.candidates,
 		Pick:       m.pick,
 		Notice:      m.notice,
