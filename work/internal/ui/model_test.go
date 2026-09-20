@@ -340,13 +340,13 @@ func TestAttachRefusalsExplainThemselves(t *testing.T) {
 			name:   "没有绑定会话",
 			nodes:  []projectctl.Node{runningNode("n1", 1)},
 			binds:  fakeBindings{},
-			expect: "没有绑定会话",
+			expect: "先按 d 派工",
 		},
 		{
 			name:   "attempt 未知",
 			nodes:  []projectctl.Node{nodeWith("n1", projectctl.StateRunning, "frontier")},
 			binds:  fakeBindings{},
-			expect: "不知道该进哪个会话",
+			expect: "先按 d 派工",
 		},
 	}
 	for _, c := range cases {
@@ -361,6 +361,10 @@ func TestAttachRefusalsExplainThemselves(t *testing.T) {
 			}
 			if !strings.Contains(after.notice, c.expect) {
 				t.Errorf("没说清原因，期望含 %q，实际 %q", c.expect, after.notice)
+			}
+			// 拒绝必须带出路。只说「不行」和按了没反应差不多。
+			if !strings.Contains(after.notice, "按 d") {
+				t.Errorf("拒绝没告诉人下一步该做什么：%q", after.notice)
 			}
 		})
 	}

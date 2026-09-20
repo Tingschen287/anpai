@@ -48,6 +48,10 @@ func main() {
 	}
 
 	reader := projectctl.NewReader(root, pc)
+	// 终态问过一次就记到盘上：真实项目首次要问近两分钟，第二次开就该是秒出。
+	if cacheDir, err := config.DefaultPath(); err == nil {
+		reader = reader.WithCache(filepath.Join(filepath.Dir(cacheDir), "node-states.json"))
+	}
 
 	// 派工能力是可选的：没配好就只看不派，按 d 时界面会说清楚缺什么。
 	dispatcher, dispatchErr := buildDispatcher(root)

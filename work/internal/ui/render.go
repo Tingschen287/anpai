@@ -52,6 +52,11 @@ type Screen struct {
 	// 会话画面的只读预览，以及它来自哪个会话。
 	Preview     string
 	PreviewFrom string
+	// 展开的完整理由，以及它属于哪个节点。
+	Detail   string
+	DetailOf string
+	// 是否把已验收的节点也列出来。
+	ShowAll bool
 }
 
 // Render 把快照画成一屏。width 是终端宽度。
@@ -96,39 +101,79 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	w("")
 
 	// 等 owner：这是唯一需要人立刻动手的一段，放在节点表之前。
+	//
+	// 一条一行。账本里的理由动辄几百字，整段铺开会把这一段变成一堵墙，
+	// 反而看不出谁在等你。完整内容按 Enter 展开。
 	waiting := s.WaitingOnOwner()
-	w("%s", styleSection.Render(fmt.Sprintf("等 owner 处理（%d）", len(waiting))))
-	if len(waiting) == 0 {
+	var todo, idle []projectctl.Node
+	for _, n := range waiting {
+		if needsNoAction(n.RequiredAction) {
+			idle = append(idle, n)
+		} else {
+			todo = append(todo, n)
+		}
+	}
+	w("%s", styleSection.Render(fmt.Sprintf("等你处理（%d）", len(todo))))
+	if len(todo) == 0 {
 		w("  %s", styleDim.Render("没有等你的条目"))
 	}
-	for _, n := range waiting {
+	for _, n := range todo {
 		st, _ := n.State.Get()
-		w("  %-10s %s", colorState(st), n.ID)
-		if n.Reason != "" {
-			w("             %s", styleDim.Render("因为："+clip(n.Reason, width-15)))
+		hint := actionHint(n.RequiredAction, 46)
+		if hint == "" {
+			hint = summarize(n.Reason, 46)
 		}
-		if n.RequiredAction != "" {
-			w("             %s", styleAlert.Render("要你做："+clip(n.RequiredAction, width-15)))
+		if hint == "" {
+			// 账本没写要做什么时，按状态给一句有用的，别甩个空。
+			switch st {
+			case projectctl.StateSubmitted:
+				hint = "等评审"
+			case projectctl.StateRework:
+				hint = "被打回，等重做"
+			default:
+				hint = styleDim.Render("账本里没写要做什么")
+			}
 		}
+		w("  %s %-38s %s", stateBadge(st), clip(n.ID, 38), hint)
 	}
+	if len(idle) > 0 {
+		w("  %s", styleDim.Render(fmt.Sprintf("另有 %d 条已归档终结，不用管：%s",
+			len(idle), strings.Join(idsOf(idle), "、"))))
+	}
+	w("  %s", styleDim.Render("Enter 展开选中项的完整理由"))
 	w("")
 
 	// 运行中：attempt 与已耗时。
 	running := s.Running()
-	w("%s", styleSection.Render(fmt.Sprintf("运行中（%d）", len(running))))
-	if len(running) == 0 {
-		w("  %s", styleDim.Render("没有节点在跑"))
+	if len(running) > 0 {
+		w("%s", styleSection.Render(fmt.Sprintf("运行中（%d）", len(running))))
+		for _, n := range running {
+			w("  %-38s attempt %-6s 已跑 %-10s %s",
+				clip(n.ID, 38), n.Attempt.String(), durationText(n.Elapsed), n.Actor.String())
+		}
+		w("")
 	}
-	for _, n := range running {
-		w("  %-34s attempt %-8s 已跑 %-10s %s",
-			clip(n.ID, 34), n.Attempt.String(), durationText(n.Elapsed), n.Actor.String())
-	}
-	w("")
 
 	// 全部节点。
+	//
+	// 默认只列还需要留意的：已验收的折叠成一行。43 行平铺等于没有重点，
+	// 而这块表盘的用处恰恰是让人一眼看出该看哪儿。按 Tab 全展开。
 	counts, unknown := s.Counts()
-	w("%s", styleSection.Render(fmt.Sprintf("全部节点（%d）%s", len(s.Nodes), countsText(counts, unknown))))
+	var done []projectctl.Node
+	keep := map[string]bool{}
+	for _, n := range s.Nodes {
+		st, known := n.State.Get()
+		if known && st == projectctl.StateAccepted && !sc.ShowAll {
+			done = append(done, n)
+			continue
+		}
+		keep[n.ID] = true
+	}
+	w("%s", styleSection.Render(fmt.Sprintf("节点（%d）%s", len(s.Nodes), countsText(counts, unknown))))
 	for i, n := range s.Nodes {
+		if !keep[n.ID] {
+			continue
+		}
 		marker := "  "
 		row := nodeRow(n, width)
 		if i == sc.Cursor {
@@ -136,6 +181,9 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 			row = styleTitle.Render(row)
 		}
 		w("%s%s", marker, row)
+	}
+	if len(done) > 0 {
+		w("  %s", styleDim.Render(fmt.Sprintf("另有 %d 个已验收，已折叠（Tab 展开）", len(done))))
 	}
 	w("")
 
@@ -155,6 +203,16 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 			w("%s%s", mark, line)
 		}
 		w("  %s", styleDim.Render("↑↓ 选，回车派工，Esc 取消"))
+		w("")
+	}
+
+	// 展开的完整理由。
+	if sc.Detail != "" {
+		w("%s", styleSection.Render("详情　"+styleDim.Render(sc.DetailOf)))
+		for _, ln := range wrapText(sc.Detail, width-4) {
+			w("  %s", ln)
+		}
+		w("  %s", styleDim.Render("Enter 收起"))
 		w("")
 	}
 
@@ -193,8 +251,57 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
-	w("%s", styleDim.Render("↑↓ 选节点，d 派工，a 进入会话，p 预览，r 刷新，q 退出。不写 Graph 账本。"))
+	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　p 预览　r 刷新　q 退出"))
+	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
+	w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
 	return b.String()
+}
+
+// stateBadge 是状态的短标记，带颜色，宽度统一，好让各行对齐。
+// wrapText 按宽度折行，中文按两格算。
+func wrapText(s string, width int) []string {
+	if width < 20 {
+		width = 20
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		line, w := "", 0
+		for _, r := range para {
+			rw := 1
+			if r > 0x2000 {
+				rw = 2
+			}
+			if w+rw > width {
+				out = append(out, line)
+				line, w = "", 0
+			}
+			line += string(r)
+			w += rw
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func stateBadge(st projectctl.State) string {
+	label := fmt.Sprintf("%-9s", st)
+	switch st {
+	case projectctl.StateBlocked, projectctl.StateFailed:
+		return styleAlert.Render(label)
+	case projectctl.StateSubmitted, projectctl.StateRework:
+		return styleTitle.Render(label)
+	}
+	return label
+}
+
+func idsOf(nodes []projectctl.Node) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.ID)
+	}
+	return out
 }
 
 func headline(s projectctl.Snapshot) string {

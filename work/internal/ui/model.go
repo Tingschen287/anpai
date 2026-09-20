@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,6 +66,11 @@ type Model struct {
 	// 预览内容，非空时占据屏幕下半部分。
 	preview     string
 	previewFrom string
+	// 展开的完整理由。
+	detail   string
+	detailOf string
+	// 是否把已验收的节点也列出来。
+	showAll bool
 	// inflight 表示上一轮取数还没回来。
 	// 真实项目上一次完整取数要近两分钟，而心跳是 5 秒一次；不挡一下的话，
 	// 取数会一轮压一轮，每一轮又各开几个控制器进程，很快就把机器占满。
@@ -273,17 +279,58 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.fetch()
 	case "d":
 		return m.beginDispatch()
+	case "enter":
+		return m.toggleDetail()
+	case "tab":
+		m.showAll = !m.showAll
+		return m, nil
 	case "a":
 		return m.beginAttach()
 	case "p":
 		return m.beginPreview()
 	case "esc":
-		if m.preview != "" {
+		switch {
+		case m.preview != "":
 			m.preview, m.previewFrom = "", ""
-			return m, nil
+		case m.detail != "":
+			m.detail, m.detailOf = "", ""
+		default:
+			return m, tea.Quit
 		}
-		return m, tea.Quit
+		return m, nil
 	}
+	return m, nil
+}
+
+// toggleDetail 展开或收起选中节点的完整理由。
+//
+// 摘要够日常扫一眼，但真要拍板时得看全文。全文很长，所以按需展开，
+// 不默认铺在屏幕上。
+func (m Model) toggleDetail() (tea.Model, tea.Cmd) {
+	if m.detail != "" {
+		m.detail, m.detailOf = "", ""
+		return m, nil
+	}
+	node, ok := m.selected()
+	if !ok {
+		return m, nil
+	}
+	var parts []string
+	if node.Reason != "" {
+		parts = append(parts, "因为：\n"+node.Reason)
+	}
+	if node.RequiredAction != "" {
+		parts = append(parts, "要你做：\n"+node.RequiredAction)
+	}
+	if node.LatestEvidence != "" && node.LatestEvidence != "none" {
+		parts = append(parts, "最新证据：\n"+node.LatestEvidence)
+	}
+	if len(parts) == 0 {
+		m.notice, m.noticeOK = node.ID+" 账本里没有额外说明", false
+		return m, nil
+	}
+	m.detail = strings.Join(parts, "\n\n")
+	m.detailOf = node.ID
 	return m, nil
 }
 
@@ -294,13 +341,12 @@ func (m Model) sessionOf(node projectctl.Node) (string, error) {
 	}
 	attempt, ok := node.Attempt.Get()
 	if !ok {
-		return "", fmt.Errorf("%s 的 attempt 还不知道（%s），不知道该进哪个会话",
-			node.ID, node.Attempt.Reason())
+		return "", fmt.Errorf("%s 还没开过工，没有会话可进。先按 d 派工", node.ID)
 	}
 	b, ok := m.bindings.Get(node.ID, attempt)
 	if !ok {
-		return "", fmt.Errorf("%s 的 attempt %d 没有绑定会话：这一轮不是从 Work Deck 派出去的",
-			node.ID, attempt)
+		return "", fmt.Errorf("%s 没有 Work Deck 派出的会话。先按 d 派工，再按 a 进去",
+			node.ID)
 	}
 	if b.SessionID == "" {
 		return "", fmt.Errorf("%s 的绑定里没有会话号", node.ID)
@@ -468,5 +514,8 @@ func (m Model) View() string {
 		NoticeOK:    m.noticeOK,
 		Preview:     m.preview,
 		PreviewFrom: m.previewFrom,
+		Detail:      m.detail,
+		DetailOf:    m.detailOf,
+		ShowAll:     m.showAll,
 	})
 }

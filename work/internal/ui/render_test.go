@@ -63,11 +63,22 @@ func sample() projectctl.Snapshot {
 func TestRenderShowsAllFourKindsOfInformation(t *testing.T) {
 	out := Render(sample(), 100)
 
-	// 一、每个节点连同它的状态。
-	for _, id := range []string{"n_accepted", "n_running", "n_submitted", "n_blocked", "n_failed", "n_ready", "n_planned"} {
+	// 一、每个节点连同它的状态。已验收的默认折叠——43 行平铺等于没有重点——
+	// 但折叠必须说出来，且 Tab 一按就全在。
+	for _, id := range []string{"n_running", "n_submitted", "n_blocked", "n_failed", "n_ready", "n_planned"} {
 		if !strings.Contains(out, id) {
 			t.Errorf("一屏里没有节点 %s", id)
 		}
+	}
+	if strings.Contains(out, "n_accepted") {
+		t.Error("已验收的节点默认不该占位置")
+	}
+	if !strings.Contains(out, "已折叠") {
+		t.Error("折叠了却没说，人会以为节点丢了")
+	}
+	all := RenderScreen(sample(), 100, Screen{Cursor: -1, ShowAll: true})
+	if !strings.Contains(all, "n_accepted") {
+		t.Error("Tab 展开后应当看得到已验收的节点")
 	}
 	for _, st := range []string{"accepted", "running", "submitted", "blocked", "failed", "ready", "planned"} {
 		if !strings.Contains(out, st) {
@@ -91,7 +102,7 @@ func TestRenderShowsAllFourKindsOfInformation(t *testing.T) {
 	}
 
 	// 四、等 owner 处理的条目，连同要他做什么。
-	if !strings.Contains(out, "等 owner 处理") {
+	if !strings.Contains(out, "等你处理") {
 		t.Error("没有等 owner 的分区")
 	}
 	if !strings.Contains(out, "owner 决定是否另开只读账号") {
@@ -164,29 +175,34 @@ func TestStaleProjectionIsCalledOutOnScreen(t *testing.T) {
 func TestFooterStatesWhatTheScreenCanAndCannotDo(t *testing.T) {
 	out := Render(sample(), 100)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	footer := lines[len(lines)-1]
+	// 屏幕最后两行是说明区：一行讲能按什么键，一行讲边界。
+	footer := strings.Join(lines[max(0, len(lines)-2):], "\n")
 
 	// 能做的：选节点、派工、进入会话、预览、刷新、退出。
-	for _, want := range []string{"d 派工", "a 进入会话", "p 预览", "r 刷新", "q 退出"} {
+	for _, want := range []string{"d 派工", "a 进入", "p 预览", "r 刷新", "q 退出"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("说明行里没讲 %q：%q", want, footer)
 		}
 	}
-	// 不能做的，必须明说，不能靠人猜。本轮起能接管终端了，但仍然不写账本。
-	for _, want := range []string{"不写 Graph 账本"} {
-		if !strings.Contains(footer, want) {
-			t.Errorf("说明行里没讲清楚边界 %q：%q", want, footer)
-		}
+	// 屏幕上必须有一处讲清楚不写账本这条边界，不必非在最后一行。
+	if !strings.Contains(out, "不写 Graph 账本") {
+		t.Error("屏幕上没有讲清楚「不写 Graph 账本」这条边界")
 	}
 }
 
 // 界面不该声称自己做了本轮做不到的事。
 func TestScreenNeverClaimsToAttachOrWriteLedger(t *testing.T) {
 	out := Render(sample(), 100)
-	for _, forbidden := range []string{"已接管", "已发送", "写入账本", "已验收"} {
+	// 禁的是界面自称干了什么，不是陈述节点的状态。
+	// 「另有 27 个已验收」说的是那些节点的状态，不是说这块表盘验收了谁。
+	for _, forbidden := range []string{"已接管", "已发送", "写入账本", "本界面已验收", "我已验收"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("界面上出现了本轮做不到的动作字样：%s", forbidden)
 		}
+	}
+	// 反过来，它必须明说自己不写账本。
+	if !strings.Contains(out, "不写 Graph 账本") {
+		t.Error("界面没有声明自己不写账本")
 	}
 }
 

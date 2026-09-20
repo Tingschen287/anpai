@@ -431,3 +431,60 @@ func stateOf(s Snapshot, id string) (State, bool) {
 	}
 	return "", false
 }
+
+// 终态问过一次就该记到盘上，重开不必再问。
+//
+// 真实项目上首次要问近两分钟，只记在内存里等于每次开都重来一遍。
+func TestFinalStatesPersistAcrossProcessRestart(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+
+	// 第一个进程：完整问一轮，终态落盘。
+	first := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, first.Snapshot(context.Background()))
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("完整取数后缓存没落盘：%v", err)
+	}
+
+	// 第二个进程：只做先行取数，不问任何单节点，accepted 也该直接有。
+	second := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := second.FastSnapshot(context.Background())
+	st, ok := stateOf(snap, "f01_collect_inputs")
+	if !ok {
+		t.Fatal("重开后先行快照仍不知道 accepted 节点的状态，缓存没起作用")
+	}
+	if st != StateAccepted {
+		t.Errorf("缓存读出的状态是 %s，期望 accepted", st)
+	}
+
+	// 非终态不该被缓存：planned 会变，记住它就会说谎。
+	if st, ok := stateOf(snap, "f07_ship_result"); ok {
+		t.Errorf("planned 不是终态，不该进缓存，却拿到了 %s", st)
+	}
+}
+
+// 缓存是别的项目的就不能用，否则会把状态张冠李戴。
+func TestCacheFromAnotherProjectIsIgnored(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	if err := os.WriteFile(cache, []byte(
+		`{"project":"/某个别的项目","states":{"f01_collect_inputs":"accepted"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := r.FastSnapshot(context.Background())
+	if _, ok := stateOf(snap, "f01_collect_inputs"); ok {
+		t.Error("别的项目的缓存被当成了本项目的")
+	}
+}
+
+// 缓存坏了不能让界面打不开：大不了重新问一遍。
+func TestCorruptCacheDoesNotBreakTheReader(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	if err := os.WriteFile(cache, []byte("{这不是 JSON"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+}

@@ -2,7 +2,10 @@ package projectctl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -25,6 +28,8 @@ type Reader struct {
 
 	mu    sync.Mutex
 	final map[string]State
+	// 终态缓存的落盘位置。空串表示只在内存里记，不持久化。
+	cachePath string
 }
 
 // NewReader 按项目根构造。script 是 projectctl.py 的路径。
@@ -33,6 +38,87 @@ func NewReader(projectRoot, script string) *Reader {
 		client: NewClient(projectRoot, script),
 		root:   projectRoot,
 		final:  map[string]State{},
+	}
+}
+
+// WithCache 让终态缓存落盘。
+//
+// accepted / failed / superseded 是终态，不会再变回去。只记在内存里的话，
+// 每次重开都要把几十个节点重新问一遍，真实项目上那是近两分钟的等待。
+// 存到盘上，第二次打开就是秒出。
+//
+// 缓存坏了或读不出来不算错误：大不了重新问一遍，不能因为缓存而打不开。
+func (r *Reader) WithCache(path string) *Reader {
+	r.cachePath = path
+	r.loadCache()
+	return r
+}
+
+type cacheFile struct {
+	Project string           `json:"project"`
+	States  map[string]State `json:"states"`
+}
+
+func (r *Reader) loadCache() {
+	if r.cachePath == "" {
+		return
+	}
+	data, err := os.ReadFile(r.cachePath)
+	if err != nil {
+		return
+	}
+	var f cacheFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return
+	}
+	// 缓存是按项目存的，换了项目就不能用。
+	if f.Project != r.root {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, st := range f.States {
+		if isFinal(st) {
+			r.final[id] = st
+		}
+	}
+}
+
+// saveCache 把终态写盘。调用方不得持有锁。
+func (r *Reader) saveCache() {
+	if r.cachePath == "" {
+		return
+	}
+	r.mu.Lock()
+	f := cacheFile{Project: r.root, States: make(map[string]State, len(r.final))}
+	for id, st := range r.final {
+		f.States[id] = st
+	}
+	r.mu.Unlock()
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(r.cachePath), 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(r.cachePath), ".states-*.tmp")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return
+	}
+	if err := os.Rename(name, r.cachePath); err != nil {
+		os.Remove(name)
 	}
 }
 
@@ -108,6 +194,10 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 
 	snap.Nodes = r.nodes(ctx, graph, proj, snap.Fresh, probe, &snap.Problems)
 	snap.Budgets = budgets(graph, proj, snap.Fresh)
+	if probe {
+		// 问过一轮就把终态记到盘上，下次开就不用再问了。
+		r.saveCache()
+	}
 	return snap
 }
 
