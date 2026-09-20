@@ -25,15 +25,45 @@ import (
 //
 // 这个清单就是静态检查的依据：包内不得出现清单以外的子命令，
 // 包外不得出现任何一条。
-var Subcommands = []string{"launch", "web"}
+// 带空格的条目是二级子命令，必须整条匹配。
+//
+// 只写 "session" 是不够的：那样 session stop / remove / kill / restart 会一并
+// 放行，而 Work Deck 没有杀掉别人会话的道理。白名单精确到它真正要用的那两条。
+var Subcommands = []string{"launch", "web", "session attach", "session output"}
 
-func isAllowedSubcommand(name string) bool {
+// isAllowedSubcommand 按整条命令路径匹配。
+//
+// parts 是子命令层级，例如 ["session","output"]。多余的参数不参与匹配。
+func isAllowedSubcommand(parts ...string) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	one := parts[0]
+	two := ""
+	if len(parts) > 1 {
+		two = parts[0] + " " + parts[1]
+	}
 	for _, s := range Subcommands {
-		if s == name {
+		if s == one {
+			return true
+		}
+		if two != "" && s == two {
 			return true
 		}
 	}
 	return false
+}
+
+// depthOf 返回某个一级子命令需要匹配几层。
+//
+// session 这种带危险兄弟命令的，必须连第二级一起看；launch / web 没有子命令。
+func depthOf(first string) int {
+	for _, s := range Subcommands {
+		if strings.Contains(s, " ") && strings.HasPrefix(s, first+" ") {
+			return 2
+		}
+	}
+	return 1
 }
 
 // ErrSubcommandNotAllowed 表示有人想通过本包跑一条清单之外的上游子命令。
@@ -97,8 +127,13 @@ func (c *Client) env() []string {
 
 // exec 跑一条上游子命令，返回标准输出。
 func (c *Client) exec(ctx context.Context, sub string, args ...string) ([]byte, error) {
-	if !isAllowedSubcommand(sub) {
-		return nil, &ErrSubcommandNotAllowed{Subcommand: sub}
+	// session 这类带危险兄弟命令的，要连第二级一起核。
+	parts := []string{sub}
+	if depthOf(sub) == 2 && len(args) > 0 {
+		parts = append(parts, args[0])
+	}
+	if !isAllowedSubcommand(parts...) {
+		return nil, &ErrSubcommandNotAllowed{Subcommand: strings.Join(parts, " ")}
 	}
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc

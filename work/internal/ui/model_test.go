@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -265,5 +267,227 @@ func TestEscapeCancelsAndSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(after.notice, "已取消") {
 		t.Errorf("取消了却没说一声：%q", after.notice)
+	}
+}
+
+// fakeAttacher 记下被请求的会话，按脚本回应。
+type fakeAttacher struct {
+	attached []string
+	previews []string
+	cmdErr   error
+	text     string
+	textErr  error
+	advice   string
+}
+
+func (f *fakeAttacher) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	f.attached = append(f.attached, sessionID)
+	if f.cmdErr != nil {
+		return nil, f.cmdErr
+	}
+	return exec.Command("true"), nil
+}
+
+func (f *fakeAttacher) PaneOutputPlain(ctx context.Context, sessionID string) (string, error) {
+	f.previews = append(f.previews, sessionID)
+	return f.text, f.textErr
+}
+
+func (f *fakeAttacher) NestingAdvice() string {
+	if f.advice == "" {
+		return "进入后按 C-b d 退出会话。"
+	}
+	return f.advice
+}
+
+// fakeBindings 是一张写死的绑定表。
+type fakeBindings map[string]binding.Binding
+
+func (b fakeBindings) Get(nodeID string, attempt int) (binding.Binding, bool) {
+	v, ok := b[fmt.Sprintf("%s#%d", nodeID, attempt)]
+	return v, ok
+}
+
+func runningNode(id string, attempt int) projectctl.Node {
+	n := nodeWith(id, projectctl.StateRunning, "frontier")
+	n.Attempt = projectctl.Known(attempt)
+	return n
+}
+
+func modelWithAttacher(t *testing.T, nodes []projectctl.Node, a Attacher, b Bindings) Model {
+	t.Helper()
+	m := New(nil).WithAttacher(a, b)
+	m.snap = projectctl.Snapshot{Nodes: nodes, ProjectRoot: "/tmp/proj"}
+	m.inflight, m.loading = false, false
+	return m
+}
+
+func press(m Model, r rune) (Model, tea.Cmd) {
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	return next.(Model), cmd
+}
+
+// 没派过工的节点进不去，而且要说清为什么，不能按了没反应。
+func TestAttachRefusalsExplainThemselves(t *testing.T) {
+	fa := &fakeAttacher{}
+	cases := []struct {
+		name   string
+		nodes  []projectctl.Node
+		binds  Bindings
+		expect string
+	}{
+		{
+			name:   "没有绑定会话",
+			nodes:  []projectctl.Node{runningNode("n1", 1)},
+			binds:  fakeBindings{},
+			expect: "没有绑定会话",
+		},
+		{
+			name:   "attempt 未知",
+			nodes:  []projectctl.Node{nodeWith("n1", projectctl.StateRunning, "frontier")},
+			binds:  fakeBindings{},
+			expect: "不知道该进哪个会话",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := modelWithAttacher(t, c.nodes, fa, c.binds)
+			after, cmd := press(m, 'a')
+			if cmd != nil {
+				t.Error("被拒绝时不该真的去交出终端")
+			}
+			if after.noticeOK {
+				t.Error("拒绝不该标成成功")
+			}
+			if !strings.Contains(after.notice, c.expect) {
+				t.Errorf("没说清原因，期望含 %q，实际 %q", c.expect, after.notice)
+			}
+		})
+	}
+}
+
+// 没配进入能力时，按 a 要说缺什么。
+func TestAttachWithoutAttacherSaysWhatIsMissing(t *testing.T) {
+	m := New(nil)
+	m.snap = projectctl.Snapshot{Nodes: []projectctl.Node{runningNode("n1", 1)}}
+	m.inflight, m.loading = false, false
+	after, cmd := press(m, 'a')
+	if cmd != nil {
+		t.Error("没配进入能力时不该交出终端")
+	}
+	if !strings.Contains(after.notice, "没有配置进入会话") {
+		t.Errorf("没说清缺什么：%q", after.notice)
+	}
+}
+
+// 正常进入：要先把前缀键的事讲清楚，再交出终端。
+func TestAttachTellsAboutPrefixKeyBeforeHandingOverTheTerminal(t *testing.T) {
+	fa := &fakeAttacher{advice: "两层 tmux，按两次 C-b"}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "sess-7"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+
+	after, cmd := press(m, 'a')
+	if cmd == nil {
+		t.Fatal("正常情况应当交出终端")
+	}
+	if len(fa.attached) != 1 || fa.attached[0] != "sess-7" {
+		t.Errorf("进错了会话：%v", fa.attached)
+	}
+	// 进去之后就看不见 Work Deck 了，所以话必须在进去之前说。
+	if !strings.Contains(after.notice, "按两次 C-b") {
+		t.Errorf("进入前没讲前缀键：%q", after.notice)
+	}
+	out := RenderScreen(after.snap, 100, Screen{Notice: after.notice, NoticeOK: after.noticeOK})
+	if !strings.Contains(out, "按两次 C-b") {
+		t.Error("前缀键提示没画到屏幕上")
+	}
+}
+
+// 从会话回来要刷新状态，不能停在进去之前那一刻。
+func TestReturningFromSessionRefreshesState(t *testing.T) {
+	fa := &fakeAttacher{}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "sess-7"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+
+	next, cmd := m.Update(attachDoneMsg{sessionID: "sess-7"})
+	after := next.(Model)
+	if cmd == nil {
+		t.Error("回来后应当重取一次状态")
+	}
+	if !after.inflight {
+		t.Error("重取应当登记在途")
+	}
+	if !strings.Contains(after.notice, "已从会话 sess-7 返回") {
+		t.Errorf("没说清已经回来了：%q", after.notice)
+	}
+	if !after.noticeOK {
+		t.Error("正常返回不该标成失败")
+	}
+}
+
+func TestReturningWithErrorSaysSo(t *testing.T) {
+	fa := &fakeAttacher{}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "s"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+	next, _ := m.Update(attachDoneMsg{sessionID: "s", err: fmt.Errorf("终端炸了")})
+	after := next.(Model)
+	if after.noticeOK {
+		t.Error("进入出错不该标成成功")
+	}
+	if !strings.Contains(after.notice, "终端炸了") {
+		t.Errorf("没把错误说出来：%q", after.notice)
+	}
+}
+
+// 预览是只读的，画面要显示出来，并且标明只读。
+func TestPreviewShowsPaneTextAndSaysItIsReadOnly(t *testing.T) {
+	fa := &fakeAttacher{text: "第一行\n第二行\n第三行"}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "sess-9"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+
+	_, cmd := press(m, 'p')
+	if cmd == nil {
+		t.Fatal("按 p 应当去取预览")
+	}
+	msg := cmd()
+	done, ok := msg.(previewDoneMsg)
+	if !ok {
+		t.Fatalf("应当回报预览结果，实际是 %T", msg)
+	}
+	if done.err != nil {
+		t.Fatalf("预览不该出错：%v", done.err)
+	}
+	next, _ := m.Update(done)
+	after := next.(Model)
+	if after.preview == "" {
+		t.Fatal("预览内容没存下来")
+	}
+
+	out := RenderScreen(after.snap, 100, Screen{
+		Preview: after.preview, PreviewFrom: after.previewFrom,
+	})
+	for _, want := range []string{"第三行", "只读", "不接管", "sess-9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("预览画面里缺 %q", want)
+		}
+	}
+	// 预览不该触发任何进入动作。
+	if len(fa.attached) != 0 {
+		t.Error("预览不该接管会话")
+	}
+}
+
+func TestPreviewFailureIsShownNotSwallowed(t *testing.T) {
+	fa := &fakeAttacher{textErr: fmt.Errorf("会话没了")}
+	binds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "s"}}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, binds)
+	_, cmd := press(m, 'p')
+	next, _ := m.Update(cmd())
+	after := next.(Model)
+	if after.preview != "" {
+		t.Error("取失败时不该留下旧预览")
+	}
+	if !strings.Contains(after.notice, "会话没了") {
+		t.Errorf("没把错误说出来：%q", after.notice)
 	}
 }

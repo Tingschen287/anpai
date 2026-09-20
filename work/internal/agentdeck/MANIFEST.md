@@ -13,8 +13,14 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 |---|---|---|
 | `launch` | 派工：建会话、起会话、可选发首条消息 | `-c`（工具）、`--model`（模型 ID）、`--json`、`-t`（标题）、`-g`（分组）、`-m`（首条消息）、`--no-wait` |
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
+| `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
+| `session output` | 只读预览会话当前画面 | `-pane` |
 
 清单之外的子命令，adapter 会直接拒绝执行（`ErrSubcommandNotAllowed`）。
+
+**白名单精确到第二级。** 只写 `session` 会把 `session stop` / `remove` / `restart` /
+`archive` / `fork` / `set` 一并放行，而 Work Deck 没有杀掉或改掉别人会话的道理。
+`TestDangerousSessionSubcommandsAreRefused` 逐条盯着这些命令被拒。
 
 ## 2. HTTP 端点
 
@@ -64,6 +70,53 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 profile 上，一次覆盖掉 36 个生产会话。所以这里不接受默认值。
 
 ## 5. tmux 约定
+
+### 会话名
+
+- 形如 `agentdeck_<title>_<hash>`，由上游生成
+- Work Deck **只读**这个名字，从 `tmuxSession`（`/api/menu`）或 `tmux_session`
+  （`list --json`）字段取，不自己按标题推算
+
+### socket 名：两个接口都不给
+
+n037 的规格原本假设 `tmux_socket_name` 可以从 `GET /api/menu` 取到。**实测不成立**：
+
+| 来源 | 有会话名 | 有 socket 名 |
+|---|---|---|
+| `GET /api/menu` 的 session | `tmuxSession` ✅ | ❌ |
+| `list --json` 的行 | `tmux_session` ✅ | ❌ |
+
+socket 名只存在于上游自己的配置里（`config.toml` 的 `[tmux].socket_name`，
+源码注释：`tmux -L value; "" means user's default server`），而本清单第 6 节
+明确规定 adapter 不读上游的配置文件。
+
+**处置**：
+
+1. 主路径走 `session attach`——上游自己知道该会话在哪个 socket 上，不必猜。
+2. 直连 tmux 只在能**探测确认**时提供：用 `tmux has-session -t <name>` 问默认
+   server 有没有这个会话，有就直连，没有就说明它在别的 socket 上，
+   明确报「直连不可用，请走 session attach」，不去猜一个 socket 名。
+
+### 嵌套
+
+Work Deck 常开在 tmux 窗格里，进入会话就是两层。tmux 默认拒绝：
+
+```
+sessions should be nested with care, unset $TMUX to force
+```
+
+adapter 的 `prepareNested` 在检测到自己处于 tmux 内时，把 `TMUX` 与 `TMUX_PANE`
+从子进程环境中去掉，强制嵌套。退出内层后回到外层，外层会话不受影响。
+捕获证据见交付物 `nested-tmux-capture.md`。
+
+前缀键在嵌套下会被外层先截获，真人需要按两次。这一点在进入**之前**提示，
+因为进去之后就看不到 Work Deck 的界面了。
+
+## 5b. 不发按键
+
+进去之后是人在操作真实 CLI。Work Deck 不替他敲任何键：包内没有 `send-keys`，
+测试 `TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着这条。
+
 
 - 会话名形如 `agentdeck_<title>_<hash>`，由上游生成
 - Work Deck **只读**这个名字，从 `tmuxSession` 字段取，不自己按标题推算

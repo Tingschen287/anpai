@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,9 +55,16 @@ type Model struct {
 	// 当前节点可选的模型，按档位从低到高排。
 	candidates []dispatch.Model
 	pick       int
-	// 上一次派工的结果，直接显示给人看，成功失败都显示。
+	// 上一次动作的结果，直接显示给人看，成功失败都显示。
 	notice   string
 	noticeOK bool
+
+	// 进入会话与预览。没配置时为 nil，按键会说清楚缺什么。
+	attacher Attacher
+	bindings Bindings
+	// 预览内容，非空时占据屏幕下半部分。
+	preview     string
+	previewFrom string
 	// inflight 表示上一轮取数还没回来。
 	// 真实项目上一次完整取数要近两分钟，而心跳是 5 秒一次；不挡一下的话，
 	// 取数会一轮压一轮，每一轮又各开几个控制器进程，很快就把机器占满。
@@ -70,6 +78,31 @@ type Model struct {
 type Dispatcher interface {
 	Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error)
 	Candidates(required dispatch.RouteClass) []dispatch.Model
+}
+
+// Attacher 是界面用到的「进入会话」与「瞄一眼」两件事。
+//
+// 收窄成接口，界面测试不必牵扯真实上游；也一眼看得出界面只会进入和预览，
+// 不会去停会话、删会话。
+type Attacher interface {
+	// AttachCommand 造一条进入会话的命令，但不执行——执行要由界面挂起自己之后做。
+	AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
+	// PaneOutputPlain 取会话当前画面的纯文本，只读，不接管。
+	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
+	// NestingAdvice 是进去之前要讲清楚的前缀键用法。
+	NestingAdvice() string
+}
+
+// Bindings 让界面知道某个节点的某次 attempt 跑在哪个会话里。
+type Bindings interface {
+	Get(nodeID string, attempt int) (binding.Binding, bool)
+}
+
+// WithAttacher 给界面接上进入与预览能力。
+func (m Model) WithAttacher(a Attacher, b Bindings) Model {
+	m.attacher = a
+	m.bindings = b
+	return m
 }
 
 // WithDispatcher 给界面接上派工能力。
@@ -121,6 +154,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.onKey(msg)
+	case attachDoneMsg:
+		// 回来了。状态不能停在进去之前，立刻重取一次。
+		if msg.err != nil {
+			m.notice, m.noticeOK = "从会话返回，但进入过程报错："+msg.err.Error(), false
+		} else {
+			m.notice, m.noticeOK = "已从会话 "+msg.sessionID+" 返回", true
+		}
+		if !m.inflight {
+			m.inflight = true
+			return m, m.fetch()
+		}
+		return m, nil
+	case previewDoneMsg:
+		if msg.err != nil {
+			m.preview, m.previewFrom = "", ""
+			m.notice, m.noticeOK = "预览取不到："+msg.err.Error(), false
+			return m, nil
+		}
+		m.preview, m.previewFrom = msg.text, msg.sessionID
+		m.notice, m.noticeOK = "", false
+		return m, nil
 	case dispatchDoneMsg:
 		m.mode = ModeBrowse
 		m.notice = msg.text
@@ -151,6 +205,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.fetch(), tick())
 	}
 	return m, nil
+}
+
+// attachDoneMsg 是从会话里回来了。
+type attachDoneMsg struct {
+	sessionID string
+	err       error
+}
+
+// previewDoneMsg 是一次只读预览的结果。
+type previewDoneMsg struct {
+	sessionID string
+	text      string
+	err       error
 }
 
 // dispatchDoneMsg 是一次派工的结局，成败都要说出来。
@@ -185,7 +252,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "q", "esc", "ctrl+c":
+	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
 		if m.cursor > 0 {
@@ -206,8 +273,95 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.fetch()
 	case "d":
 		return m.beginDispatch()
+	case "a":
+		return m.beginAttach()
+	case "p":
+		return m.beginPreview()
+	case "esc":
+		if m.preview != "" {
+			m.preview, m.previewFrom = "", ""
+			return m, nil
+		}
+		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// sessionOf 找出选中节点这次 attempt 跑在哪个会话里。
+func (m Model) sessionOf(node projectctl.Node) (string, error) {
+	if m.bindings == nil {
+		return "", fmt.Errorf("没有配置会话绑定：先派工才谈得上进入")
+	}
+	attempt, ok := node.Attempt.Get()
+	if !ok {
+		return "", fmt.Errorf("%s 的 attempt 还不知道（%s），不知道该进哪个会话",
+			node.ID, node.Attempt.Reason())
+	}
+	b, ok := m.bindings.Get(node.ID, attempt)
+	if !ok {
+		return "", fmt.Errorf("%s 的 attempt %d 没有绑定会话：这一轮不是从 Work Deck 派出去的",
+			node.ID, attempt)
+	}
+	if b.SessionID == "" {
+		return "", fmt.Errorf("%s 的绑定里没有会话号", node.ID)
+	}
+	return b.SessionID, nil
+}
+
+// beginAttach 把终端交给选中节点的会话。
+func (m Model) beginAttach() (tea.Model, tea.Cmd) {
+	node, ok := m.selected()
+	if !ok {
+		m.notice, m.noticeOK = "没有选中任何节点", false
+		return m, nil
+	}
+	if m.attacher == nil {
+		m.notice, m.noticeOK = "没有配置进入会话：需要先写好上游路径与 profile", false
+		return m, nil
+	}
+	sessionID, err := m.sessionOf(node)
+	if err != nil {
+		m.notice, m.noticeOK = err.Error(), false
+		return m, nil
+	}
+
+	cmd, err := m.attacher.AttachCommand(context.Background(), sessionID)
+	if err != nil {
+		m.notice, m.noticeOK = "进不去："+err.Error(), false
+		return m, nil
+	}
+	// 前缀键的事必须在进去之前讲：进去之后就看不见 Work Deck 了。
+	m.notice = m.attacher.NestingAdvice()
+	m.noticeOK = true
+	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return attachDoneMsg{sessionID: sessionID, err: err}
+	})
+}
+
+// beginPreview 瞄一眼选中节点的会话，不接管。
+func (m Model) beginPreview() (tea.Model, tea.Cmd) {
+	node, ok := m.selected()
+	if !ok {
+		m.notice, m.noticeOK = "没有选中任何节点", false
+		return m, nil
+	}
+	if m.attacher == nil {
+		m.notice, m.noticeOK = "没有配置会话预览：需要先写好上游路径与 profile", false
+		return m, nil
+	}
+	sessionID, err := m.sessionOf(node)
+	if err != nil {
+		m.notice, m.noticeOK = err.Error(), false
+		return m, nil
+	}
+	a := m.attacher
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		text, err := a.PaneOutputPlain(ctx, sessionID)
+		return previewDoneMsg{sessionID: sessionID, text: text, err: err}
+	}
 }
 
 // selected 返回光标停着的节点。
@@ -310,7 +464,9 @@ func (m Model) View() string {
 		Picking:    m.mode == ModePickModel,
 		Candidates: m.candidates,
 		Pick:       m.pick,
-		Notice:     m.notice,
-		NoticeOK:   m.noticeOK,
+		Notice:      m.notice,
+		NoticeOK:    m.noticeOK,
+		Preview:     m.preview,
+		PreviewFrom: m.previewFrom,
 	})
 }

@@ -1,0 +1,119 @@
+package agentdeck
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// AttachCommand 造一条「进入某个会话」的命令，但不执行它。
+//
+// 为什么返回命令而不是直接跑：进入会话要把整个终端交给对方，这件事必须由
+// 界面层在挂起自己之后做，adapter 在后台跑它只会把两边的终端搅在一起。
+//
+// 走的是上游自己的 `session attach`。它知道该会话跑在哪个 tmux socket 上，
+// 而那个信息 API 并不暴露——不必要地去猜 socket，是给自己挖坑。
+func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("没有会话号，无法进入")
+	}
+	if !isAllowedSubcommand("session", "attach") {
+		return nil, &ErrSubcommandNotAllowed{Subcommand: "session attach"}
+	}
+	cmd := exec.CommandContext(ctx, c.Binary, "session", "attach", sessionID)
+	cmd.Env = c.env()
+	// Work Deck 常开在 tmux 里，进去就是两层，tmux 默认会拒绝。
+	return prepareNested(cmd), nil
+}
+
+// DirectTmuxAttachCommand 造一条直连 tmux 的命令。
+//
+// 只有当那个会话确实在**默认** tmux server 上时才给得出来。上游允许给会话配
+// 自定义 socket（config.toml 的 [tmux].socket_name），而那个值既不在
+// /api/menu 也不在 list --json 里，adapter 又不读上游的配置文件。
+// 探不到就明说探不到，让调用方回退到 AttachCommand，不去猜一个 socket 名。
+func (c *Client) DirectTmuxAttachCommand(ctx context.Context, tmuxSession string) (*exec.Cmd, error) {
+	if tmuxSession == "" {
+		return nil, fmt.Errorf("上游没有给出 tmux 会话名，无法直连")
+	}
+	// 在默认 server 上问一句有没有这个会话。有就是默认 socket，没有就是别处。
+	probe := exec.CommandContext(ctx, "tmux", "has-session", "-t", tmuxSession)
+	if err := probe.Run(); err != nil {
+		return nil, fmt.Errorf(
+			"会话 %s 不在默认 tmux server 上，socket 名上游接口不暴露，直连不可用；请走 session attach",
+			tmuxSession)
+	}
+	return prepareNested(exec.CommandContext(ctx, "tmux", "attach-session", "-t", tmuxSession)), nil
+}
+
+// PaneOutput 取一个会话当前画面的文本，不接管它。
+//
+// 用于瞄一眼某个会话在干什么。这条路是只读的：它跑的是 capture-pane，
+// 不发按键，不改会话状态。
+func (c *Client) PaneOutput(ctx context.Context, sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("没有会话号，无法预览")
+	}
+	out, err := c.exec(ctx, "session", "output", sessionID, "-pane")
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// MenuSnapshot 取一份菜单快照。
+//
+// 与 Sessions 的区别：这是上游菜单的原始形态，含分组层级。
+// 注意它同样不含 tmux socket 名——本包实测确认过，见 MANIFEST.md 第 7 节。
+func (c *Client) MenuSnapshot(ctx context.Context) (MenuEvent, error) {
+	var out MenuEvent
+	if err := c.get(ctx, "/api/menu", &out); err != nil {
+		return MenuEvent{}, err
+	}
+	return out, nil
+}
+
+// TmuxSessionOf 从菜单里找某个会话的 tmux 名字。
+func (m MenuEvent) TmuxSessionOf(sessionID string) (string, bool) {
+	for _, s := range m.SessionsOf() {
+		if s.ID == sessionID {
+			return s.TmuxSession, s.TmuxSession != ""
+		}
+	}
+	return "", false
+}
+
+// stripANSI 去掉画面里的转义序列，留纯文本。
+//
+// 预览要给人看，也要进证据文件。带着转义序列的文本在报告里没法读，
+// 也没法逐行比对。
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && !((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z')) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// PaneOutputPlain 取画面文本并去掉转义序列。
+func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string, error) {
+	raw, err := c.PaneOutput(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	return stripANSI(raw), nil
+}

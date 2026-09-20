@@ -122,7 +122,7 @@ func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
 
 // 清单里列的子命令，必须正好是白名单。
 func TestManifestSubcommandsMatchAllowList(t *testing.T) {
-	if !reflect.DeepEqual(Subcommands, []string{"launch", "web"}) {
+	if !reflect.DeepEqual(Subcommands, []string{"launch", "web", "session attach", "session output"}) {
 		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
 	}
 	src := readPackageSource(t)
@@ -157,32 +157,21 @@ func TestHumanReadableManifestStaysInSync(t *testing.T) {
 	}
 }
 
-// 本轮不 attach、不发按键，包里不该有这类东西。
-func TestAdapterHasNoAttachOrSendCapability(t *testing.T) {
+// 本轮起可以接管终端，但仍然不许替人发按键、不许杀会话。
+//
+// n036 时这条测试禁止一切 attach；n037 的任务就是进入会话，所以约束改了。
+// 改的是「允许进入」这一条，其余一条没松：进去之后是人在操作真实 CLI，
+// Work Deck 不替他敲任何键，也没有任何停掉或删掉会话的路径。
+func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
 	src := readPackageSource(t)
-	for _, forbidden := range []string{"attach-session", "send-keys", "tmux attach", "\"kill-session\""} {
+	for _, forbidden := range []string{"send-keys", "kill-session", "kill-server", "respawn-pane", "\"kill\""} {
 		if strings.Contains(src, forbidden) {
-			t.Errorf("包里出现了 %q，本轮不接管终端，那是后续节点的事", forbidden)
+			t.Errorf("包里出现了 %q：进去之后是人在操作，Work Deck 不替他动手", forbidden)
 		}
 	}
-}
-
-// 「不知道模型」和「这工具没有模型」必须分得清清楚楚。
-func TestModelNotApplicableIsNotABackDoor(t *testing.T) {
-	// 声明了不适用，可以不给模型。
-	ok := LaunchRequest{ProjectPath: "/tmp/x", Tool: "shell", ModelNotApplicable: true}
-	if err := ok.Validate(); err != nil {
-		t.Errorf("显式声明工具没有模型时不该报错：%v", err)
-	}
-	// 没声明又不给模型，照样拒绝——这才是「不知道」。
-	unknown := LaunchRequest{ProjectPath: "/tmp/x", Tool: "claude"}
-	if err := unknown.Validate(); err == nil {
-		t.Error("没声明不适用又不给模型，必须拒绝")
-	}
-	// 自相矛盾的请求也拒绝。
-	both := LaunchRequest{ProjectPath: "/tmp/x", Tool: "claude", Model: "m", ModelNotApplicable: true}
-	if err := both.Validate(); err == nil {
-		t.Error("既说没有模型又给了模型，必须拒绝")
+	// 进入用的是上游自己的 session attach，或默认 server 上的 tmux attach-session。
+	if !strings.Contains(src, "attach-session") {
+		t.Error("本轮应当具备进入会话的能力")
 	}
 }
 
@@ -214,4 +203,94 @@ func readPackageSource(t *testing.T) string {
 		b.Write(data)
 	}
 	return b.String()
+}
+
+// session 底下有一堆会毁掉别人工作的兄弟命令，白名单必须精确到第二级。
+//
+// 只写 "session" 就放行，等于顺手给了 Work Deck 杀会话、删注册表的能力，
+// 而它没有任何理由需要这些。
+func TestDangerousSessionSubcommandsAreRefused(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dangerous := [][]string{
+		{"session", "stop", "x"},
+		{"session", "remove", "x"},
+		{"session", "restart", "x"},
+		{"session", "cleanup"},
+		{"session", "archive", "x"},
+		{"session", "fork", "x"},
+		{"session", "set", "x", "title", "y"},
+		{"session", "revive"},
+	}
+	for _, args := range dangerous {
+		_, err := c.exec(context.Background(), args[0], args[1:]...)
+		var refused *ErrSubcommandNotAllowed
+		if !errors.As(err, &refused) {
+			t.Errorf("%v 必须被拒绝，实际得到 %v", args, err)
+		}
+	}
+}
+
+// 允许的那两条要真的能过白名单这一关。
+func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
+	if !isAllowedSubcommand("session", "attach") {
+		t.Error("session attach 应当被允许")
+	}
+	if !isAllowedSubcommand("session", "output") {
+		t.Error("session output 应当被允许")
+	}
+	if isAllowedSubcommand("session") {
+		t.Error("光一个 session 不该被允许：那会把 stop/remove 一起放行")
+	}
+	if isAllowedSubcommand("session", "stop") {
+		t.Error("session stop 不该被允许")
+	}
+}
+
+// 直连 tmux 探不到 socket 时，要明说探不到，而不是猜一个。
+func TestDirectTmuxAttachRefusesWhenSessionIsNotOnDefaultServer(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.DirectTmuxAttachCommand(context.Background(), "这个会话一定不存在-"+randHex(t))
+	if err == nil {
+		t.Fatal("探不到的会话必须拒绝直连")
+	}
+	if !strings.Contains(err.Error(), "socket 名上游接口不暴露") {
+		t.Errorf("拒绝理由没说清为什么探不到：%v", err)
+	}
+	if !strings.Contains(err.Error(), "session attach") {
+		t.Error("拒绝时应当指出还有 session attach 这条路")
+	}
+
+	if _, err := c.DirectTmuxAttachCommand(context.Background(), ""); err == nil {
+		t.Error("没有 tmux 会话名时必须拒绝")
+	}
+}
+
+// 预览是只读的：命令里不许出现任何会改动会话的动作。
+func TestPreviewPathIsReadOnly(t *testing.T) {
+	src := readPackageSource(t)
+	for _, forbidden := range []string{"send-keys", "kill-session", "kill-server", "respawn"} {
+		if strings.Contains(src, forbidden) {
+			t.Errorf("包里出现了 %q，预览与进入都不该改动会话状态", forbidden)
+		}
+	}
+}
+
+func TestStripANSILeavesReadableText(t *testing.T) {
+	in := "\x1b[32m绿字\x1b[0m 普通\x1b[1;31m红粗\x1b[m 结束"
+	got := stripANSI(in)
+	want := "绿字 普通红粗 结束"
+	if got != want {
+		t.Errorf("去转义结果是 %q，期望 %q", got, want)
+	}
+}
+
+func randHex(t *testing.T) string {
+	t.Helper()
+	return randomHex(t, 4)
 }

@@ -103,11 +103,12 @@ func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 		"/api/sessions":    "internal/agentdeck",
 		"/events/menu":     "internal/agentdeck",
 	}
-	// exec 只许出现在这两个包各自的 client.go 里。
-	execAllowed := map[string]bool{
-		"internal/projectctl/client.go": true,
-		"internal/agentdeck/client.go":  true,
-	}
+	// exec 只许出现在这两个 adapter 包**内部**。
+	//
+	// 早先这里按文件卡（只许 client.go），那是 n035/n036 时每个包恰好只有一个
+	// exec 点的巧合。边界的本意是包：adapter 包对外只暴露 workbench 自己的接口，
+	// 包内怎么分文件是实现细节。包外依然一个都不许。
+	execAllowedPkg := []string{"internal/projectctl/", "internal/agentdeck/"}
 
 	var offenders []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -131,8 +132,17 @@ func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 		}
 		text := string(data)
 
-		if strings.Contains(text, "exec.Command") && !execAllowed[rel] {
-			offenders = append(offenders, rel+" 含 exec.Command，只有两个 adapter 的 client.go 可以")
+		if strings.Contains(text, "exec.Command") {
+			var inAdapter bool
+			for _, pkg := range execAllowedPkg {
+				if strings.HasPrefix(rel, pkg) {
+					inAdapter = true
+					break
+				}
+			}
+			if !inAdapter {
+				offenders = append(offenders, rel+" 含 exec.Command，只有两个 adapter 包内部可以")
+			}
 		}
 		for needle, pkg := range owner {
 			if strings.Contains(text, needle) && !strings.HasPrefix(rel, pkg+"/") {

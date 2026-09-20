@@ -49,6 +49,9 @@ type Screen struct {
 	// 上一次动作的结果，成败都显示。
 	Notice   string
 	NoticeOK bool
+	// 会话画面的只读预览，以及它来自哪个会话。
+	Preview     string
+	PreviewFrom string
 }
 
 // Render 把快照画成一屏。width 是终端宽度。
@@ -155,6 +158,23 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 		w("")
 	}
 
+	// 会话画面的只读预览。
+	if sc.Preview != "" {
+		w("%s", styleSection.Render("会话画面预览　"+styleDim.Render(sc.PreviewFrom)))
+		w("  %s", styleDim.Render("只读，不接管，不改会话状态。Esc 关掉。"))
+		lines := strings.Split(strings.TrimRight(sc.Preview, "\n"), "\n")
+		// 只画得下的部分，末尾几行才是最新的。
+		const maxPreview = 12
+		if len(lines) > maxPreview {
+			w("  %s", styleDim.Render(fmt.Sprintf("（省略前 %d 行）", len(lines)-maxPreview)))
+			lines = lines[len(lines)-maxPreview:]
+		}
+		for _, ln := range lines {
+			w("  │ %s", clip(ln, width-4))
+		}
+		w("")
+	}
+
 	// 上一次动作的结果。
 	if sc.Notice != "" {
 		if sc.NoticeOK {
@@ -173,7 +193,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
-	w("%s", styleDim.Render("↑↓ 选节点，d 派工，r 刷新，q 退出。不接管终端、不写 Graph 账本。"))
+	w("%s", styleDim.Render("↑↓ 选节点，d 派工，a 进入会话，p 预览，r 刷新，q 退出。不写 Graph 账本。"))
 	return b.String()
 }
 

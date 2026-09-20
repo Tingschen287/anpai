@@ -166,14 +166,14 @@ func TestFooterStatesWhatTheScreenCanAndCannotDo(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	footer := lines[len(lines)-1]
 
-	// 能做的：选节点、派工、刷新、退出。
-	for _, want := range []string{"d 派工", "r 刷新", "q 退出"} {
+	// 能做的：选节点、派工、进入会话、预览、刷新、退出。
+	for _, want := range []string{"d 派工", "a 进入会话", "p 预览", "r 刷新", "q 退出"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("说明行里没讲 %q：%q", want, footer)
 		}
 	}
-	// 不能做的，必须明说，不能靠人猜。
-	for _, want := range []string{"不接管终端", "不写 Graph 账本"} {
+	// 不能做的，必须明说，不能靠人猜。本轮起能接管终端了，但仍然不写账本。
+	for _, want := range []string{"不写 Graph 账本"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("说明行里没讲清楚边界 %q：%q", want, footer)
 		}

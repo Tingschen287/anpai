@@ -76,6 +76,12 @@ func main() {
 	} else if dispatchErr != nil {
 		fmt.Fprintf(os.Stderr, "work: 派工未启用：%v\n", dispatchErr)
 	}
+	if attacher, bindings, err := buildAttacher(); err == nil {
+		model = model.WithAttacher(attacher, bindings)
+	} else if dispatchErr == nil {
+		// 派工配好了却进不去，说明配置有别的毛病，要说出来。
+		fmt.Fprintf(os.Stderr, "work: 进入会话未启用：%v\n", err)
+	}
 	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fail("界面异常退出：%v", err)
 	}
@@ -113,6 +119,30 @@ func buildDispatcher(projectRoot string) (ui.Dispatcher, error) {
 		Table:   table,
 		LogPath: filepath.Join(filepath.Dir(path), "dispatch-log.jsonl"),
 	}, nil
+}
+
+// buildAttacher 装配「进入会话」与「预览」能力，外加绑定表。
+//
+// 与派工共用同一份配置和同一个绑定存储：进得去的前提是这次 attempt 是从
+// Work Deck 派出去的，否则根本不知道该进哪个会话。
+func buildAttacher() (ui.Attacher, ui.Bindings, error) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := agentdeck.NewClient(cfg.UpstreamBinary, cfg.Profile, cfg.UpstreamAddr, config.Token())
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := binding.Open(filepath.Join(filepath.Dir(path), "bindings.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, store, nil
 }
 
 func fail(format string, args ...any) {
