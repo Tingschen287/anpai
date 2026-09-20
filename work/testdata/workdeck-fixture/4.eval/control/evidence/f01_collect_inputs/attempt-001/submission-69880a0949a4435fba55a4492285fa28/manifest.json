@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "project_id": "workdeck-fixture",
+  "graph_revision": 3,
+  "graph_sha256": "6b0257e57cf6de60db4bca856b5c0ecf4af201b439eb0da1343b151277775c53",
+  "node_id": "f01_collect_inputs",
+  "node_spec_sha256": "8c6183c12bb4f7be3ba9f52aa6a3e7c45cf28d27e3aae1d95d5a47636d370a00",
+  "attempt": 1,
+  "submission": 1,
+  "submission_id": "69880a0949a4435fba55a4492285fa28",
+  "objective": "把夹具需要的输入文件落盘，作为后续节点的依赖。",
+  "executor": {
+    "actor": "fixture-executor-a1",
+    "role": "fixture_executor",
+    "route_class": "economy",
+    "model": "fixture-model-economy"
+  },
+  "started_at": "2026-09-20T02:32:19+00:00",
+  "submitted_at": "2026-09-20T02:32:19+00:00",
+  "summary": "输入清单已落盘",
+  "artifacts": [
+    {
+      "type": "file",
+      "sha256": "024d13fff3cd32b17934ec6cbfbb53c9b151c47c006a237e93ceeb483b1a7a31",
+      "size_bytes": 50,
+      "source_path": "0.context/inputs/sources.md",
+      "snapshot_path": "4.eval/control/evidence/f01_collect_inputs/attempt-001/submission-69880a0949a4435fba55a4492285fa28/snapshots/deliverable-01/sources.md"
+    }
+  ],
+  "evidence": [
+    {
+      "type": "file",
+      "sha256": "024d13fff3cd32b17934ec6cbfbb53c9b151c47c006a237e93ceeb483b1a7a31",
+      "size_bytes": 50,
+      "source_path": "0.context/inputs/sources.md",
+      "snapshot_path": "4.eval/control/evidence/f01_collect_inputs/attempt-001/submission-69880a0949a4435fba55a4492285fa28/snapshots/evidence-01/sources.md"
+    },
+    {
+      "type": "file",
+      "sha256": "d5dc85b128f7e05fad6ab47ef4a7f22cd71bdaad07e8447c65e22194aff29877",
+      "size_bytes": 113,
+      "source_path": "4.eval/loops/f01_collect_inputs.md",
+      "snapshot_path": "4.eval/control/evidence/f01_collect_inputs/attempt-001/submission-69880a0949a4435fba55a4492285fa28/snapshots/evidence-02/f01_collect_inputs.md"
+    }
+  ],
+  "checks": [
+    {
+      "command": "test -s 0.context/inputs/sources.md",
+      "workdir": ".",
+      "exit_code": 0,
+      "passed": true,
+      "timed_out": false,
+      "elapsed_seconds": 0.001,
+      "log_path": "4.eval/control/evidence/f01_collect_inputs/attempt-001/submission-69880a0949a4435fba55a4492285fa28/check-01.log",
+      "log_sha256": "594fa530d632d45510987bdc62720db3ba4fee77d16bf3f0b93cb912ec2b21da"
+    }
+  ],
+  "acceptance_criteria": [
+    "输入清单文件存在且非空。"
+  ],
+  "usage": {
+    "worker_rounds": 0,
+    "frontier_calls": 0,
+    "input_tokens": 8000,
+    "output_tokens": 2000,
+    "cost_cny": 0.0,
+    "elapsed_seconds": 900.001
+  },
+  "unresolved_items": [],
+  "budget_errors": [],
+  "manifest_sha256": "ad85e92231b57856876bf91d7a2810cea4dec463fc09d2f215b4fb72c5f9d76e"
+}

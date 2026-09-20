@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "project_id": "workdeck-fixture",
+  "graph_revision": 3,
+  "graph_sha256": "6b0257e57cf6de60db4bca856b5c0ecf4af201b439eb0da1343b151277775c53",
+  "node_id": "f02_build_core",
+  "node_spec_sha256": "d2e1e3e12b01307ea78380cbc81f4eef2542a6c3ec10cae5b194de4f707695b5",
+  "attempt": 1,
+  "submission": 1,
+  "submission_id": "eecb2ac7c71b4cabbe0792d626cf4b7c",
+  "objective": "构建夹具的核心产物，用来演示 running 状态与第二次尝试。",
+  "executor": {
+    "actor": "fixture-executor-a1",
+    "role": "fixture_executor",
+    "route_class": "balanced",
+    "model": "fixture-model-balanced"
+  },
+  "started_at": "2026-09-20T02:32:19+00:00",
+  "submitted_at": "2026-09-20T02:32:19+00:00",
+  "summary": "核心产物初版",
+  "artifacts": [
+    {
+      "type": "file",
+      "sha256": "0879e5415a31f1dd5c1edb738d20816eb1fcc61560205108a6f1ad51b7484f48",
+      "size_bytes": 50,
+      "source_path": "0.context/core/core.md",
+      "snapshot_path": "4.eval/control/evidence/f02_build_core/attempt-001/submission-eecb2ac7c71b4cabbe0792d626cf4b7c/snapshots/deliverable-01/core.md"
+    }
+  ],
+  "evidence": [
+    {
+      "type": "file",
+      "sha256": "0879e5415a31f1dd5c1edb738d20816eb1fcc61560205108a6f1ad51b7484f48",
+      "size_bytes": 50,
+      "source_path": "0.context/core/core.md",
+      "snapshot_path": "4.eval/control/evidence/f02_build_core/attempt-001/submission-eecb2ac7c71b4cabbe0792d626cf4b7c/snapshots/evidence-01/core.md"
+    },
+    {
+      "type": "file",
+      "sha256": "47e83a4379943108be7cb01be8d07b45f40354b5dc62fd6ece3e3ca19a39188e",
+      "size_bytes": 124,
+      "source_path": "4.eval/loops/f02_build_core.md",
+      "snapshot_path": "4.eval/control/evidence/f02_build_core/attempt-001/submission-eecb2ac7c71b4cabbe0792d626cf4b7c/snapshots/evidence-02/f02_build_core.md"
+    }
+  ],
+  "checks": [
+    {
+      "command": "test -s 0.context/core/core.md",
+      "workdir": ".",
+      "exit_code": 0,
+      "passed": true,
+      "timed_out": false,
+      "elapsed_seconds": 0.001,
+      "log_path": "4.eval/control/evidence/f02_build_core/attempt-001/submission-eecb2ac7c71b4cabbe0792d626cf4b7c/check-01.log",
+      "log_sha256": "3d9fe56ea1c0c0a8e3c9af37624c0b7674d3854e47199d1dafc13901ddf06e53"
+    }
+  ],
+  "acceptance_criteria": [
+    "核心产物文件存在且非空。"
+  ],
+  "usage": {
+    "worker_rounds": 0,
+    "frontier_calls": 0,
+    "input_tokens": 40000,
+    "output_tokens": 12000,
+    "cost_cny": 0.0,
+    "elapsed_seconds": 4200.001
+  },
+  "unresolved_items": [],
+  "budget_errors": [],
+  "manifest_sha256": "d8440798be30922f2581b779b43c531795b6ef5101b3a9d308b4ebc0669afeb2"
+}

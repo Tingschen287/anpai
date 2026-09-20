@@ -1,0 +1,10 @@
+# 夹具项目不同步任何外部系统。
+# Do not store DingTalk Base IDs, schema snapshots, credentials, or personal records here.
+
+enabled: false
+external_project_key: ""
+record_id: ""
+record_url: ""
+status: not_requested
+last_sync_at: null
+last_error: ""

@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "project_id": "workdeck-fixture",
+  "graph_revision": 3,
+  "graph_sha256": "6b0257e57cf6de60db4bca856b5c0ecf4af201b439eb0da1343b151277775c53",
+  "node_id": "f01_collect_inputs",
+  "node_spec_sha256": "8c6183c12bb4f7be3ba9f52aa6a3e7c45cf28d27e3aae1d95d5a47636d370a00",
+  "attempt": 1,
+  "reviewed_manifest_path": "4.eval/control/evidence/f01_collect_inputs/attempt-001/submission-69880a0949a4435fba55a4492285fa28/manifest.json",
+  "reviewed_manifest_sha256": "ad85e92231b57856876bf91d7a2810cea4dec463fc09d2f215b4fb72c5f9d76e",
+  "reviewer": {
+    "actor": "fixture-reviewer-b1",
+    "role": "fixture_reviewer",
+    "route_class": "economy",
+    "model": "fixture-model-economy"
+  },
+  "independent_from_executor": true,
+  "decision": "accept",
+  "reason": "交付物齐全且确定性检查通过",
+  "blockers": [],
+  "usage": {
+    "worker_rounds": 0,
+    "frontier_calls": 0,
+    "input_tokens": 3000,
+    "output_tokens": 800,
+    "cost_cny": 0.0,
+    "elapsed_seconds": 300.0
+  },
+  "report": {
+    "type": "file",
+    "sha256": "d74ac6ddc5bb4482ca5e8c2c99cb7ec50383bf2175b67f2ececebfd7862e9362",
+    "size_bytes": 90,
+    "source_path": "4.eval/reviews/f01_collect_inputs-review.md",
+    "snapshot_path": "4.eval/control/reviews/f01_collect_inputs/attempt-001/review-743cfe7468744a198f4fe74751ab9832/snapshots/report/f01_collect_inputs-review.md"
+  },
+  "reviewed_at": "2026-09-20T02:32:19+00:00",
+  "review_sha256": "8f1e0e5d6c4950085ae6e8e7a1fedc446dae6feecd17829c7c1dd5adbb79e025"
+}

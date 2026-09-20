@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "project_id": "workdeck-fixture",
+  "graph_revision": 3,
+  "graph_sha256": "6b0257e57cf6de60db4bca856b5c0ecf4af201b439eb0da1343b151277775c53",
+  "node_id": "f03_write_report",
+  "node_spec_sha256": "eb4f52b93704ff759869ae23ecb2b84be87e17c446e4e0c7ebb629e85452bb25",
+  "attempt": 1,
+  "submission": 1,
+  "submission_id": "c09ecc9e9b014d17b602c85d43c07d11",
+  "objective": "产出夹具报告，用来演示 submitted 状态。",
+  "executor": {
+    "actor": "fixture-executor-a2",
+    "role": "fixture_executor",
+    "route_class": "balanced",
+    "model": "fixture-model-balanced"
+  },
+  "started_at": "2026-09-20T02:32:20+00:00",
+  "submitted_at": "2026-09-20T02:32:20+00:00",
+  "summary": "夹具报告已提交",
+  "artifacts": [
+    {
+      "type": "file",
+      "sha256": "d14a4e0acccc4cacf572294e48b9425a0c14bc2e2c41cc17c6df199a488047c7",
+      "size_bytes": 50,
+      "source_path": "0.context/report/report.md",
+      "snapshot_path": "4.eval/control/evidence/f03_write_report/attempt-001/submission-c09ecc9e9b014d17b602c85d43c07d11/snapshots/deliverable-01/report.md"
+    }
+  ],
+  "evidence": [
+    {
+      "type": "file",
+      "sha256": "d14a4e0acccc4cacf572294e48b9425a0c14bc2e2c41cc17c6df199a488047c7",
+      "size_bytes": 50,
+      "source_path": "0.context/report/report.md",
+      "snapshot_path": "4.eval/control/evidence/f03_write_report/attempt-001/submission-c09ecc9e9b014d17b602c85d43c07d11/snapshots/evidence-01/report.md"
+    },
+    {
+      "type": "file",
+      "sha256": "fb582eaadbeae4a73211978f337e926c769dbc4b0b73872d0d451706ae0c5c78",
+      "size_bytes": 114,
+      "source_path": "4.eval/loops/f03_write_report.md",
+      "snapshot_path": "4.eval/control/evidence/f03_write_report/attempt-001/submission-c09ecc9e9b014d17b602c85d43c07d11/snapshots/evidence-02/f03_write_report.md"
+    }
+  ],
+  "checks": [
+    {
+      "command": "test -s 0.context/report/report.md",
+      "workdir": ".",
+      "exit_code": 0,
+      "passed": true,
+      "timed_out": false,
+      "elapsed_seconds": 0.001,
+      "log_path": "4.eval/control/evidence/f03_write_report/attempt-001/submission-c09ecc9e9b014d17b602c85d43c07d11/check-01.log",
+      "log_sha256": "66d4c70c3da69cc4c60dc4cf75ed33031151e9e48085209b08095a218512fee2"
+    }
+  ],
+  "acceptance_criteria": [
+    "报告文件存在且非空。"
+  ],
+  "usage": {
+    "worker_rounds": 0,
+    "frontier_calls": 0,
+    "input_tokens": 25000,
+    "output_tokens": 9000,
+    "cost_cny": 0.0,
+    "elapsed_seconds": 3000.001
+  },
+  "unresolved_items": [],
+  "budget_errors": [],
+  "manifest_sha256": "8412415837861ffcd9699d9fef8615b862280e889b4d6af008b89f10b352f4b1"
+}
