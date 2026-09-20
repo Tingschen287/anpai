@@ -44,6 +44,13 @@
     "hidden": true
   },
   {
+    "name": "OpenCode (WSL)",
+    "tabTitle": "OpenCode (WSL)",
+    "guid": "{1066da28-5e51-4525-a678-ad837a751f2f}",
+    "commandline": "wsl.exe -d <DISTRO> -u <WSL_USER> --cd ~ -- bash -lc \"~/.local/bin/ai opencode\"",
+    "hidden": true
+  },
+  {
     "name": "Host Deck",
     "guid": "{b0b653ec-5568-576f-883d-7c915ecbe1f4}",
     "commandline": "wsl.exe -d <DISTRO> -u <WSL_USER> --cd ~ -- bash -lc \"HOST_DECK_HANDOFF=1 ~/.local/bin/host\"",

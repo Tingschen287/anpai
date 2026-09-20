@@ -50,6 +50,18 @@ proxy = true
 path_prepend = ["$HOME/.grok/bin", "$HOME/.local/bin"]
 
 [[agent]]
+key = "grokt"
+wt_profile = "Grok (WSL)"
+name = "Grok Team"
+color = "#3b82f6"
+note = "xAI team Key"
+cmd = "grok"
+resume_args = ["/resume"]
+proxy = true
+path_prepend = ["$HOME/.grok/bin", "$HOME/.local/bin"]
+env = { GROK_HOME = "$HOME/.grok-team" }
+
+[[agent]]
 key = "kimi"
 wt_profile = "Kimi (WSL)"
 name = "Kimi"
@@ -59,3 +71,14 @@ cmd = "kimi"
 resume_args = ["--session"]
 proxy = false
 path_prepend = ["$HOME/.kimi-code/bin", "$HOME/.local/bin"]
+
+[[agent]]
+key = "opencode"
+wt_profile = "OpenCode (WSL)"
+name = "OpenCode"
+color = "#ff5c00"
+note = "Zen 免费模型 · 走代理"
+cmd = "opencode"
+resume_args = ["--continue"]
+proxy = true
+path_prepend = ["$HOME/.opencode/bin"]
