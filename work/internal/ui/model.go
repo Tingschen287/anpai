@@ -96,6 +96,8 @@ type Dispatcher interface {
 type Attacher interface {
 	// AttachCommand 造一条进入会话的命令，但不执行——执行要由界面挂起自己之后做。
 	AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
+	// DirectAttachCommand 是退路：上游 CLI 那条路造不出命令时，直连会话所在的 tmux。
+	DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
 	// PaneOutputPlain 取会话当前画面的纯文本，只读，不接管。
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
 	// NestingAdvice 是进去之前要讲清楚的前缀键用法。
@@ -375,13 +377,28 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// 先走上游自己的 session attach。它知道会话在哪个 tmux socket 上，不必本机去凑。
 	cmd, err := m.attacher.AttachCommand(context.Background(), sessionID)
+	viaFallback := false
 	if err != nil {
-		m.notice, m.noticeOK = "进不去："+err.Error()+"。可以先按 p 看一眼画面", false
-		return m, nil
+		// 上游那条路走不通，退到直连 tmux。
+		//
+		// 这条退路不是摆设：上游 headless 服务对菜单快照做内存缓存，
+		// CLI 刚起的会话它可能一直看不到，而 tmux 里那个会话是好的。
+		alt, altErr := m.attacher.DirectAttachCommand(context.Background(), sessionID)
+		if altErr != nil {
+			m.notice, m.noticeOK = fmt.Sprintf(
+				"进不去，两条路都试过了。上游 CLI：%v；直连 tmux：%v。可以先按 p 看一眼画面",
+				err, altErr), false
+			return m, nil
+		}
+		cmd, viaFallback = alt, true
 	}
 	// 前缀键的事必须在进去之前讲：进去之后就看不见 Work Deck 了。
 	m.notice = m.attacher.NestingAdvice()
+	if viaFallback {
+		m.notice = "上游 CLI 那条路走不通，改直连 tmux。" + m.notice
+	}
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
@@ -468,11 +485,31 @@ func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 			m.noticeOK = false
 			return m, nil
 		}
-		// 独立性要拿执行者是谁来判，判不了就不派。
+		// 独立性要能证明才派。两样都要有：
+		// 执行者是谁（账本上的身份），以及他跑在哪个会话（绑定存储里的会话号）。
+		// 后者是派工器最终采信的判据，这里先查一遍，是为了别让人白挑一轮模型。
 		if node.ReviewIndependent {
 			if _, ok := node.Actor.Get(); !ok {
 				m.notice = fmt.Sprintf("%s 要求独立评审，但不知道执行者是谁（%s），无法判断独立性。"+
 					"按 r 刷新，或确认状态投影是否过期", node.ID, node.Actor.Reason())
+				m.noticeOK = false
+				return m, nil
+			}
+			if m.bindings == nil {
+				m.notice = fmt.Sprintf("%s 要求独立评审，但没接绑定存储，查不到执行者在哪个会话，拒绝派评审", node.ID)
+				m.noticeOK = false
+				return m, nil
+			}
+			attempt, hasAttempt := node.Attempt.Get()
+			if !hasAttempt {
+				m.notice = fmt.Sprintf("%s 要求独立评审，但不知道这是第几次 attempt（%s），"+
+					"对不上执行会话，拒绝派评审", node.ID, node.Attempt.Reason())
+				m.noticeOK = false
+				return m, nil
+			}
+			if b, ok := m.bindings.Get(node.ID, attempt); !ok || b.SessionID == "" {
+				m.notice = fmt.Sprintf("%s 要求评审独立于执行者，但绑定存储里没有 attempt %d 的执行会话。"+
+					"这次执行不是 Work Deck 派的，界面证明不了独立性，拒绝派评审", node.ID, attempt)
 				m.noticeOK = false
 				return m, nil
 			}
@@ -520,7 +557,6 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			RequiredClass:       dispatch.RouteClass(node.ReviewRouteClass),
 			ModelID:             chosen.ID,
 			ExecutorActor:       executor,
-			ReviewerActor:       "work-deck-reviewer-" + chosen.ID,
 			IndependentRequired: node.ReviewIndependent,
 			ProjectPath:         m.snap.ProjectRoot,
 			Title:               node.ID + "-review",

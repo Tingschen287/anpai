@@ -20,8 +20,8 @@ const projectionTolerance = 2 * time.Second
 //
 // 它记着已经查到的终态。真实项目里一次 brief 要两三秒，而控制器对项目目录加了锁，
 // 实测并发 1、4、8、16 跑同样 12 个节点都是 33 到 35 秒——并发一点用都没有，
-// 唯一能省时间的办法是少问几次。accepted、failed、superseded 不会再变回去，
-// 问过一次就记住。
+// 唯一能省时间的办法是少问几次。accepted 和 superseded 不会再变回去，
+// 问过一次就记住。failed 不在此列，它能被 resume 拉回 ready，见 isFinal。
 type Reader struct {
 	client *Client
 	root   string
@@ -43,7 +43,7 @@ func NewReader(projectRoot, script string) *Reader {
 
 // WithCache 让终态缓存落盘。
 //
-// accepted / failed / superseded 是终态，不会再变回去。只记在内存里的话，
+// accepted 与 superseded 是终态，不会再变回去（failed 不是，见 isFinal）。只记在内存里的话，
 // 每次重开都要把几十个节点重新问一遍，真实项目上那是近两分钟的等待。
 // 存到盘上，第二次打开就是秒出。
 //

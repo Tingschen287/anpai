@@ -131,6 +131,23 @@ func modelWithDispatcher(t *testing.T, nodes []projectctl.Node, d Dispatcher) Mo
 	return m
 }
 
+// modelWithDispatcherAndBindings 除了派工能力，还接上绑定存储。
+//
+// 要求独立评审的节点必须走这个：界面要先证明执行者跑在哪个会话，才谈得上派评审。
+func modelWithDispatcherAndBindings(t *testing.T, nodes []projectctl.Node, d Dispatcher, b Bindings) Model {
+	t.Helper()
+	m := modelWithDispatcher(t, nodes, d)
+	m.bindings = b
+	return m
+}
+
+// execBound 造一条「这个节点这次 attempt 跑在某个会话里」的绑定。
+func execBound(nodeID string, attempt int, session string) fakeBindings {
+	return fakeBindings{
+		fmt.Sprintf("%s#%d", nodeID, attempt): {NodeID: nodeID, Attempt: attempt, SessionID: session},
+	}
+}
+
 func pressD(m Model) Model {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	return next.(Model)
@@ -287,9 +304,21 @@ type fakeAttacher struct {
 	attached []string
 	previews []string
 	cmdErr   error
-	text     string
-	textErr  error
-	advice   string
+	// direct 记下退路被试了几次，directErr 让退路也失败。
+	direct    []string
+	directErr error
+	text      string
+	textErr   error
+	advice    string
+}
+
+// DirectAttachCommand 是退路那条。默认能用，除非把 directErr 设上。
+func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	f.direct = append(f.direct, sessionID)
+	if f.directErr != nil {
+		return nil, f.directErr
+	}
+	return exec.Command("true"), nil
 }
 
 func (f *fakeAttacher) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
@@ -508,85 +537,12 @@ func TestPreviewFailureIsShownNotSwallowed(t *testing.T) {
 	}
 }
 
-// 每一条用户看得见的拒绝，都必须给出可执行的下一步。
+// 进入与预览两条路上的拒绝出口，全部列在 refusal_paths_test.go 里逐条测。
 //
-// 独立评审指出上一版只测了两条路径就宣称「每种拒绝都带出路」。这次把
-// attach 与 preview 的全部拒绝分支列成表，逐条要求提示里含一个动作。
-func TestEveryRefusalPathOffersANextStep(t *testing.T) {
-	// 能当作「下一步」的动作词。提示里至少要含其中之一。
-	actions := []string{"按 d", "按 r", "按 p", "↑↓", "config.json", "work-graph.yaml"}
-	hasAction := func(s string) bool {
-		for _, a := range actions {
-			if strings.Contains(s, a) {
-				return true
-			}
-		}
-		return false
-	}
-
-	fa := &fakeAttacher{}
-	okBinds := fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1, SessionID: "s"}}
-
-	cases := []struct {
-		name  string
-		key   rune
-		build func() Model
-	}{
-		{"没有选中节点", 'a', func() Model {
-			m := modelWithAttacher(t, nil, fa, okBinds)
-			m.cursor = 0
-			return m
-		}},
-		{"未配置进入", 'a', func() Model {
-			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
-			m.attacher = nil
-			return m
-		}},
-		{"未配置绑定", 'a', func() Model {
-			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
-			m.bindings = nil
-			return m
-		}},
-		{"attempt 未知", 'a', func() Model {
-			return modelWithAttacher(t, []projectctl.Node{
-				nodeWith("n1", projectctl.StateRunning, "frontier")}, fa, okBinds)
-		}},
-		{"没有绑定", 'a', func() Model {
-			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
-		}},
-		{"绑定里没有会话号", 'a', func() Model {
-			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa,
-				fakeBindings{"n1#1": {NodeID: "n1", Attempt: 1}})
-		}},
-		{"造不出进入命令", 'a', func() Model {
-			bad := &fakeAttacher{cmdErr: fmt.Errorf("上游不在")}
-			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, bad, okBinds)
-		}},
-		{"预览未配置", 'p', func() Model {
-			m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, okBinds)
-			m.attacher = nil
-			return m
-		}},
-		{"预览没有绑定", 'p', func() Model {
-			return modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
-		}},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			after, _ := press(c.build(), c.key)
-			if after.notice == "" {
-				t.Fatal("拒绝了却什么都没说")
-			}
-			if after.noticeOK {
-				t.Error("拒绝不该标成成功")
-			}
-			if !hasAction(after.notice) {
-				t.Errorf("提示没给出下一步该干嘛：%q", after.notice)
-			}
-		})
-	}
-}
+// 这里原先有一张九条的表，宣称「每种拒绝都带出路」。独立评审指出它与源码对不上：
+// 预览那条路只列了两个出口，找会话的四个分支在预览侧一个都没测，
+// 从会话返回时报错也漏了。实际是 15 个出口、11 个分支。
+// 那张表已删，口径和全集见 refusal_paths_test.go 顶部。
 
 // 预览取数失败也要带出路。
 func TestPreviewFailureOffersANextStep(t *testing.T) {
@@ -619,9 +575,9 @@ func TestSubmittedNodeDispatchesAReviewerNotAnExecutor(t *testing.T) {
 	fd := &fakeDispatcher{cands: []dispatch.Model{
 		{ID: "claude-opus-5", Tool: "claude", Class: dispatch.Frontier},
 	}}
-	m := modelWithDispatcher(t, []projectctl.Node{
+	m := modelWithDispatcherAndBindings(t, []projectctl.Node{
 		submittedNode("n1", 2, "executor-a1"),
-	}, fd)
+	}, fd, execBound("n1", 2, "exec-sess"))
 
 	m = pressD(m)
 	if m.mode != ModePickModel {
@@ -674,7 +630,7 @@ func TestReviewDispatchRefusedWhenExecutorUnknown(t *testing.T) {
 	}}
 	n := submittedNode("n1", 2, "")
 	n.Actor = projectctl.Unknown[string]("状态投影已过期")
-	m := modelWithDispatcher(t, []projectctl.Node{n}, fd)
+	m := modelWithDispatcherAndBindings(t, []projectctl.Node{n}, fd, execBound("n1", 2, "exec-sess"))
 
 	after := pressD(m)
 	if after.mode == ModePickModel {

@@ -71,7 +71,8 @@ export WORKDECK_PROJECTCTL=~/ai/01.assets/project-control/projectctl.py
 
 - 投影的三张分类表已经写明了 ready、running、submitted、blocked、failed 这五类
   节点的状态，这部分一次都不问。
-- accepted、failed、superseded 是终态，不会自己变回去，问过一次就记住。
+- accepted 与 superseded 是终态，不会自己变回去，问过一次就记住。
+  failed 不是终态：控制器允许把它 resume 回 ready，所以每次都重新问。
 - 剩下的才去问，而且放在屏幕点亮之后。
 
 在 43 个节点的真实项目上，先行那一段 3.3 秒出屏，比原先干等两分钟强得多。

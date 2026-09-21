@@ -186,17 +186,49 @@ func TestSnapshotWritesNothingIntoTheProject(t *testing.T) {
 	}
 }
 
+// lastLedgerEventTime 读夹具账本最后一条事件的时间。
+//
+// 过期判定比的是「账本走到哪」和「投影停在哪」，基准必须来自账本本身。
+func lastLedgerEventTime(t *testing.T, root string) time.Time {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "4.eval", "control", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var e struct {
+			OccurredAt string `json:"occurred_at"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &e); err != nil || e.OccurredAt == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, e.OccurredAt)
+		if err != nil {
+			continue
+		}
+		return at
+	}
+	t.Fatal("夹具账本里没有一条带时间的事件，无法给过期判定定基准")
+	return time.Time{}
+}
+
 // 投影比账本旧的时候，来自投影的数字一律转未知。
 func TestStaleProjectionTurnsProjectionNumbersUnknown(t *testing.T) {
 	root := copyFixture(t, fixtureRoot(t))
 
-	// 把投影的生成时间往前拨一天，模拟别人写了账本而投影没跟上。
+	// 把投影的生成时间拨到账本最后一条事件之前，模拟别人写了账本而投影没跟上。
+	//
+	// 基准取账本自己的时间，不取 time.Now()。夹具是静态的，一旦拿当天时间去减，
+	// 过不了几天 now-24h 就会超过夹具账本的最后一条事件，投影反而显得比账本新，
+	// 这个测试就会无声地测不到东西——它确实这样坏过一次。
 	path := filepath.Join(root, "PROJECT-STATUS.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	last := lastLedgerEventTime(t, root)
+	old := last.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
 	lines := strings.Split(string(data), "\n")
 	for i, ln := range lines {
 		if strings.HasPrefix(ln, "- 生成时间：") {

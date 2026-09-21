@@ -79,10 +79,14 @@ profile 上，一次覆盖掉 36 个生产会话。所以这里不接受默认�
 
 ### socket 名：有，但默认值时看不见
 
-| 来源 | 会话名 | socket 名 |
-|---|---|---|
-| `GET /api/menu` 的 session 对象 | `tmuxSession` | **`tmuxSocketName`** |
-| `list --json` 的行 | `tmux_session` | 无 |
+| 来源 | 会话名 | socket 名 | 依据 |
+|---|---|---|---|
+| `GET /api/menu` 的 session 对象 | `tmuxSession` | **`tmuxSocketName`** | `internal/web/session_data_service.go:88` |
+| `list --json` 的行 | `tmux_session` | 无 | `cmd/agent-deck/main.go:2250` 的 `sessionJSON` 里没有这个字段 |
+
+「无」这一格是读上游结构体定义得出的，不是「跑了一次没看见」——
+`sessionJSON` 整个结构体里就没有 socket 字段，所以它不可能出现，
+这和 `omitempty` 造成的「有字段但这次为空」是两回事。
 
 `tmuxSocketName` 是 `tmux -L` 的选择器，上游在会话创建时定下
 （`--tmux-socket` 参数优先，其次 `config.toml` 的 `[tmux].socket_name`，都没有则为空）。
