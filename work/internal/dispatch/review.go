@@ -101,6 +101,23 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 		}
 	}
 
+	// 要求独立评审时，评审 brief 不许随 launch 一起投递。
+	//
+	// 为什么：会话号要等 launch 返回才知道，所以「评审有没有落进执行者的会话」
+	// 这一判断天然在 launch 之后。如果 brief 随 launch 一起送出去，那么万一真撞上，
+	// 任务已经进了执行者的会话，后面再报错也撤不回来——独立评审当场就被破坏了。
+	// 把 brief 从 launch 里摘掉，撞会话的后果就只剩一个空会话，是可以收拾的。
+	//
+	// 代价是 brief 得另找路子送。本包的白名单里没有「向已有会话发消息」这一条，
+	// 而为这件事扩白名单等于放开 `session` 底下一整片操作面（stop/remove/…），
+	// 那个代价比这里的残余风险大。所以这里拒绝，不偷偷把 brief 塞进去。
+	if req.IndependentRequired && req.Message != "" {
+		return refuse(fmt.Errorf(
+			"节点要求独立评审，评审 brief 不能随会话启动一起投递：" +
+				"会话号要等启动之后才知道，brief 先送出去就意味着万一落到执行者会话里也收不回来。" +
+				"请先派出空会话，brief 另行送达"))
+	}
+
 	if !req.RequiredClass.Known() {
 		return refuse(fmt.Errorf("评审要求的 route class %q 不认识：拒绝派工，不猜", req.RequiredClass))
 	}
@@ -122,6 +139,8 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 			req.NodeID, req.Attempt, existing.SessionID))
 	}
 
+	// 要求独立评审时 req.Message 必为空（上面那条守着），所以这里启动的是一个
+	// 还没收到任务的空会话；下面核验过会话号之后，它才算数。
 	res, err := d.Deck.Launch(ctx, agentdeck.LaunchRequest{
 		ProjectPath: req.ProjectPath,
 		Title:       req.Title,
@@ -137,14 +156,21 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 
 	// 评审会话不能和执行会话是同一个。
 	//
-	// 这是独立性的第二道，也是最终那道：前面比的是「有没有执行会话」，
-	// 这里比的是上游真的给回来的会话号。真撞上说明上游出了怪事，宁可报错。
-	// 注意此时评审会话已经起来了，而本包的白名单不含 stop，收不回来——
-	// 拒绝信息里要把会话号给全，让人能手工处理。
+	// 这是独立性的最后一道：前面比的是「有没有执行会话」，这里比的是
+	// 上游真的给回来的会话号。真撞上说明上游出了怪事，宁可报错。
+	//
+	// 这一步只能在 launch 之后做，会话号早于此不存在。能做的是让撞上的后果
+	// 尽量轻：要求独立评审时 brief 不随 launch 投递（见上面那条守卫），
+	// 所以此刻撞上也只是多了一个还没收到任务的空会话，绑定不会落，
+	// 评审也不会真的在执行者的会话里跑起来。
+	//
+	// 本包的白名单不含 stop，那个空会话收不回来——拒绝信息里把会话号给全，
+	// 让人能手工处理。
 	if executorSession != "" && res.SessionID == executorSession {
 		return refuse(fmt.Errorf(
 			"拒绝：上游把评审派进了执行者正在用的会话 %s。"+
-				"该会话已被启动且 Work Deck 不会去停它，请手工确认这个会话的去向",
+				"该会话是空的（评审 brief 没有随启动投递），但 Work Deck 不会去停它，"+
+				"请手工确认这个会话的去向",
 			res.SessionID))
 	}
 

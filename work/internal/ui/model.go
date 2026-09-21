@@ -96,8 +96,6 @@ type Dispatcher interface {
 type Attacher interface {
 	// AttachCommand 造一条进入会话的命令，但不执行——执行要由界面挂起自己之后做。
 	AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
-	// DirectAttachCommand 是退路：上游 CLI 那条路造不出命令时，直连会话所在的 tmux。
-	DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
 	// PaneOutputPlain 取会话当前画面的纯文本，只读，不接管。
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
 	// NestingAdvice 是进去之前要讲清楚的前缀键用法。
@@ -168,7 +166,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		// 回来了。状态不能停在进去之前，立刻重取一次。
 		if msg.err != nil {
-			m.notice, m.noticeOK = "从会话返回，但进入过程报错："+msg.err.Error(), false
+			m.notice, m.noticeOK = "从会话返回，但进入过程报错："+msg.err.Error()+
+				"。按 p 看一眼那个会话还在不在，或按 r 刷新", false
 		} else {
 			m.notice, m.noticeOK = "已从会话 "+msg.sessionID+" 返回", true
 		}
@@ -377,28 +376,13 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// 先走上游自己的 session attach。它知道会话在哪个 tmux socket 上，不必本机去凑。
 	cmd, err := m.attacher.AttachCommand(context.Background(), sessionID)
-	viaFallback := false
 	if err != nil {
-		// 上游那条路走不通，退到直连 tmux。
-		//
-		// 这条退路不是摆设：上游 headless 服务对菜单快照做内存缓存，
-		// CLI 刚起的会话它可能一直看不到，而 tmux 里那个会话是好的。
-		alt, altErr := m.attacher.DirectAttachCommand(context.Background(), sessionID)
-		if altErr != nil {
-			m.notice, m.noticeOK = fmt.Sprintf(
-				"进不去，两条路都试过了。上游 CLI：%v；直连 tmux：%v。可以先按 p 看一眼画面",
-				err, altErr), false
-			return m, nil
-		}
-		cmd, viaFallback = alt, true
+		m.notice, m.noticeOK = "进不去："+err.Error()+"。可以先按 p 看一眼画面", false
+		return m, nil
 	}
 	// 前缀键的事必须在进去之前讲：进去之后就看不见 Work Deck 了。
 	m.notice = m.attacher.NestingAdvice()
-	if viaFallback {
-		m.notice = "上游 CLI 那条路走不通，改直连 tmux。" + m.notice
-	}
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {

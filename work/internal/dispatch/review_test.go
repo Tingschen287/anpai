@@ -187,3 +187,67 @@ func TestDuplicateReviewerDispatchIsRefused(t *testing.T) {
 		t.Error("同一次 attempt 重复派评审必须拒绝")
 	}
 }
+
+// 要求独立评审时，评审 brief 不许随会话启动一起投递。
+//
+// 独立评审者提的：撞会话这一判断天然在 launch 之后，会话号早于此不存在。
+// 若 brief 随 launch 送出，万一真撞上，任务已经进了执行者的会话，
+// 后面报错也撤不回来。把 brief 摘掉，撞上的后果就只剩一个空会话。
+func TestIndependentReviewRefusesToShipTheBriefWithTheLaunch(t *testing.T) {
+	fake := &fakeLauncher{}
+	d, _ := newDispatcher(t, fake)
+	dispatchExecutorFirst(t, d, fake, "exec-sess")
+	before := len(fake.calls)
+
+	req := goodReview()
+	req.Message = "请评审 n099_demo 的 attempt 1"
+	if _, err := d.DispatchReviewer(context.Background(), req); err == nil {
+		t.Fatal("要求独立评审时，brief 随 launch 投递必须拒绝")
+	} else if !strings.Contains(err.Error(), "不能随会话启动一起投递") {
+		t.Errorf("拒绝理由不清楚：%v", err)
+	}
+	if len(fake.calls) != before {
+		t.Error("被拒绝的派评审不该真的去启动会话")
+	}
+}
+
+// 撞上执行者会话时，被拒、绑定不落，且送出去的那个会话是空的。
+//
+// 说清楚这条测什么、不测什么：`Message` 为空这一点，在上一条守卫在位时
+// 是恒真的——拿掉守卫这条断言也不会红（试过）。它是纵深的第二道，
+// 不是守卫有效的独立证据；守卫的证据是上一个测试。
+// 这里真正独立守住的是另外两件：撞会话必须拒，以及拒了就不许落绑定。
+func TestSessionCollisionCannotCarryTheBrief(t *testing.T) {
+	fake := &fakeLauncher{}
+	d, _ := newDispatcher(t, fake)
+	dispatchExecutorFirst(t, d, fake, "same-sess")
+
+	fake.res = agentdeck.LaunchResult{SessionID: "same-sess", Success: true}
+	if _, err := d.DispatchReviewer(context.Background(), goodReview()); err == nil {
+		t.Fatal("撞上执行者会话必须拒绝")
+	}
+	// 最后那次 launch 就是撞上的那次，它不能带着评审任务。
+	last := fake.calls[len(fake.calls)-1]
+	if last.Message != "" {
+		t.Errorf("撞会话时把评审任务也送进去了：%q", last.Message)
+	}
+	// 绑定不许落下。
+	if _, ok := d.Store.Get(ReviewerKey("n099_demo"), 1); ok {
+		t.Error("撞会话被拒了，评审绑定却存住了")
+	}
+}
+
+// 节点不要求独立时，brief 可以随 launch 走——这条约束只为独立评审而设。
+func TestNonIndependentReviewMayShipTheBrief(t *testing.T) {
+	fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "r1", Success: true}}
+	d, _ := newDispatcher(t, fake)
+	req := goodReview()
+	req.IndependentRequired = false
+	req.Message = "看一下这个"
+	if _, err := d.DispatchReviewer(context.Background(), req); err != nil {
+		t.Fatalf("不要求独立时不该拒绝：%v", err)
+	}
+	if fake.calls[len(fake.calls)-1].Message != "看一下这个" {
+		t.Error("不要求独立时 brief 应当照常送出")
+	}
+}

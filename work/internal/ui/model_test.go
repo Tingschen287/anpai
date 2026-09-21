@@ -304,21 +304,9 @@ type fakeAttacher struct {
 	attached []string
 	previews []string
 	cmdErr   error
-	// direct 记下退路被试了几次，directErr 让退路也失败。
-	direct    []string
-	directErr error
-	text      string
-	textErr   error
-	advice    string
-}
-
-// DirectAttachCommand 是退路那条。默认能用，除非把 directErr 设上。
-func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
-	f.direct = append(f.direct, sessionID)
-	if f.directErr != nil {
-		return nil, f.directErr
-	}
-	return exec.Command("true"), nil
+	text    string
+	textErr error
+	advice  string
 }
 
 func (f *fakeAttacher) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {

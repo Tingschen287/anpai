@@ -54,7 +54,10 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 ### 会话对象（`/api/sessions` 与菜单事件共用）
 
 `id`、`title`、`tool`、`status`、`groupPath`、`projectPath`、`tmuxSession`、
-`command`、`createdAt`、`lastAccessedAt`
+**`tmuxSocketName`**、`command`、`createdAt`、`lastAccessedAt`
+
+`tmuxSocketName` 带 `omitempty`，默认 socket 时字段不出现，见第 7 节。
+这份清单此前漏了它——漏的原因和第 7 节记的是同一次误判。
 
 ### 菜单事件顶层
 
@@ -127,7 +130,8 @@ adapter 的 `prepareNested` 在检测到自己处于 tmux 内时，把 `TMUX` �
 
 - 会话名形如 `agentdeck_<title>_<hash>`，由上游生成
 - Work Deck **只读**这个名字，从 `tmuxSession` 字段取，不自己按标题推算
-- 本轮不 attach、不发按键（那是 n037 的事）
+- 不发按键（包内没有 `send-keys`，`TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着）
+- attach 自 n037 起已经在用，这一行原先写着「本轮不 attach」，那是 n036 时的话
 
 ## 6. 明确不依赖的东西
 

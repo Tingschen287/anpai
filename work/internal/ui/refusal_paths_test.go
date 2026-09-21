@@ -30,7 +30,7 @@ type refusalCase struct {
 	setup func(t *testing.T) Model
 	// wantContains 是提示里必须出现的话，用来认出确实是这个出口。
 	wantContains string
-	// wantAction 是提示里必须给出的下一步动作。
+	// wantAction 是提示里必须给出的下一步动作。每条都得有，没有豁免。
 	wantAction string
 	// viaMsg 不为 nil 时，这个出口不是按键当场走到的，而是异步回来的消息。
 	viaMsg func(m Model) tea.Msg
@@ -154,16 +154,13 @@ func refusalCases() []refusalCase {
 			wantAction:   "config.json",
 		},
 		refusalCase{
-			name: "进入-两条路都造不出命令",
+			name: "进入-造不出进入命令",
 			key:  'a',
 			setup: func(t *testing.T) Model {
-				// 上游 CLI 那条路和直连 tmux 那条退路都走不通，这才算真进不去。
-				return modelWithAttacher(t, nodes, &fakeAttacher{
-					cmdErr:    fmt.Errorf("session attach 不在白名单里"),
-					directErr: fmt.Errorf("菜单里没有这个会话"),
-				}, binds)
+				return modelWithAttacher(t, nodes,
+					&fakeAttacher{cmdErr: fmt.Errorf("session attach 不在白名单里")}, binds)
 			},
-			wantContains: "两条路都试过了",
+			wantContains: "进不去",
 			wantAction:   "按 p",
 		},
 		refusalCase{
@@ -176,7 +173,7 @@ func refusalCases() []refusalCase {
 				return attachDoneMsg{sessionID: "sess-1", err: fmt.Errorf("终端被别人占着")}
 			},
 			wantContains: "进入过程报错",
-			wantAction:   "",
+			wantAction:   "按 p",
 		},
 		refusalCase{
 			name: "预览-取不到画面",
@@ -220,7 +217,15 @@ func TestEveryAttachAndPreviewRefusalIsCoveredAndActionable(t *testing.T) {
 			if !strings.Contains(after.notice, c.wantContains) {
 				t.Fatalf("提示认不出是哪个出口，期望含 %q，实际 %q", c.wantContains, after.notice)
 			}
-			if c.wantAction != "" && !strings.Contains(after.notice, c.wantAction) {
+			// 每条拒绝都必须给出下一步，一条都不放过。
+			//
+			// 这里原先写成「wantAction 非空时才检查」，而表里有一条把它留了空——
+			// 等于自己给自己开了个豁免，再宣称 15 条全部可操作。
+			// 独立评审把这条挑了出来，是对的。
+			if c.wantAction == "" {
+				t.Fatalf("用例 %q 没写期望的下一步：这张表不接受豁免", c.name)
+			}
+			if !strings.Contains(after.notice, c.wantAction) {
 				t.Errorf("拒绝没给下一步，期望含 %q，实际 %q", c.wantAction, after.notice)
 			}
 		})
@@ -258,44 +263,3 @@ func TestPreviewNeverAttaches(t *testing.T) {
 }
 
 
-// 上游 CLI 那条路走不通时，退到直连 tmux——这不是拒绝，是换条路进去。
-//
-// 这条退路有真实用处：上游 headless 服务对菜单快照做内存缓存，
-// CLI 刚起的会话它可能一直看不到，而 tmux 里那个会话是好好的。
-func TestAttachFallsBackToDirectTmux(t *testing.T) {
-	nodes, binds := boundNode()
-	fa := &fakeAttacher{cmdErr: fmt.Errorf("上游服务没认出这个会话")}
-	after, cmd := press(modelWithAttacher(t, nodes, fa, binds), 'a')
-
-	if cmd == nil {
-		t.Fatal("退路可用时应当真的进去")
-	}
-	if !after.noticeOK {
-		t.Errorf("走通了退路却报成拒绝：%q", after.notice)
-	}
-	if !strings.Contains(after.notice, "改直连 tmux") {
-		t.Errorf("没告诉人这次走的是退路：%q", after.notice)
-	}
-	// 前缀键的话不能因为走退路就丢掉——嵌套 tmux 下这句是进去之前唯一的提示。
-	if !strings.Contains(after.notice, "C-b") {
-		t.Errorf("走退路时把前缀键提示弄丢了：%q", after.notice)
-	}
-	if len(fa.direct) != 1 {
-		t.Errorf("退路应当恰好试一次，实际 %d 次", len(fa.direct))
-	}
-}
-
-// 上游那条路好使的时候，不许去碰退路。
-func TestAttachDoesNotTouchFallbackWhenPrimaryWorks(t *testing.T) {
-	nodes, binds := boundNode()
-	fa := &fakeAttacher{}
-	if _, cmd := press(modelWithAttacher(t, nodes, fa, binds), 'a'); cmd == nil {
-		t.Fatal("正常情况应当能进去")
-	}
-	if len(fa.direct) != 0 {
-		t.Errorf("上游那条路好使，却还是去试了退路：%v", fa.direct)
-	}
-	if len(fa.attached) != 1 {
-		t.Errorf("应当走上游 CLI 那条路一次，实际 %d 次", len(fa.attached))
-	}
-}

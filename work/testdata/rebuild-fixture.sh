@@ -82,7 +82,7 @@ ctl block f04_external_probe --actor fixture-executor-a2 --role fixture_executor
     --reason "外部接口没有可用凭据，夹具不允许读取任何凭据" \
     --required-action "owner 决定是否为该接口另开只读账号，或直接放弃本节点" >/dev/null
 
-# f05：确认此路不通，走 failed 终态。
+# f05：确认此路不通，走 failed。（failed 不是终态，控制器允许 resume 把它转回 ready。）
 ctl start f05_legacy_path --actor fixture-executor-a2 --role fixture_executor \
     --route-class economy --model fixture-model-economy >/dev/null
 loop f05_legacy_path "旧路径确认不可行"
