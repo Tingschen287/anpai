@@ -398,3 +398,44 @@ func TestEveryEndpointInSourceIsListed(t *testing.T) {
 		}
 	}
 }
+
+// 白名单里的每一条命令，都要在副作用清单里有个交代。
+//
+// 「在允许清单里」不等于「没有副作用」。attempt 7 把 `list` 当只读加了进去，
+// 独立评审顺着上游源码追出它会把 last_activity_at 写进 state.db。
+// 这个测试逼着下一个加命令的人回答同一个问题：它写不写东西。
+func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
+	// 明确声明不写的，列在这里；其余必须出现在 SideEffects 里。
+	readOnly := map[string]bool{
+		"session attach": true,
+		"session output": true,
+	}
+	for _, sub := range Subcommands {
+		if readOnly[sub] {
+			if _, ok := SideEffects[sub]; ok {
+				t.Errorf("%q 既被当成只读，又列进了副作用清单，说法不一致", sub)
+			}
+			continue
+		}
+		if _, ok := SideEffects[sub]; !ok {
+			t.Errorf("白名单里有 %q，副作用清单里却没有它："+
+				"加一条上游命令时要说清楚它写不写东西", sub)
+		}
+	}
+	// 反过来，副作用清单里不该有白名单之外的命令。
+	for sub := range SideEffects {
+		if !isAllowedSubcommand(strings.Fields(sub)...) {
+			t.Errorf("副作用清单里有 %q，但它不在白名单里", sub)
+		}
+	}
+	// 人读的那份也要提到 list 会写。
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, must := range []string{"last_activity_at", "WriteLastActivityAt", "不等于"} {
+		if !strings.Contains(string(data), must) {
+			t.Errorf("MANIFEST.md 没讲清 list 的写副作用：缺 %q", must)
+		}
+	}
+}

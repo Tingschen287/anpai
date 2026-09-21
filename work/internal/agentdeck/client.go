@@ -39,9 +39,25 @@ import (
 // 执行者此前以「加这个等于放开一整片操作面」为由拒绝实现两阶段投递，
 // 那个理由是错的，独立评审指出了这一点。
 //
-// `list` 是 attempt 7 加的，只读，直接读上游存储不经 headless 服务——
+// `list` 是 attempt 7 加的，直接读上游存储不经 headless 服务——
 // 这一条正是它的用处：服务的菜单缓存看不见刚 launch 的会话，而 list 看得见。
 // 实测见 TestIntegrationListSeesWhatTheCachedMenuCannot。
+//
+// **它不是只读的。** 我在 attempt 7 写过「只读」，那是错的：
+// 上游 `list --json` 会先跑 RefreshInstancesForCLIStatus 暖缓存、读 hook 状态，
+// 那条路最终会把 last_activity_at 写进 state.db：
+//
+//	cmd/agent-deck/main.go:2277        RefreshInstancesForCLIStatus(instances)
+//	internal/session/cli_status_refresh.go:37   inst.UpdateHookStatus(hs)
+//	internal/session/instance.go:6280           defer i.persistLastActivity(false)
+//	internal/session/last_activity_persist.go:124  db.WriteLastActivityAt(...)
+//
+// 写的只是一个活动时间戳，不改会话状态、不停会话，但它确实是持久化写入。
+// 白名单的含义因此是「允许的命令」，不是「无副作用的命令」——
+// SideEffects 里逐条记着哪几条会写，manifest_test 盯着这份声明。
+//
+// 这条是独立评审顺着源码追出来的。我读过 `list --json` 那段代码，
+// RefreshInstancesForCLIStatus 就在我查的结构体下面几行，我没追进去看它做什么。
 var Subcommands = []string{"launch", "web", "list", "session attach", "session output", "session send"}
 
 // isAllowedSubcommand 按整条命令路径匹配。

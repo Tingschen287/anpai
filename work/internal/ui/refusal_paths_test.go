@@ -377,7 +377,8 @@ func TestKeyHintMentionsEveryKeyTheScreenHandles(t *testing.T) {
 // 这件事得在进去之前讲——进去之后界面就不在屏幕上了。
 func TestDirectAttachTellsYouWhenItFellBack(t *testing.T) {
 	nodes, binds := boundNode()
-	fa := &fakeAttacher{directNote: "菜单里没有这个会话，已改从 list 取；按默认 tmux server 连。"}
+	fa := &fakeAttacher{directNote: "菜单里没有这个会话，已改从 list 取 tmux 会话名，" +
+		"并扫描本机 tmux server 确认这个名字只在一处，连的是默认 tmux server。"}
 	after, cmd := press(modelWithAttacher(t, nodes, fa, binds), 'T')
 
 	if cmd == nil {
@@ -386,8 +387,12 @@ func TestDirectAttachTellsYouWhenItFellBack(t *testing.T) {
 	if !strings.Contains(after.notice, "改从 list 取") {
 		t.Errorf("降级了却没告诉人：%q", after.notice)
 	}
-	if !strings.Contains(after.notice, "默认 tmux server") {
-		t.Errorf("没讲清降级的代价：%q", after.notice)
+	// 说明里要讲清连的是哪个 server，以及这个结论是扫出来的。
+	if !strings.Contains(after.notice, "只在一处") {
+		t.Errorf("没说清目标唯一性是怎么确定的：%q", after.notice)
+	}
+	if !strings.Contains(after.notice, "连的是") {
+		t.Errorf("没说清最后连的是哪个 server：%q", after.notice)
 	}
 	// 前缀键的话还得在。
 	if !strings.Contains(after.notice, "C-b") {

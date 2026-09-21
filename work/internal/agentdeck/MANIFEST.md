@@ -16,13 +16,46 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
 | `session send` | 把评审 brief 投进一个已核验会话号的评审会话 | `--message-file -`（文本走标准输入，不进 argv） |
-| `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
+| `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json`（**有写副作用**，见下） |
 
 清单之外的子命令，adapter 会直接拒绝执行（`ErrSubcommandNotAllowed`）。
 
-`list` 是 attempt 7 加的，只读。它直接读上游存储，不经 headless 服务——
+`list` 是 attempt 7 加的。它直接读上游存储，不经 headless 服务——
 这正是它的用处：服务的菜单缓存看不见刚 launch 的会话，而 `list` 看得见。
 按 T 直连时先问 `/api/menu`，问不到就退到它。实测见第 7 节末尾。
+
+### 白名单里哪些命令会写上游
+
+**「在允许清单里」不等于「没有副作用」。** 这两件事分开记：
+
+| 命令 | 写什么 |
+|---|---|
+| `launch` | 新建并启动会话，写入上游存储 |
+| `web` | 起一个 headless 服务进程 |
+| `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） |
+| `session send` | 把文本投进目标会话，对方当成输入处理 |
+| `session attach` / `session output` | 不写 |
+
+`list --json` 在输出之前会先跑一遍状态刷新，那条路一直通到 SQLite：
+
+```
+cmd/agent-deck/main.go:2277           RefreshInstancesForCLIStatus(instances)
+internal/session/cli_status_refresh.go:37    inst.UpdateHookStatus(hs)
+internal/session/instance.go:6280            defer i.persistLastActivity(false)
+internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
+```
+
+写的只是一个活动时间戳，不改会话状态、不停会话。但它确实是持久化写入，
+所以 attempt 7 说的「白名单只新增了一个只读命令」不成立。
+
+> 这条是独立评审顺着上游源码追出来的。执行者读过 `list --json` 那段代码——
+> `RefreshInstancesForCLIStatus` 就在他查的 `sessionJSON` 结构体下面几行——
+> 却没追进去看它做什么，就写下了「只读」。
+>
+> 教训：**一个命令叫什么名字，不说明它做了什么。** 把上游命令加进白名单之前，
+> 顺着它的实现追到底，看它写不写东西。
+
+机器可读的同一份声明在 `manifest.go` 的 `SideEffects`，一致性测试盯着两者不漂移。
 
 `session send` 是 n037 attempt 6 加的。派评审必须分两步——先起空会话、
 核验上游返回的会话号、再投递 brief——否则 brief 随 launch 出去，
@@ -131,7 +164,34 @@ profile 上，一次覆盖掉 36 个生产会话。所以这里不接受默认�
 用法：`tmuxSocketName` 非空就带 `-L <socket>`，为空就是默认 server，不带。
 参数按 argv 逐个传，不拼 shell 字符串——socket 名来自上游数据。
 
-### 嵌套
+#### socket 名拿不到时怎么办
+
+按 T 走降级路径时，`list --json` 给得出 tmux 会话名，给不出 socket 名。
+**这时不能就这么连。**
+
+tmux 的不同 server 各有各的命名空间，同名会话完全可能是毫不相干的两个东西。
+不带 `-L` 连上的是默认 server 上那个——而且不会报错，人会以为自己进对了地方。
+**连错比连不上严重得多。**
+
+所以扫一遍：`$TMUX_TMPDIR`（没设就是 `/tmp/tmux-<uid>`）下每个 socket 跑一次
+`has-session`，看这个会话名出现在几个 server 上。
+
+| 命中数 | 处置 |
+|---:|---|
+| 1 | 目标唯一，把那个 socket 名带上去连（顺便把 socket 名找回来了） |
+| 0 | 会话不在了，拒绝 |
+| ≥2 | 说不清是哪个，**拒绝**（`ErrAmbiguousTmuxTarget`） |
+
+`has-session` 只查询，不改会话状态——实测连跑三次，`session_activity` 不变。
+死 socket 文件会报 "no server running" 并以非零码返回，自然被跳过。
+
+> attempt 7 的降级路径是无条件按默认 server 连，还在提示里说「非默认 socket
+> 就会连不上」。独立评审实测复现：在两个 server 上建同名会话，
+> 不带 `-L` 会**静默连进默认 server 上那个**——不是连不上，是连错了。
+>
+> 教训：**「通常不会同名」不是可以拿来赌的前提。** 证明不了目标唯一就别连。
+
+## 嵌套
 
 Work Deck 常开在 tmux 窗格里，进入会话就是两层。tmux 默认拒绝：
 

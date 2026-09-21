@@ -409,8 +409,10 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 // 那说明会话活着，是上游那条路问不到它。上游 headless 服务对菜单快照做内存缓存，
 // CLI 刚起的会话它可能一直看不到，这是实测过的。
 //
-// 这条路只从 `GET /api/menu` 取 tmux 会话名和 socket 名，不碰 `list --json`
-// （那边的行里根本没有 socket 字段，见 adapter 的 MANIFEST.md 第 7 节）。
+// 取数在 adapter 里分两处：先问 `GET /api/menu`（唯一给 socket 名的来源），
+// 菜单里没有这个会话时退到 CLI `list --json`，再扫本机 tmux server 把 socket
+// 名找回来并证明目标唯一。证明不了就拒绝，不盲连。细节见 adapter 的
+// DirectAttachCommand 与 ResolveSocketFor。
 func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
 	if !ok {

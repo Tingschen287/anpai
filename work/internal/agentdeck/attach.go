@@ -153,8 +153,11 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 // 我把它写进了注释当作 T 存在的理由，却没想到 T 自己也依赖那个被缓存的接口。
 //
 // `list` 不经服务，看得见；代价是它的行里没有 socket 名（上游结构体里就没这个
-// 字段，见 MANIFEST.md 第 7 节），只能按默认 tmux server 连。
-// 这件事必须说出来，所以第二个返回值是给人看的说明——降级不许静默。
+// 字段，见 MANIFEST.md 第 7 节）。socket 名靠扫描本机 tmux server 找回来，
+// 顺便证明目标唯一——同名会话可以并存于不同 server，盲连会静默连错。
+// 证明不了就拒绝，见 ResolveSocketFor。
+//
+// 降级这件事必须说出来，所以第二个返回值是给人看的说明——降级不许静默。
 //
 // 实测两条来源的差异：TestIntegrationListSeesWhatTheCachedMenuCannot。
 func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error) {
@@ -183,9 +186,31 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	if !ok {
 		return nil, "", fmt.Errorf("菜单和 list 里都没有会话 %s 的 tmux 会话名，无法直连", sessionID)
 	}
-	cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, "")
-	note := "菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名。" +
-		"list 不含 socket 名，这次按默认 tmux server 连——" +
-		"要是这个 profile 配了非默认 socket，就会连不上。"
+
+	// list 给得出会话名，给不出 socket 名。**不能就这么连。**
+	//
+	// tmux 的不同 server 各有各的命名空间，同名会话完全可能是毫不相干的两个东西。
+	// 不带 -L 连上的是默认 server 上那个——连错比连不上严重得多，
+	// 而且它不会报错，你会以为自己进对了地方。
+	//
+	// 所以扫一遍本机所有 tmux server，证明这个名字只在一个上面，
+	// 顺便把 socket 名找回来。证明不了就拒绝。
+	socketName, err := ResolveSocketFor(ctx, tmuxSession)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"菜单里没有这个会话（多半是服务的菜单缓存），list 给出了 tmux 会话名 %s，"+
+				"但拿不到 socket 名，扫描也证明不了目标唯一：%w。"+
+				"重启一下上游 headless 服务让菜单刷新，再按 T 就能拿到 socket 名",
+			tmuxSession, err)
+	}
+
+	cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
+	where := "默认 tmux server"
+	if socketName != "" {
+		where = "socket " + socketName
+	}
+	note := fmt.Sprintf(
+		"菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名，"+
+			"并扫描本机 tmux server 确认这个名字只在一处，连的是 %s。", where)
 	return cmd, note, err
 }

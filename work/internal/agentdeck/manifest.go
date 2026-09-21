@@ -24,6 +24,22 @@ var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wa
 // WebFlags 是 Work Deck 启动 headless 服务时用的全部参数。
 var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
+// SideEffects 逐条记下白名单里哪些命令有写副作用，以及写的是什么。
+//
+// 白名单管「允许跑哪些命令」，这份清单管「跑了之后上游会变什么」。
+// 两件事分开记，因为「在允许清单里」不等于「没有副作用」——
+// attempt 7 把 `list` 当成只读加了进去，独立评审顺着上游源码追出它会写 SQLite。
+//
+// 没有列在这里的白名单命令，意思是它不写上游的持久化状态。
+var SideEffects = map[string]string{
+	"launch": "新建并启动一个会话，写入上游存储",
+	"web":    "起一个 headless 服务进程",
+	"list": "读之前会先跑 RefreshInstancesForCLIStatus 暖 tmux 缓存并加载 hook 状态，" +
+		"经 UpdateHookStatus → persistLastActivity 把 last_activity_at 写进 state.db；" +
+		"只是活动时间戳，不改会话状态、不停会话",
+	"session send": "把一段文本投进目标会话，对方会当成输入处理",
+}
+
 // HTTPEndpoints 是 Work Deck 会请求的全部端点。
 var HTTPEndpoints = []string{"/api/sessions", "/api/menu", "/events/menu"}
 
@@ -58,6 +74,9 @@ var TmuxConventions = []string{
 	"会话名从 /api/sessions 或 /api/menu 的 tmuxSession 字段取，不自己根据标题推算",
 	"服务缓存看不见刚 launch 的会话时，会话名改从 list --json 的 tmux_session 取",
 	"socket 名只有 /api/menu 给，list --json 的行里没有这个字段；空值即默认 server",
+	"socket 名拿不到时，扫 $TMUX_TMPDIR（或 /tmp/tmux-<uid>）下每个 socket 跑 has-session，" +
+		"证明会话名只在一个 server 上才连；多个或零个都拒绝",
+	"has-session 只查询，不改会话状态——实测跑三次 session_activity 不变；死 socket 会报错，自然跳过",
 }
 
 // NotUsed 明确记下 Work Deck **不**依赖的上游内部物，防止有人顺手就用上。

@@ -374,10 +374,25 @@ func TestIntegrationListSeesWhatTheCachedMenuCannot(t *testing.T) {
 	if !strings.Contains(strings.Join(cmd.Args, " "), tmuxSession) {
 		t.Errorf("直连命令没指向 list 给出的那个 tmux 会话：%v", cmd.Args)
 	}
-	// list 拿不到 socket 名，所以这条命令不该带 -L。
-	for _, a := range cmd.Args {
-		if a == "-L" {
-			t.Errorf("list 没有 socket 名，命令里却出现了 -L：%v", cmd.Args)
+
+	// 四、socket 名是扫出来的，不是猜的。
+	//
+	// list 给不出 socket 名，而不带 -L 盲连会撞上默认 server 的同名会话。
+	// 所以降级路径要扫本机每个 tmux server，证明这个名字只在一处，
+	// 顺便把 socket 名找回来。这里确认扫描结论与命令一致。
+	socket, err := ResolveSocketFor(ctx, tmuxSession)
+	if err != nil {
+		t.Fatalf("扫描应当能唯一定位这个会话：%v", err)
+	}
+	args := strings.Join(cmd.Args, " ")
+	if socket == "" {
+		// 默认 server，不该带 -L。
+		for _, a := range cmd.Args {
+			if a == "-L" {
+				t.Errorf("扫描说是默认 server，命令里却出现了 -L：%v", cmd.Args)
+			}
 		}
+	} else if !strings.Contains(args, "-L "+socket) {
+		t.Errorf("扫描出的 socket 是 %q，命令里没带上：%v", socket, cmd.Args)
 	}
 }
