@@ -138,20 +138,54 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 
 // DirectAttachCommand 造一条直连会话所在 tmux 的命令，界面上对应按 T。
 //
-// 取数只有一处：`GET /api/menu`。socket 名带 omitempty，空就是默认 server，
-// 不带 -L 就对；`list --json` 的行里根本没有这个字段，所以这条路不走那边。
-// 见 MANIFEST.md 第 7 节。
-func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+// 两处取数，顺序有讲究：
+//
+//	1. `GET /api/menu`——它同时给 tmux 会话名和 socket 名，是最准的一份。
+//	2. 菜单里没有这个会话时，退到 CLI `list --json`。
+//
+// 第 2 步不是可有可无的保险，它正是这条路存在的理由。上游 headless 服务对
+// 菜单快照做内存缓存，只在自己处理变更时失效；CLI `launch` 是另一个进程，
+// 服务感知不到，刚派出去的会话在菜单里一直是看不见的，直到服务重启。
+// 也就是说：**最需要按 T 的时候，菜单恰好是空的。**
+//
+// attempt 6 只取菜单，于是这条路在它自己宣称的主场景下必然失败——
+// 独立评审复现了这一点。而这个缓存事实是本包自己的集成测试早就钉死的，
+// 我把它写进了注释当作 T 存在的理由，却没想到 T 自己也依赖那个被缓存的接口。
+//
+// `list` 不经服务，看得见；代价是它的行里没有 socket 名（上游结构体里就没这个
+// 字段，见 MANIFEST.md 第 7 节），只能按默认 tmux server 连。
+// 这件事必须说出来，所以第二个返回值是给人看的说明——降级不许静默。
+//
+// 实测两条来源的差异：TestIntegrationListSeesWhatTheCachedMenuCannot。
+func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("没有会话号，无法直连")
+		return nil, "", fmt.Errorf("没有会话号，无法直连")
 	}
-	menu, err := c.MenuSnapshot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("取不到菜单快照，直连没有落脚点：%w", err)
+
+	// 先问菜单。拿得到就用它，socket 名也在里面。
+	menu, menuErr := c.MenuSnapshot(ctx)
+	if menuErr == nil {
+		if tmuxSession, socketName, ok := menu.TmuxTargetOf(sessionID); ok {
+			cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
+			return cmd, "", err
+		}
 	}
-	tmuxSession, socketName, ok := menu.TmuxTargetOf(sessionID)
+
+	// 菜单没有它。多半就是那个缓存——这正是按 T 的时候。
+	listed, listErr := c.ListSessions(ctx)
+	if listErr != nil {
+		if menuErr != nil {
+			return nil, "", fmt.Errorf("菜单读不到（%v），list 也读不到：%w", menuErr, listErr)
+		}
+		return nil, "", fmt.Errorf("菜单里没有会话 %s，list 也读不到：%w", sessionID, listErr)
+	}
+	tmuxSession, ok := TmuxSessionOf(listed, sessionID)
 	if !ok {
-		return nil, fmt.Errorf("菜单里没有会话 %s 的 tmux 会话名，无法直连", sessionID)
+		return nil, "", fmt.Errorf("菜单和 list 里都没有会话 %s 的 tmux 会话名，无法直连", sessionID)
 	}
-	return c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
+	cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, "")
+	note := "菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名。" +
+		"list 不含 socket 名，这次按默认 tmux server 连——" +
+		"要是这个 profile 配了非默认 socket，就会连不上。"
+	return cmd, note, err
 }

@@ -38,7 +38,11 @@ import (
 //
 // 执行者此前以「加这个等于放开一整片操作面」为由拒绝实现两阶段投递，
 // 那个理由是错的，独立评审指出了这一点。
-var Subcommands = []string{"launch", "web", "session attach", "session output", "session send"}
+//
+// `list` 是 attempt 7 加的，只读，直接读上游存储不经 headless 服务——
+// 这一条正是它的用处：服务的菜单缓存看不见刚 launch 的会话，而 list 看得见。
+// 实测见 TestIntegrationListSeesWhatTheCachedMenuCannot。
+var Subcommands = []string{"launch", "web", "list", "session attach", "session output", "session send"}
 
 // isAllowedSubcommand 按整条命令路径匹配。
 //

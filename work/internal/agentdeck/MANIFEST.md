@@ -16,8 +16,13 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
 | `session send` | 把评审 brief 投进一个已核验会话号的评审会话 | `--message-file -`（文本走标准输入，不进 argv） |
+| `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
 
 清单之外的子命令，adapter 会直接拒绝执行（`ErrSubcommandNotAllowed`）。
+
+`list` 是 attempt 7 加的，只读。它直接读上游存储，不经 headless 服务——
+这正是它的用处：服务的菜单缓存看不见刚 launch 的会话，而 `list` 看得见。
+按 T 直连时先问 `/api/menu`，问不到就退到它。实测见第 7 节末尾。
 
 `session send` 是 n037 attempt 6 加的。派评审必须分两步——先起空会话、
 核验上游返回的会话号、再投递 brief——否则 brief 随 launch 出去，
@@ -42,7 +47,13 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 | 端点 | 用途 | 说明 |
 |---|---|---|
 | `GET /api/sessions` | 冷启动取一次全量会话 | 返回 `sessions[]`、`groups[]`、`profile` |
+| `GET /api/menu` | 按 T 直连 tmux 时取会话名与 socket 名 | 菜单快照的原始形态，含分组层级 |
 | `GET /events/menu` | SSE 实时菜单 | 每次推**全量**快照，不是增量，收到整份替换 |
+
+`GET /api/menu` 在 attempt 6 之前一直没进这张表，尽管生产路径已经在调它。
+漏得掉的原因是一致性测试只做单向检查——「清单列的端点能在源码里找到」，
+不检查「源码调的端点都在清单里」。attempt 7 补了反向那一半
+（`TestEveryEndpointInSourceIsListed`）。
 
 ## 3. 依赖的输出字段
 

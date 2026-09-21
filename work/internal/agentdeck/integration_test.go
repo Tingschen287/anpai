@@ -283,10 +283,101 @@ func TestIntegrationTokenIsEnforced(t *testing.T) {
 }
 
 // 清单之外的子命令，即使上游真有，也不许通过本包跑。
+//
+// 例子选的是 `session stop`：上游确实有这条命令，而它正是白名单要挡住的那类——
+// Work Deck 没有停掉别人会话的道理。
+//
+// 这里原先拿 `list` 当例子，attempt 7 把 `list` 放进白名单之后就不能用了。
+// 换例子的时候顺手把语义也挑得更准：挡住一条无害的只读命令没什么说服力，
+// 挡住一条能停掉别人会话的命令才是这条白名单的意义。
 func TestIntegrationRefusedSubcommandNeverReachesUpstream(t *testing.T) {
 	c, _ := liveUpstream(t)
-	// list 是上游真实存在的子命令，但不在白名单里。
-	if _, err := c.exec(context.Background(), "list"); err == nil {
-		t.Fatal("清单之外的子命令必须被拒绝，哪怕上游真的支持它")
+	ctx := context.Background()
+
+	// 二级子命令：session 在白名单里有 attach / output / send，但没有 stop。
+	if _, err := c.exec(ctx, "session", "stop", "无所谓什么会话号"); err == nil {
+		t.Fatal("session stop 必须被拒绝，哪怕上游真的支持它")
+	}
+	// 一级子命令：上游有 doctor，本包没理由跑它。
+	if _, err := c.exec(ctx, "doctor"); err == nil {
+		t.Fatal("清单之外的一级子命令必须被拒绝")
+	}
+}
+
+// 服务的菜单缓存看不见刚 launch 的会话，而 CLI list 看得见。
+//
+// 这条是按 T 直连那条路的地基。attempt 6 的直连只从 /api/menu 取目标，
+// 而独立评审指出：菜单恰好是那个被缓存的接口，所以直连在它自己宣称的
+// 主场景（服务看不见新会话）下必然失败。这里把两条来源的差异钉死，
+// 并证明 DirectAttachCommand 在那个场景下真的还能造出命令来。
+//
+// 上游哪天把缓存修好了，这个测试会失败——那正是该回来更新依赖清单、
+// 并重新考虑直连是否还需要那条降级的时候。
+func TestIntegrationListSeesWhatTheCachedMenuCannot(t *testing.T) {
+	c, _ := liveUpstream(t)
+	ctx := context.Background()
+
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "README.md"), []byte("# 夹具项目\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	title := "n037it-" + randomHex(t, 3)
+
+	res, err := c.Launch(ctx, LaunchRequest{
+		ProjectPath: project, Title: title, Group: "n037it",
+		Tool: "shell", ModelNotApplicable: true, NoWait: true,
+	})
+	if err != nil {
+		t.Fatalf("派工失败：%v", err)
+	}
+	if res.SessionID == "" {
+		t.Fatalf("上游没有回传会话号：%+v", res)
+	}
+
+	// 给足时间，确认下面看不到不是时序问题。
+	time.Sleep(3 * time.Second)
+
+	// 一、菜单看不到它。这是上游的已知约束，不是我们的 bug。
+	menu, err := c.MenuSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("取菜单失败：%v", err)
+	}
+	if _, _, ok := menu.TmuxTargetOf(res.SessionID); ok {
+		t.Fatalf("上游行为变了：菜单现在能看到 CLI 刚 launch 的会话 %s。"+
+			"这是好事，但依赖清单与直连那条路的降级逻辑要一起更新", res.SessionID)
+	}
+
+	// 二、list 看得到，而且给出了 tmux 会话名。
+	listed, err := c.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("list --json 失败：%v", err)
+	}
+	tmuxSession, ok := TmuxSessionOf(listed, res.SessionID)
+	if !ok {
+		t.Fatalf("list 里也没有会话 %s 的 tmux 会话名：直连那条路没有第二个来源了", res.SessionID)
+	}
+	if tmuxSession == "" {
+		t.Fatal("list 给出的 tmux 会话名是空的")
+	}
+
+	// 三、于是直连在这个场景下仍然能造出命令，并且明说自己降级了。
+	cmd, note, err := c.DirectAttachCommand(ctx, res.SessionID)
+	if err != nil {
+		t.Fatalf("菜单看不见时直连也失败了，这条路就白加了：%v", err)
+	}
+	if cmd == nil {
+		t.Fatal("直连没有报错，却也没给出命令")
+	}
+	if note == "" {
+		t.Error("走了降级来源却一声不吭：降级必须说出来")
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), tmuxSession) {
+		t.Errorf("直连命令没指向 list 给出的那个 tmux 会话：%v", cmd.Args)
+	}
+	// list 拿不到 socket 名，所以这条命令不该带 -L。
+	for _, a := range cmd.Args {
+		if a == "-L" {
+			t.Errorf("list 没有 socket 名，命令里却出现了 -L：%v", cmd.Args)
+		}
 	}
 }

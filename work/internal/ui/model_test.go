@@ -307,18 +307,20 @@ type fakeAttacher struct {
 	// direct 记下 T 那条路被走了几次，directErr 让它失败。
 	direct    []string
 	directErr error
+	// directNote 是 adapter 退到次一等来源时给出的说明。
+	directNote string
 	text      string
 	textErr   error
 	advice    string
 }
 
-// DirectAttachCommand 是按 T 走的那条。
-func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+// DirectAttachCommand 是按 T 走的那条。directNote 模拟 adapter 退到次一等来源。
+func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error) {
 	f.direct = append(f.direct, sessionID)
 	if f.directErr != nil {
-		return nil, f.directErr
+		return nil, "", f.directErr
 	}
-	return exec.Command("true"), nil
+	return exec.Command("true"), f.directNote, nil
 }
 
 func (f *fakeAttacher) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {

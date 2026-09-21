@@ -102,7 +102,11 @@ type Attacher interface {
 	// 进程去问 headless 服务的，而那个服务对菜单快照做内存缓存，只在自己处理
 	// 变更时失效——CLI 刚 launch 出来的会话，同一个服务实例可能一直看不到，
 	// 直到重启。那种时候 tmux 里的会话好好的，只是上游那条路问不到它。
-	DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
+	//
+	// 第二个返回值是给人看的说明：adapter 若退到了次一等的取数来源，
+	// 这里会讲清楚退到了哪、代价是什么。空串表示走的是最准的那条。
+	// 降级不许静默——界面要把这句话原样显示出来。
+	DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error)
 	// PaneOutputPlain 取会话当前画面的纯文本，只读，不接管。
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
 	// NestingAdvice 是进去之前要讲清楚的前缀键用法。
@@ -422,12 +426,17 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 		m.notice, m.noticeOK = err.Error(), false
 		return m, nil
 	}
-	cmd, err := m.attacher.DirectAttachCommand(context.Background(), sessionID)
+	cmd, note, err := m.attacher.DirectAttachCommand(context.Background(), sessionID)
 	if err != nil {
 		m.notice, m.noticeOK = "直连 tmux 也进不去："+err.Error()+"。可以先按 p 看一眼画面", false
 		return m, nil
 	}
-	m.notice = "绕开上游，直连 tmux。" + m.attacher.NestingAdvice()
+	m.notice = "绕开上游，直连 tmux。"
+	if note != "" {
+		// adapter 退到了次一等的来源，把代价讲清楚再进去。
+		m.notice += note
+	}
+	m.notice += m.attacher.NestingAdvice()
 	m.noticeOK = true
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}

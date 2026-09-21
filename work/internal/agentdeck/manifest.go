@@ -13,6 +13,11 @@ const UpstreamVersion = "Agent Deck v1.15.0"
 // UpstreamCommit 是上游快照的提交号。
 const UpstreamCommit = "01c011b"
 
+// CLIJSONFields 是 Work Deck 从 list --json 的行里读的字段。
+//
+// 注意它和 SessionFields 不是一套：命名是 snake_case，而且没有 socket 名。
+var CLIJSONFields = []string{"id", "title", "tool", "status", "path", "group", "tmux_session", "profile", "archived"}
+
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
 var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wait"}
 
@@ -20,7 +25,7 @@ var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wa
 var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
 // HTTPEndpoints 是 Work Deck 会请求的全部端点。
-var HTTPEndpoints = []string{"/api/sessions", "/events/menu"}
+var HTTPEndpoints = []string{"/api/sessions", "/api/menu", "/events/menu"}
 
 // LaunchFields 是 Work Deck 从 launch --json 里读的字段。
 var LaunchFields = []string{
@@ -44,10 +49,15 @@ var EnvVars = []string{"AGENTDECK_PROFILE"}
 
 // TmuxConventions 记录 Work Deck 依赖的 tmux 约定。
 //
-// 本轮只读到会话名，不 attach、不发按键。attach 是 n037 的事。
+// 自 n037 起 Work Deck 会 attach（按 a 走上游 session attach，按 T 直连 tmux），
+// 但一律不发按键：包内不出现任何注入按键的 tmux 子命令，两条测试扫源码盯着。
+// （这里不写出那个子命令的名字——守边测试是按文本扫的，写出来它自己就会红。）
+// 这段注释在 attempt 6 之前还写着「本轮不 attach」，那是 n036 时的话。
 var TmuxConventions = []string{
 	"会话名形如 agentdeck_<title>_<hash>，由上游生成，Work Deck 只读不拼",
-	"会话名从 /api/sessions 的 tmuxSession 字段取，不自己根据标题推算",
+	"会话名从 /api/sessions 或 /api/menu 的 tmuxSession 字段取，不自己根据标题推算",
+	"服务缓存看不见刚 launch 的会话时，会话名改从 list --json 的 tmux_session 取",
+	"socket 名只有 /api/menu 给，list --json 的行里没有这个字段；空值即默认 server",
 }
 
 // NotUsed 明确记下 Work Deck **不**依赖的上游内部物，防止有人顺手就用上。

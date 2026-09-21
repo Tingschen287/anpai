@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -125,7 +126,7 @@ func TestManifestSubcommandsMatchAllowList(t *testing.T) {
 	// 这张表是写死的，改白名单就得同时改这里——那正是它的用处：
 	// 让「多放行一条上游命令」成为一个必须被看见的改动，而不是顺手加上去的。
 	if !reflect.DeepEqual(Subcommands, []string{
-		"launch", "web", "session attach", "session output", "session send",
+		"launch", "web", "list", "session attach", "session output", "session send",
 	}) {
 		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
 	}
@@ -351,5 +352,49 @@ func TestManifestListsSocketName(t *testing.T) {
 	}
 	if !strings.Contains(md, "omitempty") {
 		t.Error("MANIFEST.md 没说明该字段为什么会看不见")
+	}
+}
+
+// 源码里请求的每一个端点，都必须在清单里。
+//
+// 这是原先缺掉的那一半。旧的一致性测试只查「清单列的端点能在源码里找到」，
+// 反过来没人查——于是 `GET /api/menu` 在生产路径上被调了整整一个节点，
+// 依赖清单里却一直没有它，而测试全绿。独立评审把这个单向性挑了出来。
+//
+// 单向的检查只能防「清单写多了」，防不住「清单写少了」，
+// 而后者才是依赖清单真正要防的事。
+func TestEveryEndpointInSourceIsListed(t *testing.T) {
+	src := readPackageSource(t)
+
+	// 找出源码里所有形如 "/api/..." 或 "/events/..." 的字面量。
+	re := regexp.MustCompile(`"(/(?:api|events)/[a-zA-Z0-9_/-]+)"`)
+	found := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		found[m[1]] = true
+	}
+	if len(found) == 0 {
+		t.Fatal("源码里一个端点字面量都没找到：这个检查多半已经失效")
+	}
+
+	listed := map[string]bool{}
+	for _, ep := range HTTPEndpoints {
+		listed[ep] = true
+	}
+	for ep := range found {
+		if !listed[ep] {
+			t.Errorf("源码请求了端点 %q，依赖清单 HTTPEndpoints 里却没有它", ep)
+		}
+	}
+
+	// 人读的那份也要有。
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := string(data)
+	for ep := range found {
+		if !strings.Contains(manifest, ep) {
+			t.Errorf("源码请求了端点 %q，MANIFEST.md 里却没提到它", ep)
+		}
 	}
 }
