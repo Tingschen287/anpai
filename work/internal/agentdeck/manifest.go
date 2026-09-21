@@ -24,20 +24,70 @@ var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wa
 // WebFlags 是 Work Deck 启动 headless 服务时用的全部参数。
 var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
-// SideEffects 逐条记下白名单里哪些命令有写副作用，以及写的是什么。
+// SideEffect 是一条上游命令跑完之后，上游那边会变什么。
 //
-// 白名单管「允许跑哪些命令」，这份清单管「跑了之后上游会变什么」。
-// 两件事分开记，因为「在允许清单里」不等于「没有副作用」——
-// attempt 7 把 `list` 当成只读加了进去，独立评审顺着上游源码追出它会写 SQLite。
+// Where 是上游源码里的依据，形如 internal/session/storage.go:209。
+// 写成结构而不是一句话，是为了让描述有据可查——
+// manifest_test 会拿这些路径去上游快照里核对，凭空写的依据过不了。
+type SideEffect struct {
+	What  string
+	Where []string
+}
+
+// SharedStorageInit 是所有命令共有的那一份副作用。
 //
-// 没有列在这里的白名单命令，意思是它不写上游的持久化状态。
-var SideEffects = map[string]string{
-	"launch": "新建并启动一个会话，写入上游存储",
-	"web":    "起一个 headless 服务进程",
-	"list": "读之前会先跑 RefreshInstancesForCLIStatus 暖 tmux 缓存并加载 hook 状态，" +
-		"经 UpdateHookStatus → persistLastActivity 把 last_activity_at 写进 state.db；" +
-		"只是活动时间戳，不改会话状态、不停会话",
-	"session send": "把一段文本投进目标会话，对方会当成输入处理",
+// 每条 CLI 子命令跑起来都要先加载 profile，那条路会建 profile 目录、
+// 建 state.db、跑 schema 迁移，必要时还会把旧的 sessions.json 迁过来改名。
+// 也就是说**没有一条命令是纯读的**，哪怕它叫 list 或 output。
+var SharedStorageInit = SideEffect{
+	What: "加载 profile 时建 profile 目录与 state.db、跑 schema 迁移、" +
+		"必要时迁移并重命名旧的 sessions.json",
+	Where: []string{"internal/session/storage.go:209"},
+}
+
+// SideEffects 逐条记下白名单里每条命令在上游留下什么。
+//
+// **白名单管「允许跑哪些命令」，这份清单管「跑了之后上游会变什么」。**
+// 两件事分开记，因为「在允许清单里」不等于「没有副作用」。
+//
+// 这份清单错过两次：attempt 7 把 list 当成只读，attempt 8 又把
+// session attach / session output 硬编码成「不写」。两次都是独立评审顺着
+// 上游源码追出来的。凡是这里写「不写」的，都得说得出依据。
+//
+// 每条命令都要在这里有个交代，没有「只读桶」可以躲——
+// SharedStorageInit 对所有命令都成立，各条再补自己特有的。
+var SideEffects = map[string]SideEffect{
+	"launch": {
+		What:  "新建并启动一个会话，写入上游存储；建 tmux 会话并写入会话环境变量",
+		Where: []string{"internal/session/instance.go:4939"},
+	},
+	"web": {
+		What:  "起 headless 服务进程，把 instance 注册进 SQLite，可能执行 cost retention purge",
+		Where: []string{"internal/session/storage.go:209"},
+	},
+	"list": {
+		What: "输出之前先跑 RefreshInstancesForCLIStatus 暖 tmux 缓存并加载 hook 状态，" +
+			"经 UpdateHookStatus → persistLastActivity 把 last_activity_at 写进 state.db；" +
+			"写的是真实 hook 活动的时间戳，不是当前时间，也不改会话状态",
+		Where: []string{
+			"cmd/agent-deck/main.go:2277",
+			"internal/session/cli_status_refresh.go:16",
+			"internal/session/last_activity_persist.go:107",
+		},
+	},
+	"session attach": {
+		What: "启动 badge watcher，其中 os.MkdirAll 建 badge 更新目录；" +
+			"并给目标 tmux 会话增加一个 attached client",
+		Where: []string{"internal/tmux/badge_update.go:124"},
+	},
+	"session output": {
+		What:  "跑 capture-pane 取画面，不发按键、不改会话状态；除共有的 storage 初始化外不写",
+		Where: []string{"internal/session/storage.go:209"},
+	},
+	"session send": {
+		What:  "把一段文本投进目标会话，对方会当成输入处理",
+		Where: []string{"cmd/agent-deck/session_cmd.go:2685"},
+	},
 }
 
 // HTTPEndpoints 是 Work Deck 会请求的全部端点。
@@ -76,7 +126,12 @@ var TmuxConventions = []string{
 	"socket 名只有 /api/menu 给，list --json 的行里没有这个字段；空值即默认 server",
 	"socket 名拿不到时，扫 $TMUX_TMPDIR（或 /tmp/tmux-<uid>）下每个 socket 跑 has-session，" +
 		"证明会话名只在一个 server 上才连；多个或零个都拒绝",
-	"has-session 只查询，不改会话状态——实测跑三次 session_activity 不变；死 socket 会报错，自然跳过",
+	"has-session 与 show-environment 都只查询，不改会话状态——" +
+		"各跑三次实测 session_activity 不变（前后两次都取到了值，不是空对空）；死 socket 会报错，自然跳过",
+	"目标一律用 tmux 的精确形式 =<session>：不带等号时 -t 是前缀匹配，" +
+		"只有 name-suffix 存在也会命中并连进去",
+	"会话身份取自会话环境里的 AGENTDECK_INSTANCE_ID，由上游建会话时写入；" +
+		"名字只当查找键，认不认这个会话由身份说了算",
 }
 
 // NotUsed 明确记下 Work Deck **不**依赖的上游内部物，防止有人顺手就用上。

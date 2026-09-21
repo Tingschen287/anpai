@@ -38,7 +38,7 @@ func isReadOnly(command string) bool {
 type ErrWriteCommandRefused struct{ Command string }
 
 func (e *ErrWriteCommandRefused) Error() string {
-	return fmt.Sprintf("拒绝执行非只读子命令 %q：Work Deck 本轮只读，不写 Graph 账本", e.Command)
+	return fmt.Sprintf("拒绝执行非只读子命令 %q：Work Deck 对 Graph 控制器只读，不写事件账本", e.Command)
 }
 
 // Client 执行 projectctl 并把输出翻译成 Work Deck 的类型。

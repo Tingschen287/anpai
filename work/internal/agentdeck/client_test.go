@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"runtime"
 	"strings"
 	"testing"
@@ -292,7 +293,9 @@ func TestDirectAttachPassesSocketNameAsArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("有 socket 名时不该拒绝：%v", err)
 	}
-	want := []string{"tmux", "-L", "mysock", "attach-session", "-t", "agentdeck_x_1"}
+	// `=` 是 tmux 的精确目标形式。不带它，`-t name` 会前缀匹配到 name-suffix，
+	// attach 就进了别的会话——实测过，见 socketscan.go 的 exactTarget。
+	want := []string{"tmux", "-L", "mysock", "attach-session", "-t", "=agentdeck_x_1"}
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
 	}
@@ -302,7 +305,7 @@ func TestDirectAttachPassesSocketNameAsArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("默认 socket 时不该拒绝：%v", err)
 	}
-	want = []string{"tmux", "attach-session", "-t", "agentdeck_y_2"}
+	want = []string{"tmux", "attach-session", "-t", "=agentdeck_y_2"}
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
 	}
@@ -399,43 +402,89 @@ func TestEveryEndpointInSourceIsListed(t *testing.T) {
 	}
 }
 
-// 白名单里的每一条命令，都要在副作用清单里有个交代。
+// 白名单里的每一条命令，都要在副作用清单里有个交代，而且交代要有据可查。
 //
-// 「在允许清单里」不等于「没有副作用」。attempt 7 把 `list` 当只读加了进去，
-// 独立评审顺着上游源码追出它会把 last_activity_at 写进 state.db。
-// 这个测试逼着下一个加命令的人回答同一个问题：它写不写东西。
+// 这个测试改过两版。第一版只查「每条命令被放进某个桶」，
+// 于是 attempt 8 把 session attach / output 硬编码成「不写」也照样绿——
+// 而它们实际都会经 NewStorageWithProfile 建目录建库、跑 schema 迁移，
+// attach 还会 MkdirAll 一个 badge 目录。独立评审指出：
+// **分桶验证不了桶里的描述是不是真的。**
+//
+// 现在每条声明都要带上游源码依据，下面那个测试拿这些依据去上游快照里核对。
 func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
-	// 明确声明不写的，列在这里；其余必须出现在 SideEffects 里。
-	readOnly := map[string]bool{
-		"session attach": true,
-		"session output": true,
-	}
 	for _, sub := range Subcommands {
-		if readOnly[sub] {
-			if _, ok := SideEffects[sub]; ok {
-				t.Errorf("%q 既被当成只读，又列进了副作用清单，说法不一致", sub)
-			}
+		e, ok := SideEffects[sub]
+		if !ok {
+			t.Errorf("白名单里有 %q，副作用清单里却没有它："+
+				"加一条上游命令时要说清楚它在上游留下什么", sub)
 			continue
 		}
-		if _, ok := SideEffects[sub]; !ok {
-			t.Errorf("白名单里有 %q，副作用清单里却没有它："+
-				"加一条上游命令时要说清楚它写不写东西", sub)
+		if strings.TrimSpace(e.What) == "" {
+			t.Errorf("%q 的副作用描述是空的", sub)
+		}
+		if len(e.Where) == 0 {
+			t.Errorf("%q 的副作用没给上游依据：说不出在哪，就等于没说", sub)
 		}
 	}
-	// 反过来，副作用清单里不该有白名单之外的命令。
 	for sub := range SideEffects {
 		if !isAllowedSubcommand(strings.Fields(sub)...) {
 			t.Errorf("副作用清单里有 %q，但它不在白名单里", sub)
 		}
 	}
-	// 人读的那份也要提到 list 会写。
+	if len(SharedStorageInit.Where) == 0 {
+		t.Error("共有的 storage 初始化副作用没给依据")
+	}
+
+	// 人读的那份要讲清没有纯读命令这件事。
 	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, must := range []string{"last_activity_at", "WriteLastActivityAt", "不等于"} {
+	for _, must := range []string{"last_activity_at", "NewStorageWithProfile", "不等于"} {
 		if !strings.Contains(string(data), must) {
-			t.Errorf("MANIFEST.md 没讲清 list 的写副作用：缺 %q", must)
+			t.Errorf("MANIFEST.md 没讲清副作用：缺 %q", must)
 		}
 	}
+}
+
+// 副作用声明里写的上游位置，必须真的存在。
+//
+// 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
+// 快照路径用 WORKDECK_UPSTREAM_SRC 指定。
+func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
+	src := os.Getenv("WORKDECK_UPSTREAM_SRC")
+	if src == "" {
+		t.Skip("跳过：没有设 WORKDECK_UPSTREAM_SRC，无法核对上游依据")
+	}
+	if _, err := os.Stat(filepath.Join(src, "go.mod")); err != nil {
+		t.Skipf("跳过：%s 看起来不是上游源码树（%v）", src, err)
+	}
+
+	check := func(label string, where []string) {
+		for _, ref := range where {
+			path, lineStr, ok := strings.Cut(ref, ":")
+			if !ok {
+				t.Errorf("%s 的依据 %q 不是 文件:行 的形式", label, ref)
+				continue
+			}
+			full := filepath.Join(src, path)
+			data, err := os.ReadFile(full)
+			if err != nil {
+				t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, path, err)
+				continue
+			}
+			line, err := strconv.Atoi(lineStr)
+			if err != nil || line < 1 {
+				t.Errorf("%s 的依据 %q 行号不对", label, ref)
+				continue
+			}
+			if got := strings.Count(string(data), "\n") + 1; line > got {
+				t.Errorf("%s 的依据指向 %s:%d，但那个文件只有 %d 行", label, path, line, got)
+			}
+		}
+	}
+	for sub, e := range SideEffects {
+		check(sub, e.Where)
+	}
+	check("SharedStorageInit", SharedStorageInit.Where)
 }

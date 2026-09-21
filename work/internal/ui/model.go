@@ -428,7 +428,11 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 		m.notice, m.noticeOK = err.Error(), false
 		return m, nil
 	}
-	cmd, note, err := m.attacher.DirectAttachCommand(context.Background(), sessionID)
+	// 带超时：直连要扫本机每个 tmux server，僵死的 server 不该把界面卡住。
+	// adapter 内部对单个探测另有更短的上限，这里是整趟的兜底。
+	dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer dcancel()
+	cmd, note, err := m.attacher.DirectAttachCommand(dctx, sessionID)
 	if err != nil {
 		m.notice, m.noticeOK = "直连 tmux 也进不去："+err.Error()+"。可以先按 p 看一眼画面", false
 		return m, nil

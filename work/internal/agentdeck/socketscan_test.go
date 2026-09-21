@@ -51,7 +51,7 @@ func TestResolveSocketFindsTheOnlyHost(t *testing.T) {
 	name := "n037scan-unique-" + randomHexPlain(t, 3)
 	newTmuxSession(t, "", name) // 默认 server
 
-	socket, err := ResolveSocketFor(context.Background(), name)
+	socket, err := ResolveSocketFor(context.Background(), name, "")
 	if err != nil {
 		t.Fatalf("只有一个 server 上有它，不该失败：%v", err)
 	}
@@ -71,7 +71,7 @@ func TestResolveSocketRecoversANonDefaultSocket(t *testing.T) {
 	name := "n037scan-alt-" + randomHexPlain(t, 3)
 	newTmuxSession(t, sock, name)
 
-	got, err := ResolveSocketFor(context.Background(), name)
+	got, err := ResolveSocketFor(context.Background(), name, "")
 	if err != nil {
 		t.Fatalf("会话在非默认 socket 上，扫描应当找得到：%v", err)
 	}
@@ -94,7 +94,7 @@ func TestResolveSocketRefusesWhenTheNameIsAmbiguous(t *testing.T) {
 	newTmuxSession(t, "", name)   // 默认 server
 	newTmuxSession(t, sock, name) // 另一个 server，同名
 
-	_, err := ResolveSocketFor(context.Background(), name)
+	_, err := ResolveSocketFor(context.Background(), name, "")
 	if err == nil {
 		t.Fatal("同名会话存在于两个 server 上，必须拒绝而不是挑一个连")
 	}
@@ -114,7 +114,7 @@ func TestResolveSocketRefusesWhenTheNameIsAmbiguous(t *testing.T) {
 // 会话不存在时，说清楚是不存在，而不是含糊地失败。
 func TestResolveSocketSaysWhenNothingHostsIt(t *testing.T) {
 	needTmux(t)
-	_, err := ResolveSocketFor(context.Background(), "n037scan-nobody-"+randomHexPlain(t, 4))
+	_, err := ResolveSocketFor(context.Background(), "n037scan-nobody-"+randomHexPlain(t, 4), "")
 	if err == nil {
 		t.Fatal("没有任何 server 有这个会话，应当报错")
 	}
@@ -138,7 +138,7 @@ func TestResolveSocketToleratesDeadSockets(t *testing.T) {
 	name := "n037scan-live-" + randomHexPlain(t, 3)
 	newTmuxSession(t, "", name)
 
-	if _, err := ResolveSocketFor(context.Background(), name); err != nil {
+	if _, err := ResolveSocketFor(context.Background(), name, ""); err != nil {
 		t.Errorf("目录里有死 socket 就扫不下去了：%v", err)
 	}
 }
@@ -154,4 +154,80 @@ func randomHexPlain(t *testing.T, n int) string {
 		t.Fatal(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// newTmuxSessionWithID 起一个带 AGENTDECK_INSTANCE_ID 的会话，模拟上游派出来的那种。
+func newTmuxSessionWithID(t *testing.T, socket, name, instanceID string) {
+	t.Helper()
+	newTmuxSession(t, socket, name)
+	args := []string{}
+	if socket != "" {
+		args = append(args, "-L", socket)
+	}
+	args = append(args, "set-environment", "-t", "="+name, "AGENTDECK_INSTANCE_ID", instanceID)
+	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+		t.Fatalf("写不进会话环境：%v：%s", err, out)
+	}
+}
+
+// **tmux 的 -t 是前缀匹配。** 目标已经结束、只剩一个同前缀会话时，
+// 扫描绝不能把它当成目标。
+//
+// 独立评审实测：`has-session -t target` 在只有 `target-suffix` 时照样 exit 0，
+// 加等号才是精确匹配。上一版没带等号，于是这种情况下会判「唯一」然后连错。
+func TestResolveSocketDoesNotMatchByPrefix(t *testing.T) {
+	needTmux(t)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	base := "n037scan-prefix-" + randomHexPlain(t, 3)
+	// 只建带后缀的那个，目标本身不存在。
+	newTmuxSession(t, sock, base+"-suffix")
+
+	if _, err := ResolveSocketFor(context.Background(), base, ""); err == nil {
+		t.Fatal("目标不存在、只有同前缀会话时，必须拒绝而不是把它当成目标")
+	}
+}
+
+// 名字对得上、身份对不上，也不算找到。
+//
+// 这一条比名字唯一性更根本：会话名会撞，AGENTDECK_INSTANCE_ID 是一对一的。
+// 它还顺带覆盖了扫描与 attach 之间的替换竞态——同名会话被换掉了，身份就对不上。
+func TestResolveSocketRefusesWhenTheIdentityDoesNotMatch(t *testing.T) {
+	needTmux(t)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	name := "n037scan-id-" + randomHexPlain(t, 3)
+	newTmuxSessionWithID(t, sock, name, "the-real-one")
+
+	if _, err := ResolveSocketFor(context.Background(), name, "somebody-else"); err == nil {
+		t.Fatal("会话身份对不上，必须拒绝")
+	} else if !strings.Contains(err.Error(), "身份对得上") {
+		t.Errorf("没说清是身份对不上：%v", err)
+	}
+
+	// 身份对得上时照常找到。
+	got, err := ResolveSocketFor(context.Background(), name, "the-real-one")
+	if err != nil {
+		t.Fatalf("身份对得上却找不到：%v", err)
+	}
+	if got != sock {
+		t.Errorf("socket 名是 %q，期望 %q", got, sock)
+	}
+}
+
+// 同名且都带身份时，只认身份对得上的那个——这不算歧义。
+//
+// 名字撞车本身不该让功能失效，只要身份能把它们区分开。
+func TestIdentityDisambiguatesSameNameOnTwoServers(t *testing.T) {
+	needTmux(t)
+	name := "n037scan-idcollide-" + randomHexPlain(t, 3)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	newTmuxSessionWithID(t, "", name, "instance-A")   // 默认 server
+	newTmuxSessionWithID(t, sock, name, "instance-B") // 另一个 server
+
+	got, err := ResolveSocketFor(context.Background(), name, "instance-B")
+	if err != nil {
+		t.Fatalf("身份能把两个同名会话区分开，不该报歧义：%v", err)
+	}
+	if got != sock {
+		t.Errorf("认到了 %q，期望 %q", got, sock)
+	}
 }

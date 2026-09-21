@@ -28,13 +28,25 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 
 **「在允许清单里」不等于「没有副作用」。** 这两件事分开记：
 
-| 命令 | 写什么 |
-|---|---|
-| `launch` | 新建并启动会话，写入上游存储 |
-| `web` | 起一个 headless 服务进程 |
-| `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） |
-| `session send` | 把文本投进目标会话，对方当成输入处理 |
-| `session attach` / `session output` | 不写 |
+**先说一条对所有命令都成立的**：每条 CLI 子命令跑起来都要先加载 profile，
+那条路（上游 `internal/session/storage.go:209` 的 `NewStorageWithProfile`）会
+建 profile 目录、建 `state.db`、跑 schema 迁移，必要时还会把旧的 `sessions.json`
+迁过来改名。**所以没有一条命令是纯读的**，哪怕它叫 `list` 或 `output`。
+
+各条命令另外还写什么：
+
+| 命令 | 除共有的 storage 初始化外，还写什么 | 上游依据 |
+|---|---|---|
+| `launch` | 新建并启动会话，建 tmux 会话并写会话环境变量 | `internal/session/instance.go:4939` |
+| `web` | 把 instance 注册进 SQLite，可能执行 cost retention purge | `internal/session/storage.go:209` |
+| `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） | `cmd/agent-deck/main.go:2277` |
+| `session attach` | 启动 badge watcher，其中 `os.MkdirAll` 建 badge 更新目录；给目标 tmux 会话加一个 attached client | `internal/tmux/badge_update.go:124` |
+| `session output` | 跑 `capture-pane` 取画面，不发按键、不改会话状态 | `internal/session/storage.go:209` |
+| `session send` | 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2685` |
+
+这张表在 `manifest.go` 里有机器可读的同一份（`SideEffects` 与 `SharedStorageInit`），
+每条都带上游源码位置，`TestSideEffectEvidencePointsAtRealUpstreamCode` 拿这些位置
+去上游快照里核对——凭空写的依据过不了。
 
 `list --json` 在输出之前会先跑一遍状态刷新，那条路一直通到 SQLite：
 
@@ -52,8 +64,14 @@ internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
 > `RefreshInstancesForCLIStatus` 就在他查的 `sessionJSON` 结构体下面几行——
 > 却没追进去看它做什么，就写下了「只读」。
 >
-> 教训：**一个命令叫什么名字，不说明它做了什么。** 把上游命令加进白名单之前，
-> 顺着它的实现追到底，看它写不写东西。
+> 紧接着的一轮又错了一次：把 `session attach` / `session output` 硬编码成
+> 「不写」，而它们同样走 `NewStorageWithProfile`，`attach` 还会 `MkdirAll`
+> 一个 badge 目录。当时的测试只验证「每条命令被放进某个桶」，
+> **验证不了桶里的描述是不是真的**，所以照样全绿。
+>
+> 教训两条：
+> 1. **一个命令叫什么名字，不说明它做了什么。** 加进白名单之前追到底。
+> 2. **声明要有据可查。** 现在每条副作用都带上游源码位置，测试会去核对。
 
 机器可读的同一份声明在 `manifest.go` 的 `SideEffects`，一致性测试盯着两者不漂移。
 
@@ -176,20 +194,46 @@ tmux 的不同 server 各有各的命名空间，同名会话完全可能是毫�
 所以扫一遍：`$TMUX_TMPDIR`（没设就是 `/tmp/tmux-<uid>`）下每个 socket 跑一次
 `has-session`，看这个会话名出现在几个 server 上。
 
+每个 socket 上查两件事，**两件都对得上才算命中**：
+
+1. 会话名精确匹配 —— 用 tmux 的 `=<session>` 形式
+2. 会话里的 `AGENTDECK_INSTANCE_ID` 等于上游给的 session id
+
 | 命中数 | 处置 |
 |---:|---|
 | 1 | 目标唯一，把那个 socket 名带上去连（顺便把 socket 名找回来了） |
-| 0 | 会话不在了，拒绝 |
+| 0 | 会话不在了，或同名的是另一个会话，拒绝 |
 | ≥2 | 说不清是哪个，**拒绝**（`ErrAmbiguousTmuxTarget`） |
 
-`has-session` 只查询，不改会话状态——实测连跑三次，`session_activity` 不变。
+**为什么要加等号**：`-t name` 是前缀匹配。只有 `name-suffix` 存在时，
+`-t name` 照样 exit 0，随后 attach 进去的就是那个后缀会话。
+
+```
+tmux -L s has-session -t target            → exit 0   ← 只有 target-suffix 时也命中
+tmux -L s has-session -t '=target'         → exit 1
+tmux -L s has-session -t '=target-suffix'  → exit 0
+```
+
+**为什么还要比身份**：名字会撞，也会被前缀蒙混；`AGENTDECK_INSTANCE_ID`
+是上游建会话时写进会话环境的，和 session id 一对一。它还顺带盖住了
+「扫描到 attach 之间同名会话被换掉」这个竞态。
+
+`has-session` 与 `show-environment` 都只查询，不改会话状态——各跑三次实测，
+`session_activity` 不变（前后两次都取到了值，不是空对空）。
 死 socket 文件会报 "no server running" 并以非零码返回，自然被跳过。
+每个探测有 2 秒上限，僵死的 server 不会把界面卡住。
 
 > attempt 7 的降级路径是无条件按默认 server 连，还在提示里说「非默认 socket
 > 就会连不上」。独立评审实测复现：在两个 server 上建同名会话，
 > 不带 `-L` 会**静默连进默认 server 上那个**——不是连不上，是连错了。
 >
 > 教训：**「通常不会同名」不是可以拿来赌的前提。** 证明不了目标唯一就别连。
+>
+> 下一轮又错了一次：扫描用的是 `-t name`，而那是前缀匹配。
+> 目标已结束、只剩一个同前缀会话时，扫描会判「唯一」然后连错。
+> 现在名字用精确形式，并且加了身份比对。
+>
+> 教训之二：**一个命令的匹配语义，不看文档就不知道。** `-t` 看着像精确匹配。
 
 ## 嵌套
 

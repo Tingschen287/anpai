@@ -56,7 +56,8 @@ func (c *Client) DirectTmuxAttachCommand(ctx context.Context, tmuxSession, socke
 	if socketName != "" {
 		args = append(args, "-L", socketName)
 	}
-	args = append(args, "attach-session", "-t", tmuxSession)
+	// 精确形式：`-t name` 是前缀匹配，只有 name-suffix 时也会连进去。
+	args = append(args, "attach-session", "-t", exactTarget(tmuxSession))
 	return prepareNested(exec.CommandContext(ctx, "tmux", args...)), nil
 }
 
@@ -154,7 +155,8 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 //
 // `list` 不经服务，看得见；代价是它的行里没有 socket 名（上游结构体里就没这个
 // 字段，见 MANIFEST.md 第 7 节）。socket 名靠扫描本机 tmux server 找回来，
-// 顺便证明目标唯一——同名会话可以并存于不同 server，盲连会静默连错。
+// 同时用会话里的 AGENTDECK_INSTANCE_ID 证明目标就是它——
+// 会话名可能撞，也可能被 tmux 的前缀匹配蒙混过去，只有身份是一对一的。
 // 证明不了就拒绝，见 ResolveSocketFor。
 //
 // 降级这件事必须说出来，所以第二个返回值是给人看的说明——降级不许静默。
@@ -195,11 +197,12 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	//
 	// 所以扫一遍本机所有 tmux server，证明这个名字只在一个上面，
 	// 顺便把 socket 名找回来。证明不了就拒绝。
-	socketName, err := ResolveSocketFor(ctx, tmuxSession)
+	// 身份一并传下去：会话名只当查找键，认不认这个会话由 AGENTDECK_INSTANCE_ID 说了算。
+	socketName, err := ResolveSocketFor(ctx, tmuxSession, sessionID)
 	if err != nil {
 		return nil, "", fmt.Errorf(
 			"菜单里没有这个会话（多半是服务的菜单缓存），list 给出了 tmux 会话名 %s，"+
-				"但拿不到 socket 名，扫描也证明不了目标唯一：%w。"+
+				"但拿不到 socket 名，扫描也证明不了目标就是它：%w。"+
 				"重启一下上游 headless 服务让菜单刷新，再按 T 就能拿到 socket 名",
 			tmuxSession, err)
 	}
@@ -211,6 +214,6 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	}
 	note := fmt.Sprintf(
 		"菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名，"+
-			"并扫描本机 tmux server 确认这个名字只在一处，连的是 %s。", where)
+			"并扫描本机 tmux server 按会话身份确认目标只在一处，连的是 %s。", where)
 	return cmd, note, err
 }
