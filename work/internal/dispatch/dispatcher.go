@@ -53,6 +53,12 @@ type Outcome struct {
 // 而且一眼看得出派工器只会启动会话，不会去动上游的别的东西。
 type Launcher interface {
 	Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error)
+	// SendMessage 把任务文本送进一个已经在跑的会话。
+	//
+	// 派评审要用它：会话号得等 Launch 返回才存在，而「这个会话是不是执行者
+	// 正在用的那个」必须拿真实会话号来判。所以 brief 不能随 Launch 出去，
+	// 得等判完了再送。
+	SendMessage(ctx context.Context, sessionID, message string) error
 }
 
 // Dispatcher 把一个节点派成一个真实会话。

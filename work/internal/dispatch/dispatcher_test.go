@@ -20,6 +20,16 @@ type fakeLauncher struct {
 	calls []agentdeck.LaunchRequest
 	res   agentdeck.LaunchResult
 	err   error
+	// sent 记下每一次投递：会话号和文本。
+	sent []sentMessage
+	// sendErr 让投递失败。
+	sendErr error
+}
+
+// sentMessage 是一次投递。测试靠它确认评审会话真的收到了 brief。
+type sentMessage struct {
+	SessionID string
+	Message   string
 }
 
 func (f *fakeLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
@@ -28,6 +38,14 @@ func (f *fakeLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) 
 		return agentdeck.LaunchResult{}, f.err
 	}
 	return f.res, nil
+}
+
+func (f *fakeLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	f.sent = append(f.sent, sentMessage{SessionID: sessionID, Message: message})
+	return nil
 }
 
 func table(t *testing.T) *RouteTable {

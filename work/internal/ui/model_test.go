@@ -304,9 +304,21 @@ type fakeAttacher struct {
 	attached []string
 	previews []string
 	cmdErr   error
-	text    string
-	textErr error
-	advice  string
+	// direct 记下 T 那条路被走了几次，directErr 让它失败。
+	direct    []string
+	directErr error
+	text      string
+	textErr   error
+	advice    string
+}
+
+// DirectAttachCommand 是按 T 走的那条。
+func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	f.direct = append(f.direct, sessionID)
+	if f.directErr != nil {
+		return nil, f.directErr
+	}
+	return exec.Command("true"), nil
 }
 
 func (f *fakeAttacher) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {

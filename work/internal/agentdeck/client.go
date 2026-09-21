@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,8 +29,16 @@ import (
 // 带空格的条目是二级子命令，必须整条匹配。
 //
 // 只写 "session" 是不够的：那样 session stop / remove / kill / restart 会一并
-// 放行，而 Work Deck 没有杀掉别人会话的道理。白名单精确到它真正要用的那两条。
-var Subcommands = []string{"launch", "web", "session attach", "session output"}
+// 放行，而 Work Deck 没有杀掉别人会话的道理。白名单精确到它真正要用的那几条。
+//
+// `session send` 是 n037 attempt 6 加的，为了把评审 brief 送进一个已经核验过
+// 会话号的评审会话（两阶段投递，见 dispatch 包的 DispatchReviewer）。
+// 加它**不会**放开 session 底下别的命令：上面这套匹配是整条二级路径比对，
+// stop / remove / restart / archive / fork / set 一条都不在清单里，照样被拒。
+//
+// 执行者此前以「加这个等于放开一整片操作面」为由拒绝实现两阶段投递，
+// 那个理由是错的，独立评审指出了这一点。
+var Subcommands = []string{"launch", "web", "session attach", "session output", "session send"}
 
 // isAllowedSubcommand 按整条命令路径匹配。
 //
@@ -127,6 +136,15 @@ func (c *Client) env() []string {
 
 // exec 跑一条上游子命令，返回标准输出。
 func (c *Client) exec(ctx context.Context, sub string, args ...string) ([]byte, error) {
+	return c.execWithStdin(ctx, nil, sub, args...)
+}
+
+// execWithStdin 与 exec 相同，另外把 stdin 接上。
+//
+// 为什么要它：评审 brief 是一大段文本，走 argv 要经过 shell 引号和长度限制，
+// 而上游自己提供了 `--message-file -` 从标准输入读。文本不进命令行，
+// 就不存在被当成参数解释的可能。
+func (c *Client) execWithStdin(ctx context.Context, stdin io.Reader, sub string, args ...string) ([]byte, error) {
 	// session 这类带危险兄弟命令的，要连第二级一起核。
 	parts := []string{sub}
 	if depthOf(sub) == 2 && len(args) > 0 {
@@ -142,6 +160,7 @@ func (c *Client) exec(ctx context.Context, sub string, args ...string) ([]byte, 
 	}
 	cmd := exec.CommandContext(ctx, c.Binary, append([]string{sub}, args...)...)
 	cmd.Env = c.env()
+	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

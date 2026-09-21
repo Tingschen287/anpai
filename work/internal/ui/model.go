@@ -96,6 +96,13 @@ type Dispatcher interface {
 type Attacher interface {
 	// AttachCommand 造一条进入会话的命令，但不执行——执行要由界面挂起自己之后做。
 	AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
+	// DirectAttachCommand 造一条绕开上游 CLI、直连会话所在 tmux 的命令。
+	//
+	// 这是 owner 按 T 时走的那条。为什么要有它：上游的 session attach 是另一个
+	// 进程去问 headless 服务的，而那个服务对菜单快照做内存缓存，只在自己处理
+	// 变更时失效——CLI 刚 launch 出来的会话，同一个服务实例可能一直看不到，
+	// 直到重启。那种时候 tmux 里的会话好好的，只是上游那条路问不到它。
+	DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error)
 	// PaneOutputPlain 取会话当前画面的纯文本，只读，不接管。
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
 	// NestingAdvice 是进去之前要讲清楚的前缀键用法。
@@ -167,7 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 回来了。状态不能停在进去之前，立刻重取一次。
 		if msg.err != nil {
 			m.notice, m.noticeOK = "从会话返回，但进入过程报错："+msg.err.Error()+
-				"。按 p 看一眼那个会话还在不在，或按 r 刷新", false
+				"。按 p 看一眼那个会话还在不在，按 T 绕开上游直连 tmux，或按 r 刷新", false
 		} else {
 			m.notice, m.noticeOK = "已从会话 "+msg.sessionID+" 返回", true
 		}
@@ -291,6 +298,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a":
 		return m.beginAttach()
+	case "T":
+		return m.beginDirectAttach()
 	case "p":
 		return m.beginPreview()
 	case "esc":
@@ -385,6 +394,41 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 	m.notice = m.attacher.NestingAdvice()
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return attachDoneMsg{sessionID: sessionID, err: err}
+	})
+}
+
+// beginDirectAttach 绕开上游 CLI，直接连到会话所在的 tmux。
+//
+// 什么时候用得上：按 a 进不去，或者进去又被弹出来，而按 p 能看到画面——
+// 那说明会话活着，是上游那条路问不到它。上游 headless 服务对菜单快照做内存缓存，
+// CLI 刚起的会话它可能一直看不到，这是实测过的。
+//
+// 这条路只从 `GET /api/menu` 取 tmux 会话名和 socket 名，不碰 `list --json`
+// （那边的行里根本没有 socket 字段，见 adapter 的 MANIFEST.md 第 7 节）。
+func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
+	node, ok := m.selected()
+	if !ok {
+		m.notice, m.noticeOK = "没有选中任何节点。用 ↑↓ 选一个再按键", false
+		return m, nil
+	}
+	if m.attacher == nil {
+		m.notice, m.noticeOK = "没有配置进入会话。先写好 ~/.config/work-deck/config.json 里的 upstream_binary 与 profile", false
+		return m, nil
+	}
+	sessionID, err := m.sessionOf(node)
+	if err != nil {
+		m.notice, m.noticeOK = err.Error(), false
+		return m, nil
+	}
+	cmd, err := m.attacher.DirectAttachCommand(context.Background(), sessionID)
+	if err != nil {
+		m.notice, m.noticeOK = "直连 tmux 也进不去："+err.Error()+"。可以先按 p 看一眼画面", false
+		return m, nil
+	}
+	m.notice = "绕开上游，直连 tmux。" + m.attacher.NestingAdvice()
+	m.noticeOK = true
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}
 	})
@@ -544,7 +588,9 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			IndependentRequired: node.ReviewIndependent,
 			ProjectPath:         m.snap.ProjectRoot,
 			Title:               node.ID + "-review",
-			DispatchedBy:        "work-deck",
+			// brief 是评审者开工时看到的第一段话。没有它，派出去的就是个空会话。
+			Message:      reviewBrief(node, attempt),
+			DispatchedBy: "work-deck",
 		}
 		d := m.dispatcher
 		m.pickingReviewer = false

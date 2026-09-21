@@ -122,7 +122,11 @@ func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
 
 // 清单里列的子命令，必须正好是白名单。
 func TestManifestSubcommandsMatchAllowList(t *testing.T) {
-	if !reflect.DeepEqual(Subcommands, []string{"launch", "web", "session attach", "session output"}) {
+	// 这张表是写死的，改白名单就得同时改这里——那正是它的用处：
+	// 让「多放行一条上游命令」成为一个必须被看见的改动，而不是顺手加上去的。
+	if !reflect.DeepEqual(Subcommands, []string{
+		"launch", "web", "session attach", "session output", "session send",
+	}) {
 		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
 	}
 	src := readPackageSource(t)

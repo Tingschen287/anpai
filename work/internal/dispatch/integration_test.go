@@ -159,6 +159,11 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 // 模型 ID 仍然记进绑定与流水，只是不往上游传 --model。
 type shellLauncher struct{ c *agentdeck.Client }
 
+// SendMessage 直接走真实 adapter，不加工。
+func (s shellLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
+	return s.c.SendMessage(ctx, sessionID, message)
+}
+
 func (s shellLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
 	if req.Tool == "shell" {
 		req.Model = ""

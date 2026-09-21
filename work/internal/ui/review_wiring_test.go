@@ -26,13 +26,27 @@ import (
 //
 // 它只记下被要求启动什么，并按预设返回会话号；除此之外什么都不做。
 type recordingLauncher struct {
-	next  string
-	calls []agentdeck.LaunchRequest
+	next    string
+	calls   []agentdeck.LaunchRequest
+	sent    [][2]string
+	sendErr error
 }
 
 func (l *recordingLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
 	l.calls = append(l.calls, req)
 	return agentdeck.LaunchResult{SessionID: l.next, Success: true}, nil
+}
+
+// SendMessage 记下 brief 投给了谁、投了什么。
+//
+// 这条是界面这一侧最要紧的证据：评审会话起来之后到底有没有收到任务。
+// 上一版没有这条记录，于是「派出去的是个空会话」这件事一直没人发现。
+func (l *recordingLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
+	if l.sendErr != nil {
+		return l.sendErr
+	}
+	l.sent = append(l.sent, [2]string{sessionID, message})
+	return nil
 }
 
 // realDispatcher 造一个真的派工器：真实拒绝逻辑、真实绑定存储，假上游。
@@ -88,6 +102,28 @@ func TestUIReviewDispatchReachesRealDispatcher(t *testing.T) {
 		t.Fatalf("应当恰好启动一个评审会话，实际 %d 个", len(lau.calls))
 	}
 
+	// 这一条是独立评审给出的：光起会话不算派出评审。
+	// 上一版界面从不设置 Message，起来的会话一直是空的，而所有测试都绿着。
+	if len(lau.sent) != 1 {
+		t.Fatalf("评审会话已创建，但 brief 投递了 %d 次，期望 1 次", len(lau.sent))
+	}
+	if lau.sent[0][0] != "review-sess" {
+		t.Errorf("brief 投给了 %q，期望 review-sess", lau.sent[0][0])
+	}
+	if lau.sent[0][1] == "" {
+		t.Fatal("评审会话已创建，但没有收到任何评审 brief")
+	}
+	// brief 得说清楚是哪个节点、第几次、以及独立性要求。
+	for _, want := range []string{"n1", "attempt", "独立", "VERDICT"} {
+		if !strings.Contains(lau.sent[0][1], want) {
+			t.Errorf("brief 里没提到 %q：\n%s", want, lau.sent[0][1])
+		}
+	}
+	// launch 那一步不能带 brief——会话号还没核验过。
+	if lau.calls[0].Message != "" {
+		t.Errorf("brief 随 launch 一起出去了：%q", lau.calls[0].Message)
+	}
+
 	// 评审绑定要落在评审那个键上，且不是执行者的会话。
 	rb, ok := d.Store.Get(dispatch.ReviewerKey("n1"), 2)
 	if !ok {
@@ -138,6 +174,7 @@ func TestRealDispatcherIgnoresCallerSuppliedReviewerIdentity(t *testing.T) {
 			NodeID: "n1", Attempt: 2, RequiredClass: dispatch.Frontier,
 			ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
 			ExecutorActor: actor, IndependentRequired: true, DispatchedBy: "work-deck",
+			Message: "请评审 n1 的 attempt 2",
 		})
 		if err == nil {
 			t.Errorf("执行者身份填成 %q 就放行了", actor)

@@ -257,7 +257,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
-	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　p 预览　r 刷新　q 退出"))
+	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
 	w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
 	return b.String()

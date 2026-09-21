@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ func goodReview() ReviewRequest {
 		ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
 		ExecutorActor:       "executor-a1",
 		IndependentRequired: true, DispatchedBy: "work-deck",
+		Message: "请评审 n099_demo 的 attempt 1",
 	}
 }
 
@@ -188,22 +190,50 @@ func TestDuplicateReviewerDispatchIsRefused(t *testing.T) {
 	}
 }
 
-// 要求独立评审时，评审 brief 不许随会话启动一起投递。
+// 两阶段投递：先起空会话，核验会话号，再把 brief 送进去。
 //
-// 独立评审者提的：撞会话这一判断天然在 launch 之后，会话号早于此不存在。
-// 若 brief 随 launch 送出，万一真撞上，任务已经进了执行者的会话，
-// 后面报错也撤不回来。把 brief 摘掉，撞上的后果就只剩一个空会话。
-func TestIndependentReviewRefusesToShipTheBriefWithTheLaunch(t *testing.T) {
+// 独立评审一句话戳破了上一版：「所谓派出评审实际只创建空会话」。
+// 界面从不设置 Message，而那一版还加了一条守卫禁止 brief 随 launch 出去，
+// 等于把「评审会话永远收不到任务」这件事固化成了设计。
+func TestBriefIsDeliveredOnlyAfterTheSessionIsVerified(t *testing.T) {
 	fake := &fakeLauncher{}
+	d, _ := newDispatcher(t, fake)
+	dispatchExecutorFirst(t, d, fake, "exec-sess")
+
+	fake.res = agentdeck.LaunchResult{SessionID: "review-sess", Success: true}
+	if _, err := d.DispatchReviewer(context.Background(), goodReview()); err != nil {
+		t.Fatalf("正常派评审不该失败：%v", err)
+	}
+
+	// launch 那一步不许带 brief：会话号还没核验过，送出去就撤不回来。
+	last := fake.calls[len(fake.calls)-1]
+	if last.Message != "" {
+		t.Errorf("brief 随 launch 一起出去了：%q", last.Message)
+	}
+	// 核验之后必须真的送达，而且送到评审那个会话。
+	if len(fake.sent) != 1 {
+		t.Fatalf("brief 应当恰好投递一次，实际 %d 次", len(fake.sent))
+	}
+	if fake.sent[0].SessionID != "review-sess" {
+		t.Errorf("brief 投给了 %q，期望 review-sess", fake.sent[0].SessionID)
+	}
+	if fake.sent[0].Message == "" {
+		t.Error("评审会话已创建，但收到的是空 brief")
+	}
+}
+
+// 没有 brief 就不派：说不清要对方做什么，派出去的只是个空会话。
+func TestReviewWithoutABriefIsRefused(t *testing.T) {
+	fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "r1", Success: true}}
 	d, _ := newDispatcher(t, fake)
 	dispatchExecutorFirst(t, d, fake, "exec-sess")
 	before := len(fake.calls)
 
 	req := goodReview()
-	req.Message = "请评审 n099_demo 的 attempt 1"
+	req.Message = ""
 	if _, err := d.DispatchReviewer(context.Background(), req); err == nil {
-		t.Fatal("要求独立评审时，brief 随 launch 投递必须拒绝")
-	} else if !strings.Contains(err.Error(), "不能随会话启动一起投递") {
+		t.Fatal("没有 brief 必须拒绝")
+	} else if !strings.Contains(err.Error(), "空会话") {
 		t.Errorf("拒绝理由不清楚：%v", err)
 	}
 	if len(fake.calls) != before {
@@ -211,13 +241,31 @@ func TestIndependentReviewRefusesToShipTheBriefWithTheLaunch(t *testing.T) {
 	}
 }
 
-// 撞上执行者会话时，被拒、绑定不落，且送出去的那个会话是空的。
-//
-// 说清楚这条测什么、不测什么：`Message` 为空这一点，在上一条守卫在位时
-// 是恒真的——拿掉守卫这条断言也不会红（试过）。它是纵深的第二道，
-// 不是守卫有效的独立证据；守卫的证据是上一个测试。
-// 这里真正独立守住的是另外两件：撞会话必须拒，以及拒了就不许落绑定。
-func TestSessionCollisionCannotCarryTheBrief(t *testing.T) {
+// brief 送不进去就不算派出：不落绑定，并明确报告那个半成品会话。
+func TestBriefDeliveryFailureLeavesNoBinding(t *testing.T) {
+	fake := &fakeLauncher{}
+	d, _ := newDispatcher(t, fake)
+	dispatchExecutorFirst(t, d, fake, "exec-sess")
+
+	fake.res = agentdeck.LaunchResult{SessionID: "review-sess", Success: true}
+	fake.sendErr = errors.New("对方一直没就绪")
+	_, err := d.DispatchReviewer(context.Background(), goodReview())
+	if err == nil {
+		t.Fatal("brief 送不进去必须报错")
+	}
+	if !strings.Contains(err.Error(), "半成品会话") {
+		t.Errorf("没说清出了什么事：%v", err)
+	}
+	if !strings.Contains(err.Error(), "review-sess") {
+		t.Errorf("拒绝信息里没给出那个会话号，人没法收拾：%v", err)
+	}
+	if _, ok := d.Store.Get(ReviewerKey("n099_demo"), 1); ok {
+		t.Error("brief 没送到，却记下了一条「已派评审」的绑定")
+	}
+}
+
+// 撞会话时，那个会话必须还没收到任何 brief。
+func TestSessionCollisionHappensBeforeAnyDelivery(t *testing.T) {
 	fake := &fakeLauncher{}
 	d, _ := newDispatcher(t, fake)
 	dispatchExecutorFirst(t, d, fake, "same-sess")
@@ -226,28 +274,10 @@ func TestSessionCollisionCannotCarryTheBrief(t *testing.T) {
 	if _, err := d.DispatchReviewer(context.Background(), goodReview()); err == nil {
 		t.Fatal("撞上执行者会话必须拒绝")
 	}
-	// 最后那次 launch 就是撞上的那次，它不能带着评审任务。
-	last := fake.calls[len(fake.calls)-1]
-	if last.Message != "" {
-		t.Errorf("撞会话时把评审任务也送进去了：%q", last.Message)
+	if len(fake.sent) != 0 {
+		t.Errorf("撞会话了却还是把 brief 送了出去：%+v", fake.sent)
 	}
-	// 绑定不许落下。
 	if _, ok := d.Store.Get(ReviewerKey("n099_demo"), 1); ok {
 		t.Error("撞会话被拒了，评审绑定却存住了")
-	}
-}
-
-// 节点不要求独立时，brief 可以随 launch 走——这条约束只为独立评审而设。
-func TestNonIndependentReviewMayShipTheBrief(t *testing.T) {
-	fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "r1", Success: true}}
-	d, _ := newDispatcher(t, fake)
-	req := goodReview()
-	req.IndependentRequired = false
-	req.Message = "看一下这个"
-	if _, err := d.DispatchReviewer(context.Background(), req); err != nil {
-		t.Fatalf("不要求独立时不该拒绝：%v", err)
-	}
-	if fake.calls[len(fake.calls)-1].Message != "看一下这个" {
-		t.Error("不要求独立时 brief 应当照常送出")
 	}
 }

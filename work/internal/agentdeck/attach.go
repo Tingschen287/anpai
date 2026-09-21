@@ -32,20 +32,15 @@ func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd
 
 // DirectTmuxAttachCommand 造一条直连 tmux 的命令。
 //
-// **本函数目前没有生产调用点，只有单测。** 这一点写在这里，免得下一个人
-// 以为它在某条路上跑着。
+// 调用它的是 DirectAttachCommand，界面上对应 owner 按 T。
 //
-// 为什么留着：节点合同要求说清 tmux_socket_name 怎么取、怎么处理
-// `list --json` 不含它，这个函数连同 TmuxTargetOf 就是那份答案的可执行形式，
-// 单测盯着 argv 的构造（空 socket 不带 -L，非空带）。
-//
-// 为什么不接进界面：attempt 4 曾把它接成 AttachCommand 失败时的退路，
-// 独立评审指出那是死代码——AttachCommand 只在会话号为空或白名单不含
-// `session attach` 时报错，前者早被界面的 sessionOf 拦掉，后者是编译期常量，
-// 生产里它不会失败。而真正需要退路的那个故障（上游 headless 服务的菜单缓存
-// 看不见刚 launch 的会话）发生在 tea.ExecProcess **执行之后**，
-// 要在那里接退路是另一个设计：进程已经跑过一遍，终端状态得先收拾干净。
-// 那件事留给后续节点，不在 n037 的范围里。
+// 这条路的入口换过两次，记一下免得再绕回去：
+// attempt 4 曾把它接成 AttachCommand 失败时的自动退路，那是死代码——
+// AttachCommand 只在会话号为空或白名单不含 `session attach` 时报错，
+// 前者早被界面的 sessionOf 拦掉，后者是编译期常量，生产里它不会失败。
+// attempt 5 于是把入口整个删了，只留能力和文档，独立评审判定
+// 「只有 helper 和文档不算一条路径」。attempt 6 改成显式按键：
+// owner 随时可按，一定可达，也不需要猜主路什么时候算失败。
 //
 // socketName 来自上游菜单的 tmuxSocketName 字段。它带 omitempty：会话跑在默认
 // tmux server 上时该字段不出现，此时空串就是正确答案，直接 attach 即可；
@@ -140,3 +135,23 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 	return stripANSI(raw), nil
 }
 
+
+// DirectAttachCommand 造一条直连会话所在 tmux 的命令，界面上对应按 T。
+//
+// 取数只有一处：`GET /api/menu`。socket 名带 omitempty，空就是默认 server，
+// 不带 -L 就对；`list --json` 的行里根本没有这个字段，所以这条路不走那边。
+// 见 MANIFEST.md 第 7 节。
+func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("没有会话号，无法直连")
+	}
+	menu, err := c.MenuSnapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("取不到菜单快照，直连没有落脚点：%w", err)
+	}
+	tmuxSession, socketName, ok := menu.TmuxTargetOf(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("菜单里没有会话 %s 的 tmux 会话名，无法直连", sessionID)
+	}
+	return c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
+}

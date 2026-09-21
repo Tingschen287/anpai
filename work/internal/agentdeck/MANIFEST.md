@@ -15,8 +15,21 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
+| `session send` | 把评审 brief 投进一个已核验会话号的评审会话 | `--message-file -`（文本走标准输入，不进 argv） |
 
 清单之外的子命令，adapter 会直接拒绝执行（`ErrSubcommandNotAllowed`）。
+
+`session send` 是 n037 attempt 6 加的。派评审必须分两步——先起空会话、
+核验上游返回的会话号、再投递 brief——否则 brief 随 launch 出去，
+万一撞上执行者的会话就撤不回来。加这一条**不会**放开 session 底下别的命令，
+下面那段说的整条二级匹配照旧生效。
+
+> 执行者在 attempt 5 曾以「本包没有向已有会话发消息的能力，加它等于放开
+> 一整片操作面」为由拒绝实现两阶段投递。两个前提都是错的：上游有
+> `session send`（`cmd/agent-deck/session_cmd.go:2685`），而白名单本来就是
+> 整条二级路径比对。独立评审指出了这一点。
+>
+> 教训与第 7 节那次同类：**断言某个上游能力不存在之前，先去它源码里找一遍。**
 
 **白名单精确到第二级。** 只写 `session` 会把 `session stop` / `remove` / `restart` /
 `archive` / `fork` / `set` 一并放行，而 Work Deck 没有杀掉或改掉别人会话的道理。
