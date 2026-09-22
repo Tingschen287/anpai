@@ -309,6 +309,8 @@ type fakeAttacher struct {
 	directErr error
 	// directNote 是 adapter 退到次一等来源时给出的说明。
 	directNote string
+	// directCtx 留下界面传进来的那个 context，好在外面验它的生命周期。
+	directCtx context.Context
 	text      string
 	textErr   error
 	advice    string
@@ -317,6 +319,7 @@ type fakeAttacher struct {
 // DirectAttachCommand 是按 T 走的那条。directNote 模拟 adapter 退到次一等来源。
 func (f *fakeAttacher) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error) {
 	f.direct = append(f.direct, sessionID)
+	f.directCtx = ctx
 	if f.directErr != nil {
 		return nil, "", f.directErr
 	}
@@ -673,5 +676,41 @@ func TestOtherStatesExplainWhichStatesAreDispatchable(t *testing.T) {
 		if !strings.Contains(after.notice, want) {
 			t.Errorf("没说清哪些状态能派（缺 %q）：%q", want, after.notice)
 		}
+	}
+}
+
+// 界面给 adapter 的那个 context，在命令真正启动之前就已经取消了。
+//
+// 这不是缺陷，是分工：20 秒上限管的是「解析目标」这一段——问菜单、跑 list、
+// 扫 socket——免得一个僵死的 tmux server 把整个界面钉住。解析一结束，
+// beginDirectAttach 就返回，`defer cancel()` 当场执行；而命令要等 Bubble Tea
+// 挂起界面之后才跑。
+//
+// 把这件事写成测试，是因为 attempt 9 在这里栽过：adapter 当时用
+// exec.CommandContext 把这个 context 绑给了 attach 命令，于是解析越顺利，
+// 失败得越准时——界面显示「直连解析成功，进入时 context canceled」，重试无用。
+//
+// 所以规矩是：**这个 context 只许用来解析，不许绑给要交出终端的命令。**
+// adapter 那边由 TestInteractiveAttachCommandsOutliveTheResolveContext 守着。
+func TestResolveDeadlineIsAlreadyDoneWhenTheCommandRuns(t *testing.T) {
+	fake := &fakeAttacher{}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fake, execBound("n1", 1, "sess-7"))
+
+	next, cmd := m.beginDirectAttach()
+	if cmd == nil {
+		t.Fatal("按 T 应当给出一条要执行的命令")
+	}
+	if !next.(Model).noticeOK {
+		t.Fatalf("解析应当成功，实际提示：%s", next.(Model).notice)
+	}
+	if fake.directCtx == nil {
+		t.Fatal("adapter 没拿到 context")
+	}
+	if fake.directCtx.Err() == nil {
+		t.Fatal("解析用的 context 在函数返回后仍未取消，那 20 秒上限就是摆设")
+	}
+	// 命令此刻才轮到执行——它不能因为上面那个 context 已经取消而跑不起来。
+	if _, ok := fake.directCtx.Deadline(); !ok {
+		t.Error("解析用的 context 应当带 deadline")
 	}
 }

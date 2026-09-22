@@ -40,13 +40,19 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 | `launch` | 新建并启动会话，建 tmux 会话并写会话环境变量 | `internal/session/instance.go:4939` |
 | `web` | 把 instance 注册进 SQLite，可能执行 cost retention purge | `internal/session/storage.go:209` |
 | `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） | `cmd/agent-deck/main.go:2277` |
-| `session attach` | 启动 badge watcher，其中 `os.MkdirAll` 建 badge 更新目录；给目标 tmux 会话加一个 attached client | `internal/tmux/badge_update.go:124` |
+| `session attach` | 启动 badge watcher，其中 `os.MkdirAll` 建 badge 更新目录；给目标 tmux 会话加一个 attached client | `internal/tmux/badge_update.go:125` |
 | `session output` | 跑 `capture-pane` 取画面，不发按键、不改会话状态 | `internal/session/storage.go:209` |
 | `session send` | 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2685` |
 
 这张表在 `manifest.go` 里有机器可读的同一份（`SideEffects` 与 `SharedStorageInit`），
-每条都带上游源码位置，`TestSideEffectEvidencePointsAtRealUpstreamCode` 拿这些位置
-去上游快照里核对——凭空写的依据过不了。
+每条依据除了 `文件:行`，还带一段**锚点**——那一行必须含有的文本。
+`TestSideEffectEvidencePointsAtRealUpstreamCode` 拿锚点去上游快照里核对指定的那一行：
+对不上就在全文里找锚点，找得到就报「行号过期，现在在第几行」，找不到就报「这条依据
+讲的事情上游里没有」。两种都会让测试变红。
+
+**只记行号是不够的**：attempt 9 的版本只验证「行号没超出文件总行数」，
+于是把依据改成同一个文件里的任意一行也照样通过——它验证的是「这个位置存在」，
+不是「这个位置讲的是这件事」。独立评审指出后才补上锚点。
 
 `list --json` 在输出之前会先跑一遍状态刷新，那条路一直通到 SQLite：
 
@@ -202,8 +208,20 @@ tmux 的不同 server 各有各的命名空间，同名会话完全可能是毫�
 | 命中数 | 处置 |
 |---:|---|
 | 1 | 目标唯一，把那个 socket 名带上去连（顺便把 socket 名找回来了） |
-| 0 | 会话不在了，或同名的是另一个会话，拒绝 |
+| 0 | 拒绝，并说清是哪一种（见下表） |
 | ≥2 | 说不清是哪个，**拒绝**（`ErrAmbiguousTmuxTarget`） |
+
+**一个都没对上时，三种情形分开说。** 放行与否都一样是拒绝，
+但人该去查的东西完全不同，所以不能都说成「找不到」：
+
+| 探测结论 | 拒绝时怎么说 | 人该做什么 |
+|---|---|---|
+| 名字都不在 | 会话可能已经结束了 | 去看会话是不是收了 |
+| 名字在，身份是别人 | 同名的是别人，并报出实际身份 | **千万别连**，那是另一个会话 |
+| 名字在，身份读不到 | 读不到 `AGENTDECK_INSTANCE_ID`，宁可不连 | 看那个 tmux server 是否还响应；或这会话不是上游建的 |
+
+> 上一版把这三种一律折叠成 `false`，界面只能笼统说一句「找不到」。
+> 把「server 不响应」说成「会话已结束」，人会照着去查一个没发生的问题。
 
 **为什么要加等号**：`-t name` 是前缀匹配。只有 `name-suffix` 存在时，
 `-t name` 照样 exit 0，随后 attach 进去的就是那个后缀会话。

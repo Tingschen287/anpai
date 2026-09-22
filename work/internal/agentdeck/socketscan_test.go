@@ -199,8 +199,14 @@ func TestResolveSocketRefusesWhenTheIdentityDoesNotMatch(t *testing.T) {
 
 	if _, err := ResolveSocketFor(context.Background(), name, "somebody-else"); err == nil {
 		t.Fatal("会话身份对不上，必须拒绝")
-	} else if !strings.Contains(err.Error(), "身份对得上") {
-		t.Errorf("没说清是身份对不上：%v", err)
+	} else {
+		// 拒绝的理由要能指导下一步：说清是「同名的是别人」，
+		// 而不是笼统的「找不到」——后者会让人以为会话已经结束了。
+		for _, must := range []string{"同名的是别人", "the-real-one"} {
+			if !strings.Contains(err.Error(), must) {
+				t.Errorf("拒绝理由里缺 %q：%v", must, err)
+			}
+		}
 	}
 
 	// 身份对得上时照常找到。
@@ -229,5 +235,32 @@ func TestIdentityDisambiguatesSameNameOnTwoServers(t *testing.T) {
 	}
 	if got != sock {
 		t.Errorf("认到了 %q，期望 %q", got, sock)
+	}
+}
+
+// 会话名在，但读不到身份——也拒绝，而且要说清是哪一种拒绝。
+//
+// 这种会话真实存在：上游老版本建的没有 AGENTDECK_INSTANCE_ID，
+// 一个不响应的 tmux server 也会让这个变量读不出来。两者都不能放行，
+// 但也不能说成「会话不在了」——人会照着去查一个根本没发生的问题。
+func TestResolveSocketSaysWhenTheIdentityCannotBeRead(t *testing.T) {
+	needTmux(t)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	name := "n037scan-noid-" + randomHexPlain(t, 3)
+	// 故意不写 AGENTDECK_INSTANCE_ID。
+	newTmuxSession(t, sock, name)
+
+	_, err := ResolveSocketFor(context.Background(), name, "whoever")
+	if err == nil {
+		t.Fatal("读不到身份就不能放行")
+	}
+	for _, must := range []string{"读不到", "AGENTDECK_INSTANCE_ID", "宁可不连"} {
+		if !strings.Contains(err.Error(), must) {
+			t.Errorf("拒绝理由里缺 %q：%v", must, err)
+		}
+	}
+	// 不能被说成「会话已经结束」——那是另一回事。
+	if strings.Contains(err.Error(), "可能已经结束了") {
+		t.Errorf("把「读不到身份」说成了「会话结束」：%v", err)
 	}
 }

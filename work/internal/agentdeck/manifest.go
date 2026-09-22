@@ -1,5 +1,7 @@
 package agentdeck
 
+import "fmt"
+
 // 本文件是 Work Deck 对 upstream agent-deck 的依赖清单，逐条列出所用的子命令、
 // 命令行参数、HTTP 端点、依赖的输出字段与 tmux 约定。
 //
@@ -24,14 +26,35 @@ var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wa
 // WebFlags 是 Work Deck 启动 headless 服务时用的全部参数。
 var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
+// Evidence 是一条副作用声明在上游源码里的依据。
+//
+// 为什么不只写 文件:行：行号会随上游改动漂移，而漂移之后旧行号多半仍落在文件
+// 范围内——attempt 9 的核对测试只比了「行号没超出文件总行数」，于是把行号改成
+// 同一个文件里的任意一行也照样通过。它验证的是「这个位置存在」，
+// 不是「这个位置讲的是这件事」。独立评审指出后才补上 Anchor。
+//
+// Anchor 是那一行必须含有的文本。行号漂了，测试会在全文里找 Anchor 并报出
+// 新的候选行号；Anchor 整个找不到，说明依据是凭空写的。两种情况都会红。
+//
+// Anchor 不要求在文件里唯一——上游同一种写法重复出现是常态
+// （os.MkdirAll、RefreshInstancesForCLIStatus 在各自文件里都出现不止一次）。
+// 唯一性不是判据，「指定的那一行上有它」才是。
+type Evidence struct {
+	Path   string // 上游源码树里的相对路径
+	Line   int    // 行号，会漂
+	Anchor string // 那一行必须含有的文本，不会随行号漂
+}
+
+// String 还原成人读的 文件:行。
+func (e Evidence) String() string { return fmt.Sprintf("%s:%d", e.Path, e.Line) }
+
 // SideEffect 是一条上游命令跑完之后，上游那边会变什么。
 //
-// Where 是上游源码里的依据，形如 internal/session/storage.go:209。
 // 写成结构而不是一句话，是为了让描述有据可查——
-// manifest_test 会拿这些路径去上游快照里核对，凭空写的依据过不了。
+// manifest_test 会拿 Where 里的位置与锚点去上游快照里核对，凭空写的依据过不了。
 type SideEffect struct {
 	What  string
-	Where []string
+	Where []Evidence
 }
 
 // SharedStorageInit 是所有命令共有的那一份副作用。
@@ -42,7 +65,11 @@ type SideEffect struct {
 var SharedStorageInit = SideEffect{
 	What: "加载 profile 时建 profile 目录与 state.db、跑 schema 迁移、" +
 		"必要时迁移并重命名旧的 sessions.json",
-	Where: []string{"internal/session/storage.go:209"},
+	Where: []Evidence{{
+		Path:   "internal/session/storage.go",
+		Line:   209,
+		Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
+	}},
 }
 
 // SideEffects 逐条记下白名单里每条命令在上游留下什么。
@@ -50,43 +77,76 @@ var SharedStorageInit = SideEffect{
 // **白名单管「允许跑哪些命令」，这份清单管「跑了之后上游会变什么」。**
 // 两件事分开记，因为「在允许清单里」不等于「没有副作用」。
 //
-// 这份清单错过两次：attempt 7 把 list 当成只读，attempt 8 又把
-// session attach / session output 硬编码成「不写」。两次都是独立评审顺着
-// 上游源码追出来的。凡是这里写「不写」的，都得说得出依据。
+// 这份清单错过三次：attempt 7 把 list 当成只读，attempt 8 把
+// session attach / session output 硬编码成「不写」，attempt 9 补了依据却让
+// 核对测试形同虚设（见 Evidence）。三次都是独立评审顺着上游源码追出来的。
+// 凡是这里写「不写」的，都得说得出依据。
 //
 // 每条命令都要在这里有个交代，没有「只读桶」可以躲——
 // SharedStorageInit 对所有命令都成立，各条再补自己特有的。
 var SideEffects = map[string]SideEffect{
 	"launch": {
-		What:  "新建并启动一个会话，写入上游存储；建 tmux 会话并写入会话环境变量",
-		Where: []string{"internal/session/instance.go:4939"},
+		What: "新建并启动一个会话，写入上游存储；建 tmux 会话并写入会话环境变量",
+		Where: []Evidence{{
+			Path:   "internal/session/instance.go",
+			Line:   4939,
+			Anchor: `SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID)`,
+		}},
 	},
 	"web": {
-		What:  "起 headless 服务进程，把 instance 注册进 SQLite，可能执行 cost retention purge",
-		Where: []string{"internal/session/storage.go:209"},
+		What: "起 headless 服务进程，把 instance 注册进 SQLite，可能执行 cost retention purge",
+		Where: []Evidence{{
+			Path:   "internal/session/storage.go",
+			Line:   209,
+			Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
+		}},
 	},
 	"list": {
 		What: "输出之前先跑 RefreshInstancesForCLIStatus 暖 tmux 缓存并加载 hook 状态，" +
 			"经 UpdateHookStatus → persistLastActivity 把 last_activity_at 写进 state.db；" +
 			"写的是真实 hook 活动的时间戳，不是当前时间，也不改会话状态",
-		Where: []string{
-			"cmd/agent-deck/main.go:2277",
-			"internal/session/cli_status_refresh.go:16",
-			"internal/session/last_activity_persist.go:107",
+		Where: []Evidence{
+			{
+				Path:   "cmd/agent-deck/main.go",
+				Line:   2277,
+				Anchor: "session.RefreshInstancesForCLIStatus(instances)",
+			},
+			{
+				Path:   "internal/session/cli_status_refresh.go",
+				Line:   16,
+				Anchor: "func RefreshInstancesForCLIStatus(instances []*Instance) {",
+			},
+			{
+				Path:   "internal/session/last_activity_persist.go",
+				Line:   107,
+				Anchor: "func (i *Instance) persistLastActivity(force bool) {",
+			},
 		},
 	},
 	"session attach": {
 		What: "启动 badge watcher，其中 os.MkdirAll 建 badge 更新目录；" +
 			"并给目标 tmux 会话增加一个 attached client",
-		Where: []string{"internal/tmux/badge_update.go:124"},
+		Where: []Evidence{{
+			Path:   "internal/tmux/badge_update.go",
+			Line:   125,
+			Anchor: "os.MkdirAll(dir, 0o755)",
+		}},
 	},
 	"session output": {
-		What:  "跑 capture-pane 取画面，不发按键、不改会话状态；除共有的 storage 初始化外不写",
-		Where: []string{"internal/session/storage.go:209"},
+		What: "跑 capture-pane 取画面，不发按键、不改会话状态；除共有的 storage 初始化外不写",
+		Where: []Evidence{{
+			Path:   "internal/session/storage.go",
+			Line:   209,
+			Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
+		}},
 	},
 	"session send": {
-		What:  "把一段文本投进目标会话，对方会当成输入处理",
-		Where: []string{"cmd/agent-deck/session_cmd.go:2685"},
+		What: "把一段文本投进目标会话，对方会当成输入处理",
+		Where: []Evidence{{
+			Path:   "cmd/agent-deck/session_cmd.go",
+			Line:   2685,
+			Anchor: "func handleSessionSend(profile string, args []string) {",
+		}},
 	},
 }
 

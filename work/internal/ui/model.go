@@ -430,6 +430,12 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 	}
 	// 带超时：直连要扫本机每个 tmux server，僵死的 server 不该把界面卡住。
 	// adapter 内部对单个探测另有更短的上限，这里是整趟的兜底。
+	//
+	// **这个 deadline 只管解析目标那一段。** 下面 defer 的 cancel 在本函数返回时
+	// 就执行，而真正的 attach 是 Bubble Tea 挂起界面之后才跑的——adapter 若把它
+	// 绑给要交出终端的命令，解析越顺利失败得越准时（attempt 9 的回归）。
+	// 两边各有一条测试守着：TestResolveDeadlineIsAlreadyDoneWhenTheCommandRuns
+	// 与 TestInteractiveAttachCommandsOutliveTheResolveContext。
 	dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer dcancel()
 	cmd, note, err := m.attacher.DirectAttachCommand(dctx, sessionID)

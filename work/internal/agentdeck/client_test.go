@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strconv"
 	"runtime"
 	"strings"
 	"testing"
@@ -447,7 +446,16 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 	}
 }
 
-// 副作用声明里写的上游位置，必须真的存在。
+// 副作用声明里写的上游依据，必须真的指着那件事。
+//
+// attempt 9 的版本只验证四件事：路径含冒号、文件存在、行号是正整数、
+// 行号没超过文件总行数。于是把依据改成同一个文件里的任意一行也照样通过——
+// 它验证的是「这个位置存在」，不是「这个位置讲的是这件事」。
+// 独立评审指出后改成现在这样：**锚点必须出现在指定的那一行上。**
+//
+// 两种失败要分开报，因为修法不同：
+//   - 那一行没有锚点，但文件里别处有 → 上游动过，行号过期，报出新的候选行号。
+//   - 整个文件都找不到锚点 → 这条依据是凭空写的，或者上游已经删了这段。
 //
 // 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
 // 快照路径用 WORKDECK_UPSTREAM_SRC 指定。
@@ -460,27 +468,44 @@ func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
 		t.Skipf("跳过：%s 看起来不是上游源码树（%v）", src, err)
 	}
 
-	check := func(label string, where []string) {
-		for _, ref := range where {
-			path, lineStr, ok := strings.Cut(ref, ":")
-			if !ok {
-				t.Errorf("%s 的依据 %q 不是 文件:行 的形式", label, ref)
+	check := func(label string, where []Evidence) {
+		for _, e := range where {
+			if e.Path == "" || e.Line < 1 {
+				t.Errorf("%s 的依据 %q 不完整：路径或行号缺失", label, e)
 				continue
 			}
-			full := filepath.Join(src, path)
-			data, err := os.ReadFile(full)
+			// 锚点太短就不是锚点：一个花括号在任何文件里都找得到。
+			if len(strings.Join(strings.Fields(e.Anchor), "")) < 12 {
+				t.Errorf("%s 的依据 %q 锚点太短（%q），钉不住任何东西", label, e, e.Anchor)
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(src, e.Path))
 			if err != nil {
-				t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, path, err)
+				t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, e.Path, err)
 				continue
 			}
-			line, err := strconv.Atoi(lineStr)
-			if err != nil || line < 1 {
-				t.Errorf("%s 的依据 %q 行号不对", label, ref)
+			lines := strings.Split(string(data), "\n")
+			if e.Line > len(lines) {
+				t.Errorf("%s 的依据指向 %s，但那个文件只有 %d 行", label, e, len(lines))
 				continue
 			}
-			if got := strings.Count(string(data), "\n") + 1; line > got {
-				t.Errorf("%s 的依据指向 %s:%d，但那个文件只有 %d 行", label, path, line, got)
+			if strings.Contains(lines[e.Line-1], e.Anchor) {
+				continue
 			}
+			// 行号没对上。锚点还在别处吗？
+			var elsewhere []int
+			for i, line := range lines {
+				if strings.Contains(line, e.Anchor) {
+					elsewhere = append(elsewhere, i+1)
+				}
+			}
+			if len(elsewhere) == 0 {
+				t.Errorf("%s 的依据 %q 在上游找不到锚点 %q——这条依据讲的事情上游里没有",
+					label, e, e.Anchor)
+				continue
+			}
+			t.Errorf("%s 的依据 %q 行号过期：锚点 %q 现在在第 %v 行，把行号改过来",
+				label, e, e.Anchor, elsewhere)
 		}
 	}
 	for sub, e := range SideEffects {

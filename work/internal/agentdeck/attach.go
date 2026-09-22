@@ -7,6 +7,24 @@ import (
 	"strings"
 )
 
+// interactiveCommand 造一条要把整个终端交出去的命令。
+//
+// **它不绑 context，这是故意的。**
+//
+// 这两条路的调用方都先用一个带 deadline 的 context 去解析目标（问菜单、跑 list、
+// 扫 socket），解析完就 `defer cancel()`。命令本身是**之后**才由界面挂起自己去跑的，
+// 那时解析用的 context 早已取消——用 exec.CommandContext 绑上去，命令一启动就是
+// context canceled，而且是在解析全部成功之后才失败，界面只会说「进入过程报错」。
+//
+// attempt 9 给按 T 加 20 秒解析上限时正是这么写的，于是菜单命中和扫描降级两条路
+// 同时失效，连重试也修不好——独立评审顺着 defer 的执行时机把它挖出来。
+//
+// 解析可以有超时，交互式会话不能：它要活到人自己退出为止。
+// 两者的生命周期从此分开，别再合成一个 context。
+func interactiveCommand(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
+}
+
 // AttachCommand 造一条「进入某个会话」的命令，但不执行它。
 //
 // 为什么返回命令而不是直接跑：进入会话要把整个终端交给对方，这件事必须由
@@ -24,7 +42,9 @@ func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd
 	if !isAllowedSubcommand("session", "attach") {
 		return nil, &ErrSubcommandNotAllowed{Subcommand: "session attach"}
 	}
-	cmd := exec.CommandContext(ctx, c.Binary, "session", "attach", sessionID)
+	// 解析阶段没什么要做的，ctx 到不了这条交互式命令身上——见 interactiveCommand。
+	_ = ctx
+	cmd := interactiveCommand(c.Binary, "session", "attach", sessionID)
 	cmd.Env = c.env()
 	// Work Deck 常开在 tmux 里，进去就是两层，tmux 默认会拒绝。
 	return prepareNested(cmd), nil
@@ -58,7 +78,9 @@ func (c *Client) DirectTmuxAttachCommand(ctx context.Context, tmuxSession, socke
 	}
 	// 精确形式：`-t name` 是前缀匹配，只有 name-suffix 时也会连进去。
 	args = append(args, "attach-session", "-t", exactTarget(tmuxSession))
-	return prepareNested(exec.CommandContext(ctx, "tmux", args...)), nil
+	// 同样不绑 ctx：调用方的解析 deadline 不该跟着进到会话里。
+	_ = ctx
+	return prepareNested(interactiveCommand("tmux", args...)), nil
 }
 
 // TmuxTargetOf 从菜单里找某个会话的 tmux 会话名与 socket 名。
