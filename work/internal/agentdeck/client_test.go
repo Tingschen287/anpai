@@ -3,6 +3,7 @@ package agentdeck
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -168,14 +169,23 @@ func TestHumanReadableManifestStaysInSync(t *testing.T) {
 // 改的是「允许进入」这一条，其余一条没松：进去之后是人在操作真实 CLI，
 // Work Deck 不替他敲任何键，也没有任何停掉或删掉会话的路径。
 func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
-	src := readPackageSource(t)
-	for _, forbidden := range []string{"send-keys", "kill-session", "kill-server", "respawn-pane", "\"kill\""} {
-		if strings.Contains(src, forbidden) {
-			t.Errorf("包里出现了 %q：进去之后是人在操作，Work Deck 不替他动手", forbidden)
+	forbidden := append([]string{"kill-session", "kill-server", "respawn-pane", "\"kill\""},
+		keyInjectionCommands...)
+	for _, bad := range forbidden {
+		for _, line := range linesOfPackageSource(t) {
+			// keyInjectionCommands 那一行是禁令本身，放过它；
+			// 证明「不做某件事」总得先说得出那件事叫什么。
+			if strings.Contains(line, "keyInjectionCommands = ") {
+				continue
+			}
+			if strings.Contains(line, bad) {
+				t.Errorf("包里出现了 %q：进去之后是人在操作，Work Deck 不替他动手（%s）",
+					bad, strings.TrimSpace(line))
+			}
 		}
 	}
 	// 进入用的是上游自己的 session attach，或默认 server 上的 tmux attach-session。
-	if !strings.Contains(src, "attach-session") {
+	if !strings.Contains(readPackageSource(t), "attach-session") {
 		t.Error("本轮应当具备进入会话的能力")
 	}
 }
@@ -187,6 +197,11 @@ func packageDir(t *testing.T) string {
 		t.Fatal("拿不到测试文件路径")
 	}
 	return filepath.Dir(file)
+}
+
+func linesOfPackageSource(t *testing.T) []string {
+	t.Helper()
+	return strings.Split(readPackageSource(t), "\n")
 }
 
 func readPackageSource(t *testing.T) string {
@@ -256,10 +271,16 @@ func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
 
 // 预览是只读的：命令里不许出现任何会改动会话的动作。
 func TestPreviewPathIsReadOnly(t *testing.T) {
-	src := readPackageSource(t)
-	for _, forbidden := range []string{"send-keys", "kill-session", "kill-server", "respawn"} {
-		if strings.Contains(src, forbidden) {
-			t.Errorf("包里出现了 %q，预览与进入都不该改动会话状态", forbidden)
+	forbidden := append([]string{"kill-session", "kill-server", "respawn"}, keyInjectionCommands...)
+	for _, bad := range forbidden {
+		for _, line := range linesOfPackageSource(t) {
+			if strings.Contains(line, "keyInjectionCommands = ") {
+				continue
+			}
+			if strings.Contains(line, bad) {
+				t.Errorf("包里出现了 %q，预览与进入都不该改动会话状态（%s）",
+					bad, strings.TrimSpace(line))
+			}
 		}
 	}
 }
@@ -418,11 +439,8 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 				"加一条上游命令时要说清楚它在上游留下什么", sub)
 			continue
 		}
-		if strings.TrimSpace(e.What) == "" {
-			t.Errorf("%q 的副作用描述是空的", sub)
-		}
-		if len(e.Where) == 0 {
-			t.Errorf("%q 的副作用没给上游依据：说不出在哪，就等于没说", sub)
+		if len(e.Claims) == 0 {
+			t.Errorf("%q 的副作用一条断言都没有：说不出它干了什么，就等于没说", sub)
 		}
 	}
 	for sub := range SideEffects {
@@ -430,7 +448,7 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 			t.Errorf("副作用清单里有 %q，但它不在白名单里", sub)
 		}
 	}
-	if len(SharedStorageInit.Where) == 0 {
+	if len(SharedStorageInit.Claims) == 0 {
 		t.Error("共有的 storage 初始化副作用没给依据")
 	}
 
@@ -446,33 +464,67 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 	}
 }
 
-// 副作用声明里写的上游依据，必须真的指着那件事。
+// 每一条副作用断言，都必须有一份真的支撑它的依据。
 //
-// 这条测试被两轮独立评审推着长到现在的样子，每一条检查都对应一次它曾经放过的假依据：
+// 这条测试被四轮独立评审推着长到现在的样子，每一关都对应一次它曾经放过的假依据：
 //
-//	attempt 9  只比「行号没超出文件总行数」——把行号改成同文件任意一行也过。
+//	attempt 9  只比「行号没超出文件总行数」——行号改成同文件任意一行也过。
 //	attempt 10 补了锚点，但锚点跟声明可以毫不相干：session output 声称
-//	           「跑 capture-pane 不发按键」，依据却指着 NewStorageWithProfile，照样绿。
+//	           「跑 capture-pane」，依据却指着 NewStorageWithProfile，照样绿。
+//	attempt 11 加了 What 核对，可 What 是一整段自由文本，
+//	           **一个 token 命中就整条放行**。评审举的反例：
+//	           What: "删除整个用户数据库，然后调用 PreviewFull 读取画面"——
+//	           PreviewFull 命中，前半句一路绿灯。
 //
-// 所以现在验四件事，任何一件不成立都红：
+// 所以现在不再有「一条命令一段描述」这回事：**一条断言，一份依据，各自核对。**
 //
-//	1. 指定的那一行上确实有 Anchor（行号漂了要报出新行号，凭空写要报「上游里没有」）
-//	2. 那一行确实落在 Within 说的那个函数里（同一段调用在一个文件里常出现好几次）
-//	3. 依据不是 SharedStorageInit 那条——共有的 storage 初始化证明不了任何一条命令特有的事
-//	4. What 里点名的标识符，至少有一个真的出现在某条锚点上（描述与依据要讲同一件事）
+//	正面断言  States 里点名的标识符，要出现在它自己的 Evidence 锚点上
+//	否定断言  用 Absence：去指定函数体里搜，搜到就红；Scope 空着也红
 //
 // 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
-// 快照路径用 WORKDECK_UPSTREAM_SRC 指定。
 func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
 	src := requireUpstreamSnapshot(t)
 
 	for sub, e := range SideEffects {
-		checkEvidence(t, src, sub, e.Where)
-		checkEvidenceIsNotTheSharedOne(t, sub, e.Where)
-		checkWhatNamesWhatTheAnchorsShow(t, sub, e)
+		if len(e.Claims) == 0 {
+			t.Errorf("%s 一条断言都没有：白名单里的命令必须交代它干了什么", sub)
+		}
+		all := allAnchorsOf(e)
+		for i, c := range e.Claims {
+			label := fmt.Sprintf("%s 的第 %d 条断言", sub, i+1)
+			checkClaim(t, src, label, c)
+			checkEvidenceIsNotTheSharedOne(t, label, c.Evidence)
+			checkMeansDoesNotSneakInUncitedClaims(t, label, c, all)
+		}
 	}
-	checkEvidence(t, src, "SharedStorageInit", SharedStorageInit.Where)
-	checkWhatNamesWhatTheAnchorsShow(t, "SharedStorageInit", SharedStorageInit)
+	shared := allAnchorsOf(SharedStorageInit)
+	for i, c := range SharedStorageInit.Claims {
+		label := fmt.Sprintf("SharedStorageInit 的第 %d 条断言", i+1)
+		checkClaim(t, src, label, c)
+		checkMeansDoesNotSneakInUncitedClaims(t, label, c, shared)
+	}
+}
+
+// allAnchorsOf 把一条命令所有锚点与被禁符号拼起来，供 Means 核对用。
+func allAnchorsOf(e SideEffect) string {
+	var b strings.Builder
+	for _, c := range e.Claims {
+		for _, ev := range c.Evidence {
+			b.WriteString(ev.Anchor)
+			b.WriteByte('\n')
+		}
+		if c.Absence != nil {
+			for _, a := range c.Absence.Absent {
+				b.WriteString(a)
+				b.WriteByte('\n')
+			}
+			for _, ref := range c.Absence.In {
+				b.WriteString(ref.Func)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
 }
 
 func requireUpstreamSnapshot(t *testing.T) string {
@@ -487,7 +539,30 @@ func requireUpstreamSnapshot(t *testing.T) string {
 	return src
 }
 
-// checkEvidence 验第 1、2 条：锚点在指定行上，且那一行在 Within 说的函数里。
+// checkClaim 核对一条断言。正面与否定各走各的路，但都必须有路可走。
+func checkClaim(t *testing.T, src, label string, c Claim) {
+	t.Helper()
+	if strings.TrimSpace(c.Does) == "" {
+		t.Errorf("%s 没说上游做了什么", label)
+		return
+	}
+	hasEvidence, hasAbsence := len(c.Evidence) > 0, c.Absence != nil
+	switch {
+	case hasEvidence && hasAbsence:
+		t.Errorf("%s 同时给了正面依据和缺席依据，说不清它到底在证明什么", label)
+		return
+	case !hasEvidence && !hasAbsence:
+		t.Errorf("%s 一份依据都没有：「%s」这句话的出处在哪", label, c.Means)
+		return
+	case hasAbsence:
+		checkAbsence(t, src, label, c)
+		return
+	}
+	checkEvidence(t, src, label, c.Evidence)
+	checkDoesIsLiterallyInItsOwnAnchor(t, label, c)
+}
+
+// checkEvidence 验正面依据：锚点在指定行上，且那一行在 Within 说的函数里。
 func checkEvidence(t *testing.T, src, label string, where []Evidence) {
 	t.Helper()
 	for _, e := range where {
@@ -500,12 +575,11 @@ func checkEvidence(t *testing.T, src, label string, where []Evidence) {
 			t.Errorf("%s 的依据 %q 锚点太短（%q），钉不住任何东西", label, e, e.Anchor)
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(src, e.Path))
+		lines, err := upstreamLines(src, e.Path)
 		if err != nil {
-			t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, e.Path, err)
+			t.Errorf("%s 的依据指向 %s，但读不到：%v", label, e.Path, err)
 			continue
 		}
-		lines := strings.Split(string(data), "\n")
 		if e.Line > len(lines) {
 			t.Errorf("%s 的依据指向 %s，但那个文件只有 %d 行", label, e, len(lines))
 			continue
@@ -527,12 +601,106 @@ func checkEvidence(t *testing.T, src, label string, where []Evidence) {
 			continue
 		}
 		// 同一段调用在一个文件里常常出现好几次，分属不同执行路径。
-		// 光证明「某一行有这段文本」分不清指的是哪一次。
 		if fn := enclosingFunc(lines, e.Line); !strings.Contains(fn, e.Within) {
 			t.Errorf("%s 的依据 %q 不在 %s 里，那一行属于：%s",
 				label, e, e.Within, strings.TrimSpace(fn))
 		}
 	}
+}
+
+// checkAbsence 验否定依据：那几个函数体里确实搜不到那些东西。
+func checkAbsence(t *testing.T, src, label string, c Claim) {
+	t.Helper()
+	a := c.Absence
+	// 边界说不清楚的否定断言等于没有依据：函数体级的搜索不覆盖它调用的东西。
+	if strings.TrimSpace(a.Scope) == "" {
+		t.Errorf("%s 是否定断言却没写 Scope：说不清这份证明覆盖到哪，就不算证明", label)
+		return
+	}
+	if len(a.In) == 0 || len(a.Absent) == 0 {
+		t.Errorf("%s 的缺席依据不完整：要搜哪些函数、搜什么，都得写", label)
+		return
+	}
+	// 否定断言说「不做 X」，那 X 就得真的在被搜的清单里，
+	// 否则这条断言和这次搜索各说各话。
+	var covered bool
+	for _, forbidden := range a.Absent {
+		if forbidden == c.Does {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Errorf("%s 说不做 %q，但搜的是 %v——断言与搜索对不上", label, c.Does, a.Absent)
+	}
+	for _, ref := range a.In {
+		lines, err := upstreamLines(src, ref.Path)
+		if err != nil {
+			t.Errorf("%s 的缺席依据指向 %s，但读不到：%v", label, ref.Path, err)
+			continue
+		}
+		body, ok := funcBody(lines, ref.Func)
+		if !ok {
+			t.Errorf("%s 的缺席依据说要搜 %s，但上游里找不到这个函数", label, ref)
+			continue
+		}
+		for _, forbidden := range a.Absent {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s 说「%s」，但 %s 里出现了 %q", label, c.Means, ref, forbidden)
+			}
+		}
+	}
+}
+
+// checkDoesIsLiterallyInItsOwnAnchor 验断言的那个符号真的在它自己的锚点上。
+//
+// **逐字包含，不是「共享某个 token」。** 这一条是整套清单里唯一
+// 机器能给出硬保证的地方：Does 必须是上游代码里真实存在的符号，
+// 所以它编不出假话。
+//
+// 「自己的」也是重点：attempt 11 把一条命令所有锚点拼成一个字符串去匹配，
+// 于是只要有一句话对得上，其余的都搭便车过关。
+func checkDoesIsLiterallyInItsOwnAnchor(t *testing.T, label string, c Claim) {
+	t.Helper()
+	for _, ev := range c.Evidence {
+		if strings.Contains(ev.Anchor, c.Does) {
+			return
+		}
+	}
+	var anchors []string
+	for _, ev := range c.Evidence {
+		anchors = append(anchors, ev.Anchor)
+	}
+	t.Errorf("%s 说上游做的是 %q，但它自己的锚点里根本没有这个符号：%q",
+		label, c.Does, strings.Join(anchors, " / "))
+}
+
+// checkMeansDoesNotSneakInUncitedClaims 防止解释偷偷变成断言。
+//
+// Means 是给人看的，测试不判断它的中文说得对不对——**机器做不到这件事，
+// 假装做得到才是问题**。但如果有人在 Means 里点了一个技术符号的名，
+// 那就不再是解释而是断言了，得有依据兜着。
+//
+// 所以规矩是：Means 里出现的标识符，要么在本条的锚点上，
+// 要么在同一条命令别处的锚点上（同一件事拆成几条 Claim 是常事），
+// 否则就是一句没有出处的技术断言。
+func checkMeansDoesNotSneakInUncitedClaims(t *testing.T, label string, c Claim, allAnchors string) {
+	t.Helper()
+	lower := strings.ToLower(allAnchors)
+	for _, tok := range identifier.FindAllString(c.Means, -1) {
+		if !strings.Contains(lower, strings.ToLower(tok)) {
+			t.Errorf("%s 的解释里点名了 %q，但这条命令的依据里没有它——"+
+				"点到具体符号就不再是解释，是断言，得有出处", label, tok)
+		}
+	}
+}
+
+func upstreamLines(src, path string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(src, path))
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(string(data), "\n"), nil
 }
 
 // enclosingFunc 从某一行往上找最近的函数声明。
@@ -545,47 +713,54 @@ func enclosingFunc(lines []string, line int) string {
 	return "(文件顶层，不在任何函数里)"
 }
 
-// checkEvidenceIsNotTheSharedOne 验第 3 条：不许拿共有的 storage 初始化充数。
+// funcBody 抽出一个函数从声明行到下一个顶层声明之间的文本。
+//
+// 按文本切，不做语法分析：够用，且看得懂。抽不到就说抽不到，不猜。
+func funcBody(lines []string, name string) (string, bool) {
+	start := -1
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "func ") {
+			continue
+		}
+		// 名字后面必须直接跟左括号或泛型括号，免得 Foo 匹配到 FooBar。
+		if idx := strings.Index(line, name); idx >= 0 {
+			rest := line[idx+len(name):]
+			if strings.HasPrefix(rest, "(") || strings.HasPrefix(rest, "[") {
+				start = i
+				break
+			}
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "func ") {
+			end = i
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n"), true
+}
+
+// checkEvidenceIsNotTheSharedOne 不许拿所有命令共有的 storage 初始化充数。
 //
 // 「每条命令都会初始化 storage」证明不了「session output 跑了 capture-pane」。
-// attempt 10 的 web 与 session output 就是这么过的关。
-func checkEvidenceIsNotTheSharedOne(t *testing.T, sub string, where []Evidence) {
+func checkEvidenceIsNotTheSharedOne(t *testing.T, label string, where []Evidence) {
 	t.Helper()
 	for _, e := range where {
-		for _, shared := range SharedStorageInit.Where {
-			if e.Path == shared.Path && e.Line == shared.Line {
-				t.Errorf("%s 的依据 %q 就是 SharedStorageInit 那条——"+
-					"共有的 storage 初始化证明不了这条命令特有的副作用，"+
-					"要指向它自己的那一行", sub, e)
+		for _, sc := range SharedStorageInit.Claims {
+			for _, shared := range sc.Evidence {
+				if e.Path == shared.Path && e.Line == shared.Line {
+					t.Errorf("%s 的依据 %q 就是 SharedStorageInit 那条——"+
+						"共有的 storage 初始化证明不了这条命令特有的副作用，"+
+						"要指向它自己的那一行", label, e)
+				}
 			}
 		}
 	}
 }
 
-// identifier 抓 What 与 Anchor 里的技术记号：函数名、字段名、带连字符的子命令。
+// identifier 抓断言与锚点里的技术记号：函数名、字段名、带连字符的子命令。
 var identifier = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_.\-]{7,}`)
-
-// checkWhatNamesWhatTheAnchorsShow 验第 4 条：描述与依据要讲同一件事。
-//
-// 做法是拿 What 里点名的标识符去锚点里对。至少要对上一个——
-// 对不上就说明这段描述在讲一件依据完全没有证明的事。
-//
-// 只要求「至少一个」而不是全部：一条 What 常常同时讲因果两头
-// （「跑 X，于是写了 Y」），依据未必两头都钉得住。但一个都钉不住，
-// 这条声明就是没有出处的。
-func checkWhatNamesWhatTheAnchorsShow(t *testing.T, sub string, e SideEffect) {
-	t.Helper()
-	var anchors string
-	for _, ev := range e.Where {
-		anchors += ev.Anchor + "\n"
-	}
-	anchorsLower := strings.ToLower(anchors)
-	named := identifier.FindAllString(e.What, -1)
-	for _, tok := range named {
-		if strings.Contains(anchorsLower, strings.ToLower(tok)) {
-			return
-		}
-	}
-	t.Errorf("%s 的 What 里没有一个标识符出现在依据的锚点上：What 点名了 %v，"+
-		"锚点却是 %q——描述与依据在讲两件事", sub, named, strings.TrimSpace(anchors))
-}
