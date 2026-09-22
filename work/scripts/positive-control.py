@@ -215,6 +215,39 @@ func (runnerProbe) command() string { return string([]byte{115, 101, 110, 100, 4
 func bypassViaMethod() { _ = exec.Command("tmux", runnerProbe{}.command()) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
+# —— attempt 20：对着第二十轮评审的三条 ——
+SS = "internal/agentdeck/socketscan.go"
+TAIL = """	return probes, nil
+}"""
+
+case("用类型别名 type S = string 藏住造出来的字符串", "A20-1", SS, TAIL,
+     TAIL + """
+
+type S = string
+
+func opaqueAlias() S { return string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115}) }
+
+func bypassAlias() { _ = exec.Command("tmux", opaqueAlias()) }""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
+case("把造出来的字符串藏进结构体字段", "A20-2", SS, TAIL,
+     TAIL + """
+
+type Payload struct{ Command string }
+
+func buildPayload() Payload {
+	return Payload{Command: string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})}
+}
+
+func bypassStruct() { p := buildPayload(); _ = exec.Command("tmux", p.Command) }""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
+case("外部包返回值直接站在子命令位上", "A20-3", SS, TAIL,
+     TAIL + """
+
+func bypassExtern() { _ = exec.Command("tmux", os.Getenv("REVIEW_COMMAND")) }""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
 def main():
     ok_count = 0
     print("=== attempt 13 阳性对照 ===\n")

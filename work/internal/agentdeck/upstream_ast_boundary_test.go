@@ -231,6 +231,23 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 			}
 		}
 	}
+	// 每个 wrapper 先自己算一遍：哪些入参最终站在独立位置上。
+	// 这样调用点就知道该严还是该松，位置事实不会卡在函数边界上。
+	wrapperStrictParams = map[string]map[string]bool{}
+	for grew := true; grew; {
+		grew = false
+		for name := range builders {
+			fn := findPackageFunc(name)
+			if fn == nil {
+				continue
+			}
+			next := strictParamNames(fn, builders, wrapperStrictParams)
+			if len(next) != len(wrapperStrictParams[name]) {
+				wrapperStrictParams[name] = next
+				grew = true
+			}
+		}
+	}
 	// 白名单辅助函数不能同时是 builder，否则它会替自己的实参开后门。
 	for name := range localHelpers {
 		if builders[name] {
@@ -262,263 +279,62 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 				continue
 			}
 			params := paramNames(fn)
-
-			// roots：所有可能流进命令参数的本地名字，迭代到不动点。
-			roots := map[string]bool{}
-			var direct []ast.Expr
-			for _, call := range builderCalls {
-				first := 0
-				if calleeName(call.Fun) == "exec.CommandContext" {
-					first = 1 // 第一个参数是 context，不是命令的一部分
-				}
-				for _, arg := range call.Args[min(first, len(call.Args)):] {
-					collectIdents(arg, roots)
-					direct = append(direct, arg)
-				}
-			}
-			for grew := true; grew; {
-				grew = false
-				for _, rhs := range assignmentsTo(fn, roots) {
-					before := len(roots)
-					collectIdents(rhs, roots)
-					if len(roots) != before {
-						grew = true
-					}
-				}
-			}
-
-			// **被追踪 ≠ 有来源。** roots 是迭代出来的闭包，里面混着
-			// 「本函数赋过值的局部变量」和「只是出现在某个右侧的名字」。
-			// 后者（比如一个包级变量）在本函数里根本没有赋值语句，
-			// 它的值从哪来本测试并不知道——放它过去等于自己把洞挖回来。
 			assigned := assignedNames(fn)
 			ctx := argCtx{
 				fset: fset, where: fn.Name.Name, fn: fn, params: params, assigned: assigned,
 				declared: declared, localHelpers: localHelpers, builtinHelpers: builtinHelpers,
+				chasing: map[string]bool{},
 			}
-			for _, e := range direct {
-				checkArgExpr(t, ctx, e)
-			}
-			for _, rhs := range assignmentsTo(fn, roots) {
-				checkArgExpr(t, ctx, rhs)
-			}
-		}
-	}
-}
-
-// mustPackageASTs 是 packageASTs 的缓存版，迭代找 wrapper 时会反复用到。
-var packageASTCache []*ast.File
-
-func mustPackageASTs(t *testing.T) []*ast.File {
-	t.Helper()
-	if packageASTCache == nil {
-		packageASTCache, _ = packageASTs(t)
-	}
-	return packageASTCache
-}
-
-// forwardsParamsToBuilder 判断这个函数是不是「把自己的入参转手交给命令构造器」。
-//
-// 判得宽一点：只要有任何一个入参出现在 builder 调用的参数里就算。
-// 宁可多查几个函数，也不放过一层 wrapper。
-func forwardsParamsToBuilder(fn *ast.FuncDecl, builders map[string]bool) bool {
-	params := paramNames(fn)
-	found := false
-	ast.Inspect(fn, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || !builders[calleeName(call.Fun)] {
-			return true
-		}
-		for _, arg := range call.Args {
-			used := map[string]bool{}
-			collectIdents(arg, used)
-			for name := range used {
-				if params[name] {
-					found = true
-					return false
+			for _, call := range builderCalls {
+				name := calleeName(call.Fun)
+				if callee := findPackageFunc(name); callee != nil && callee != fn {
+					// 本包的 wrapper：位置事实已经在它内部算过了，
+					// 按参数名决定这个实参严不严。
+					order := paramOrder(callee)
+					strictSet := wrapperStrictParams[name]
+					for i, arg := range call.Args {
+						if i < len(order) && !strictSet[order[i]] {
+							continue // 那个入参最终落在数据位
+						}
+						checkNoOpaqueString(t, fset, fn.Name.Name, arg, fn,
+							params, assigned, declared, localHelpers, builtinHelpers, true)
+					}
+					continue
+				}
+				// 标准库的命令构造器：直接按 argv 位置走。
+				first := 0
+				if name == "exec.CommandContext" {
+					first = 1 // 第一个参数是 context，不是命令的一部分
+				}
+				prevIsFlag := false
+				for _, arg := range call.Args[min(first, len(call.Args)):] {
+					prevIsFlag = checkArgExprFrom(t, ctx, arg, prevIsFlag)
 				}
 			}
 		}
-		return true
-	})
-	return found
+	}
 }
 
-// stringBuilders 是造字符串的原语。它们出现在命令参数里就是红的。
-var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.Sprint": true}
-
-// findPackageFunc / returnedExprs 由 TestCommandArguments 初始化一次，
-// 用来追本包包级函数的返回值。
-var pkgFuncIndex map[string]*ast.FuncDecl
-
-// pkgMethodIndex 按方法名收本包的方法。同名的全收——
-// 调用点写的是变量名，这里没有类型信息分不出是哪一个，那就全追一遍。
-var pkgMethodIndex map[string][]*ast.FuncDecl
-
-// tracing 挡住互相调用导致的无限下钻。
-var tracing = map[string]bool{}
-
-func findPackageFunc(name string) *ast.FuncDecl { return pkgFuncIndex[name] }
-
-// stringResultIndexes 说这个函数的第几个返回值是 string。
-//
-// 只追字符串。追一个返回 MenuEvent 的方法没有意义——
-// 结构体不会变成命令参数，真正变成参数的是从它里面取出来的那个字段，
-// 而取字段那一步是另一次调用，会被单独检查。
-func stringResultIndexes(fn *ast.FuncDecl) []int {
-	if fn.Type.Results == nil {
-		return nil
+// paramOrder 按声明顺序列出入参名。
+func paramOrder(fn *ast.FuncDecl) []string {
+	var out []string
+	if fn.Type.Params == nil {
+		return out
 	}
-	var out []int
-	pos := 0
-	for _, field := range fn.Type.Results.List {
-		n := len(field.Names)
-		if n == 0 {
-			n = 1
+	for _, field := range fn.Type.Params.List {
+		if len(field.Names) == 0 {
+			out = append(out, "")
+			continue
 		}
-		if id, ok := field.Type.(*ast.Ident); ok && id.Name == "string" {
-			for k := 0; k < n; k++ {
-				out = append(out, pos+k)
-			}
+		for _, id := range field.Names {
+			out = append(out, id.Name)
 		}
-		pos += n
 	}
 	return out
 }
 
-// returnedExprs 取出那些会成为字符串返回值的表达式。
-func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
-	want := stringResultIndexes(fn)
-	if len(want) == 0 {
-		return nil
-	}
-	total := 0
-	if fn.Type.Results != nil {
-		for _, f := range fn.Type.Results.List {
-			n := len(f.Names)
-			if n == 0 {
-				n = 1
-			}
-			total += n
-		}
-	}
-	var out []ast.Expr
-	ast.Inspect(fn, func(n ast.Node) bool {
-		ret, ok := n.(*ast.ReturnStmt)
-		if !ok {
-			return true
-		}
-		if len(ret.Results) != total {
-			// return f() 这种一次返回多值的写法，位置对不上，全追一遍。
-			out = append(out, ret.Results...)
-			return true
-		}
-		for _, i := range want {
-			if i < len(ret.Results) {
-				out = append(out, ret.Results[i])
-			}
-		}
-		return true
-	})
-	return out
-}
-
-// argCtx 把一次检查要用到的几张表打包，省得到处传。
-type argCtx struct {
-	fset                         *token.FileSet
-	where                        string
-	fn                           *ast.FuncDecl
-	params, assigned             map[string]bool
-	declared                     packageNames
-	localHelpers, builtinHelpers map[string]bool
-}
-
-// checkArgExpr 检查一段会成为命令参数的表达式。
-//
-// **位置决定语义，所以检查也按位置分。** tmux 的 argv 里：
-//
-//	tmux -L <socket> attach-session -t <target>
-//	     ^^flag ^^data ^^subcommand  ^^flag ^^data
-//
-// 跟在字面量 flag 后面的那个值，tmux 只会当成这个 flag 的取值；
-// 它就算等于 send-keys 也不会被执行。**能变成子命令的是那些
-// 前面没有 flag、自己独立站着的位置。**
-//
-// 上一轮这里不分位置，一律要求「字面量或入参」，于是把
-// menu.TmuxTargetOf() 这类取会话名的正常调用也拦了——那是误报，
-// 会逼人把白名单越加越长，最后谁都能进。
-func checkArgExpr(t *testing.T, ctx argCtx, e ast.Expr) {
-	t.Helper()
-	checkArgExprFrom(t, ctx, e, false)
-}
-
-// checkArgExprFrom 带着「上一个位置是不是取值型 flag」往下走，
-// 这样 append 串起来的 argv 位置才是连续的。
-func checkArgExprFrom(t *testing.T, ctx argCtx, e ast.Expr, prevIsFlag bool) bool {
-	t.Helper()
-	switch v := e.(type) {
-	case *ast.CompositeLit: // []string{...}
-		return checkArgSequence(t, ctx, v.Elts, prevIsFlag)
-	case *ast.CallExpr:
-		if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
-			// append(args, ...) 头一个是被追加的切片，其余是新元素，
-			// 位置状态从前者接着往后走。
-			carried := checkArgExprFrom(t, ctx, v.Args[0], prevIsFlag)
-			return checkArgSequence(t, ctx, v.Args[1:], carried)
-		}
-	case *ast.Ident:
-		// 引用一个切片变量（args）——它自己的赋值会被单独检查，
-		// 这里不知道它末尾是不是 flag，保守当成不是。
-		return false
-	}
-	// 单个值（比如直接写在 exec.Command 里的那几个），按独立位置办。
-	return checkArgSequence(t, ctx, []ast.Expr{e}, prevIsFlag)
-}
-
-// valueFlags 是本包实际用到的、**后面必须跟一个取值**的命令行 flag。
-//
-// 这张表是显式的，不是「以 - 开头就算」，更不是「是个常量就算」。
-//
-// 上一轮那版用的是后者，独立评审一行就破了：
-//
-//	exec.Command("tmux", append([]string{}, "list-sessions", ";", opaque())...)
-//	// 实际 argv：tmux list-sessions ; send-keys
-//
-// `;` 是个常量，于是被当成 flag，后面那个位置就被当成「它的取值」放过了——
-// 可 `;` 在 tmux 里是**命令分隔符**，它后面正是下一条子命令的位置。
-//
-// 新增 flag 要往这里加一行，加的时候得想清楚它是不是真的吃一个参数。
-var valueFlags = map[string]bool{
-	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
-	"--model": true, "--listen": true, "--token": true,
-}
-
-// checkArgSequence 按 argv 位置检查一串命令参数。
-//
-// 位置状态跨调用连续：一次 append 的最后一个元素是 flag 时，
-// 下一次 append 的第一个元素就在它的取值位上。
-func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr, prevIsFlag bool) bool {
-	t.Helper()
-	for _, el := range elems {
-		if s, ok := constStringOf(el); ok {
-			// 字面量：它可能就是子命令名，写死在源码里，守边测试扫得到。
-			// **只有认得的取值型 flag 才把下一位变成数据位。**
-			prevIsFlag = valueFlags[s]
-			continue
-		}
-		if prevIsFlag {
-			// 数据位：前面那个 flag 已经把它的含义定死了，
-			// tmux 不会把 -t 的取值当成子命令。
-			prevIsFlag = false
-			continue
-		}
-		// 独立位置——这里的值可能被当成可执行文件或子命令，要有来源。
-		checkNoOpaqueString(t, ctx.fset, ctx.where, el, ctx.fn,
-			ctx.params, ctx.assigned, ctx.declared, ctx.localHelpers, ctx.builtinHelpers)
-		prevIsFlag = false
-	}
-	return prevIsFlag
-}
+// wrapperStrictParams 记下每个本包 wrapper 的哪些入参会落到独立位置。
+var wrapperStrictParams map[string]map[string]bool
 
 // assignedNames 列出本函数体里真正被赋过值的名字。
 func assignedNames(fn *ast.FuncDecl) map[string]bool {
@@ -685,10 +501,36 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 	})
 }
 
-// checkNoOpaqueString 在一段表达式里找「算出来的字符串」。
+// checkNoOpaqueString 检查一段会成为命令参数的表达式。
+//
+// **默认是拒绝，不是放行。** 这一轮改的就是这个默认值。
+//
+// 前几轮每修一次就多一条「这类通常安全」的分类：方法通常在读数据、
+// 返回类型写着 string 才算字符串、外部返回值只会落在数据位。
+// 独立评审每次都给出可编译可运行的反例，三条全中。
+//
+// 分类的毛病在于它是我顺手划的，而反例只需要找到分类的边上那一格。
+// 所以现在反过来：**能说出来源的才放行，说不出的一律拒绝**——
+//
+//	字面量                 源头写在源码里，守边测试扫得到
+//	本函数入参             来源在调用点，而调用点一定会被检查
+//	                       （builder 是迭代发现的，转发参数的函数自己也是 builder）
+//	本包声明且值折叠得出来  同上，值在源码里
+//	本包函数 / 方法调用      追进去看它 return 什么，不看它声明的返回类型
+//	本函数赋过值的变量      追那次赋值
+//	入参或本地变量的字段     追那个变量的来源
+//
+// 剩下的全部报错：外部包调用、类型断言、通道接收、索引取值……
+// 它们不是「危险」，是**这里说不出它的来源**，而说不出来源的东西
+// 不该出现在能被解释成子命令的位置上。
+//
+// strict 为 false 时（取值型 flag 后面的数据位）只放宽一条：
+// 允许外部包的返回值。那个位置 tmux 只当成 flag 的取值，不会执行它。
+// 这样即使 valueFlags 写错一行，后果也只是「允许了一个外部值」，
+// 而不是整格放行——上一轮评审把布尔 flag 加进那张表，后面那位就完全没人管了。
 func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
 	fn *ast.FuncDecl, params, assigned map[string]bool, declared packageNames,
-	localHelpers, builtinHelpers map[string]bool) {
+	localHelpers, builtinHelpers map[string]bool, strict bool) {
 	t.Helper()
 	// 追一个局部变量的来历时，防止它自己引用自己绕圈。
 	chasing := map[string]bool{}
@@ -696,7 +538,27 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 		pos := fset.Position(n.Pos())
 		return fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line)
 	}
+	reject := func(n ast.Node, what string) {
+		if !strict {
+			return // 数据位：tmux 只把它当成前一个 flag 的取值
+		}
+		t.Errorf("%s 里命令参数用到了%s（%s）："+
+			"这个位置可能被当成可执行文件或子命令，只接受说得出来源的值——"+
+			"字面量、本函数入参、本包声明的常量，或能追进去的本包函数与变量",
+			where, what, at(n))
+	}
 	var walk func(ast.Expr)
+	chaseIdent := func(name string) bool {
+		if fn == nil || chasing[name] {
+			return false
+		}
+		chasing[name] = true
+		for _, rhs := range assignmentsTo(fn, map[string]bool{name: true}) {
+			walk(rhs)
+		}
+		delete(chasing, name)
+		return true
+	}
 	walk = func(x ast.Expr) {
 		if x == nil {
 			return
@@ -710,49 +572,44 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 			case params[v.Name]:
 				// 入参由调用方负责——它的来源在调用点查。
 			case assigned[v.Name]:
-				// **本函数里赋过值的局部变量，得追它到底被赋了什么。**
-				// 上一版到这里就放行，于是
-				//
-				//	x := string([]byte{…})
-				//	return x
-				//
-				// 一路绿灯：返回的是个「已赋值的局部变量」，没人问它赋了什么。
-				if fn != nil && !chasing[v.Name] {
-					chasing[v.Name] = true
-					for _, rhs := range assignmentsTo(fn, map[string]bool{v.Name: true}) {
-						walk(rhs)
-					}
-					delete(chasing, v.Name)
-				}
+				// 本函数里赋过值：追那次赋值。
+				chaseIdent(v.Name)
 			case declared.visible[v.Name], declared.funcs[v.Name]:
 				// 值折叠得出来的包级声明，守边测试扫得到它的内容。
+			case v.Name == "nil" || v.Name == "true" || v.Name == "false":
 			case declared.opaque[v.Name]:
 				t.Errorf("%s 里命令参数用到了包级的 %s（%s）："+
 					"它的值折叠不出来，守边测试也看不见它运行时是什么",
 					where, v.Name, at(v))
-			case v.Name == "nil" || v.Name == "true" || v.Name == "false":
 			default:
-				t.Errorf("%s 里命令参数用到了来路不明的 %s（%s）："+
-					"它既不是本函数入参，也不是被追踪的局部变量或本包声明",
-					where, v.Name, at(v))
+				reject(v, "来路不明的 "+v.Name)
 			}
 			return
 		case *ast.SelectorExpr:
-			// 只认「接收者或入参的字段」。别的（包级变量、全局状态）说不清来源。
-			if id, ok := v.X.(*ast.Ident); ok && (params[id.Name] || assigned[id.Name]) {
-				return
+			// x.Field：**要追 x 从哪来**，不能因为 x 是本地变量就放行。
+			// 上一轮正是这里漏的：p := build(); exec.Command("tmux", p.Command)，
+			// build 返回结构体所以没被追，p.Command 又因为 p 赋过值直接放行。
+			if id, ok := v.X.(*ast.Ident); ok {
+				switch {
+				case params[id.Name]:
+					return // 入参的字段，来源在调用点
+				case assigned[id.Name]:
+					if chaseIdent(id.Name) {
+						return
+					}
+				case declared.visible[id.Name]:
+					return
+				}
 			}
-			if id, ok := v.X.(*ast.Ident); ok && declared.visible[id.Name] {
-				return
-			}
-			t.Errorf("%s 里命令参数读了 %s 的字段（%s）："+
-				"只有本函数的接收者、入参或本包声明的值可以这样读",
-				where, calleeName(v), at(v))
+			reject(v, "字段读取 "+calleeName(v))
 			return
 		case *ast.CompositeLit:
 			for _, el := range v.Elts {
 				walk(el)
 			}
+			return
+		case *ast.KeyValueExpr:
+			walk(v.Value)
 			return
 		case *ast.BinaryExpr:
 			walk(v.X)
@@ -764,11 +621,12 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 		case *ast.Ellipsis:
 			walk(v.Elt)
 			return
-		case *ast.IndexExpr:
+		case *ast.UnaryExpr:
 			walk(v.X)
 			return
 		case *ast.CallExpr:
 			name := calleeName(v.Fun)
+			tail := lastSegment(name)
 			switch {
 			case builtinHelpers[name] || (localHelpers[name] && declared.funcs[name]):
 				for _, a := range v.Args {
@@ -776,59 +634,39 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 				}
 			case stringBuilders[name] || strings.HasPrefix(name, "strings.") ||
 				strings.HasPrefix(name, "strconv.") || strings.HasPrefix(name, "bytes."):
-				// 造字符串的原语。它们的结果运行时才知道是什么。
 				t.Errorf("%s 里命令参数用到了 %s(...)（%s）："+
 					"这是在**造**一个字符串，造出来的可以是任何东西——"+
-					"包括替人敲键的那几个子命令。这个位置只接受字面量、"+
-					"本函数入参，或读取现成数据", where, name, at(v))
-			case declared.funcs[name]:
-				// 本包的包级函数：追进去看它 return 什么。
-				// 独立评审的反例就是这一种——把 string([]byte{…}) 包进一个
-				// 小函数，外面看起来只是个普通调用。
-				//
-				// 追进去要**换上下文**：里面的名字是它自己的入参和局部变量，
-				// 跟调用者那一套没关系。互相调用用 tracing 挡住。
-				if callee := findPackageFunc(name); callee != nil && !tracing[name] {
-					tracing[name] = true
-					for _, res := range returnedExprs(callee) {
-						checkNoOpaqueString(t, fset, where+" → "+name, res,
-							callee, paramNames(callee), assignedNames(callee),
-							declared, localHelpers, builtinHelpers)
-					}
-					delete(tracing, name)
+					"包括替人敲键的那几个子命令", where, name, at(v))
+			case declared.funcs[name] && !tracing[name]:
+				callee := findPackageFunc(name)
+				tracing[name] = true
+				for _, res := range returnedExprs(callee) {
+					checkNoOpaqueString(t, fset, where+" → "+name, res,
+						callee, paramNames(callee), assignedNames(callee),
+						declared, localHelpers, builtinHelpers, strict)
 				}
+				delete(tracing, name)
+			case len(pkgMethodIndex[tail]) > 0 && !tracing[tail]:
+				tracing[tail] = true
+				for _, m := range pkgMethodIndex[tail] {
+					for _, res := range returnedExprs(m) {
+						checkNoOpaqueString(t, fset, where+" → "+tail, res,
+							m, paramNames(m), assignedNames(m),
+							declared, localHelpers, builtinHelpers, strict)
+					}
+				}
+				delete(tracing, tail)
+			case declared.funcs[name] || len(pkgMethodIndex[tail]) > 0:
+				// 正在追它，别绕圈
 			default:
-				// **本包的方法跟包级函数一样要追。**
-				//
-				// 上一版这里写着「方法通常是在读数据，不是在造字符串」，
-				// 独立评审四行就破了：
-				//
-				//	type runner struct{}
-				//	func (runner) command() string { return string([]byte{…}) }
-				//	exec.Command("tmux", runner{}.command())
-				//
-				// 三条测试全绿，跑起来就是 tmux send-keys。
-				// 「通常是」不是边界，是我自己编的分类——本包的方法源码就在这儿，
-				// 没有任何理由不追。
-				//
-				// 真正追不进去的只有**外部包**：它们的实现不在本包，
-				// 这里读不到。兜着它的是位置规则——这类值只出现在
-				// 取值型 flag 后面的数据位，tmux 不会把 -t 的取值当子命令。
-				tail := lastSegment(name)
-				if ms := pkgMethodIndex[tail]; len(ms) > 0 && !tracing[tail] {
-					tracing[tail] = true
-					for _, m := range ms {
-						for _, res := range returnedExprs(m) {
-							checkNoOpaqueString(t, fset, where+" → "+tail, res,
-								m, paramNames(m), assignedNames(m),
-								declared, localHelpers, builtinHelpers)
-						}
-					}
-					delete(tracing, tail)
-				}
+				// 外部包：源码不在这儿，追不进去。
+				// **追不进去不等于安全**——上一轮我把这条写成了「它只会落在
+				// 数据位」，评审用 exec.Command("tmux", os.Getenv("X")) 证明是错的。
+				reject(v, "外部调用 "+name+"(...) 的返回值")
 			}
 			return
 		}
+		reject(x, fmt.Sprintf("一个 %T", x))
 	}
 	walk(e)
 }
@@ -883,4 +721,264 @@ func f() {
 	if got := nodeTextWithoutComments([]byte(src), fset, file, bar); !strings.Contains(got, anchor) {
 		t.Errorf("真正那个调用反而匹配不上了：%q", got)
 	}
+}
+
+// —— 以下是命令参数检查用到的索引与位置分析 ——
+
+// stringBuilders 是造字符串的原语。它们出现在命令参数里就是红的。
+var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.Sprint": true}
+
+// valueFlags 是本包实际用到的、**后面必须跟一个取值**的命令行 flag。
+//
+// 这张表是显式的，不是「以 - 开头就算」，更不是「是个常量就算」。
+// 上一版用后者，独立评审一行就破了：
+//
+//	exec.Command("tmux", append([]string{}, "list-sessions", ";", opaque())...)
+//	// 实际 argv：tmux list-sessions ; send-keys
+//
+// `;` 是个常量，于是被当成 flag，后面那个位置就被当成「它的取值」放过了——
+// 可 `;` 在 tmux 里是命令分隔符，它后面正是下一条子命令的位置。
+//
+// **写错这张表的后果被限制住了**：数据位只放宽「允许外部包的返回值」一条，
+// 其余规则照旧。评审上一轮把布尔 flag 加进表后那一位完全没人管，现在不会了。
+var valueFlags = map[string]bool{
+	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
+	"--model": true, "--listen": true, "--token": true,
+	"--message-file": true, // 评审指出的遗漏，见 send.go
+}
+
+var pkgFuncIndex map[string]*ast.FuncDecl
+
+// pkgMethodIndex 按方法名收本包的方法。同名的全收——
+// 调用点写的是变量名，这里没有类型信息分不出是哪一个，那就全追一遍。
+var pkgMethodIndex map[string][]*ast.FuncDecl
+
+// tracing 挡住互相调用导致的无限下钻。
+var tracing = map[string]bool{}
+
+func findPackageFunc(name string) *ast.FuncDecl { return pkgFuncIndex[name] }
+
+// returnedExprs 取出一个函数每个 return 的第一个表达式。
+//
+// **不按返回类型挑。** 上一轮按「返回类型的字面名字是不是 string」过滤，
+// 独立评审三行就绕过了：
+//
+//	type S = string
+//	func opaque() S { return string([]byte{…}) }
+//
+// 别名的拼写不是 `string`，于是根本没被追。同一轮还有一条：返回结构体的
+// 函数被整个跳过，而 `p := build(); exec.Command("tmux", p.Command)` 也是绿的。
+//
+// 两条都是按类型的写法分类。现在改成按**位置**：只看第一个返回值。
+// Go 的惯例是 (值, error)，能流进命令参数的是前者；追 error 那一路
+// 会一路追进 HTTP 错误分支，全是噪音。位置没有别名。
+func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
+	var out []ast.Expr
+	ast.Inspect(fn, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok || len(ret.Results) == 0 {
+			return true
+		}
+		out = append(out, ret.Results[0])
+		return true
+	})
+	return out
+}
+
+// mustPackageASTs 是 packageASTs 的缓存版，迭代找 wrapper 时会反复用到。
+var packageASTCache []*ast.File
+
+func mustPackageASTs(t *testing.T) []*ast.File {
+	t.Helper()
+	if packageASTCache == nil {
+		packageASTCache, _ = packageASTs(t)
+	}
+	return packageASTCache
+}
+
+// forwardsParamsToBuilder 判断这个函数是不是「把自己的入参转手交给命令构造器」。
+//
+// 判得宽一点：只要有任何一个入参出现在 builder 调用的参数里就算。
+// 宁可多查几个函数，也不放过一层 wrapper。
+func forwardsParamsToBuilder(fn *ast.FuncDecl, builders map[string]bool) bool {
+	params := paramNames(fn)
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !builders[calleeName(call.Fun)] {
+			return true
+		}
+		for _, arg := range call.Args {
+			used := map[string]bool{}
+			collectIdents(arg, used)
+			for name := range used {
+				if params[name] {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// argCtx 把一次检查要用到的几张表打包，省得到处传。
+type argCtx struct {
+	fset                         *token.FileSet
+	where                        string
+	fn                           *ast.FuncDecl
+	params, assigned             map[string]bool
+	declared                     packageNames
+	localHelpers, builtinHelpers map[string]bool
+	// chasing 挡住 args = append(args, …) 这种自引用导致的无限下钻。
+	chasing map[string]bool
+}
+
+// checkArgExprFrom 带着「上一个位置是不是取值型 flag」往下走，
+// 这样 append 串起来的 argv 位置才是连续的。
+func checkArgExprFrom(t *testing.T, ctx argCtx, e ast.Expr, prevIsFlag bool) bool {
+	t.Helper()
+	switch v := e.(type) {
+	case *ast.CompositeLit: // []string{...}
+		return checkArgSequence(t, ctx, v.Elts, prevIsFlag)
+	case *ast.CallExpr:
+		if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
+			carried := checkArgExprFrom(t, ctx, v.Args[0], prevIsFlag)
+			return checkArgSequence(t, ctx, v.Args[1:], carried)
+		}
+	case *ast.Ident:
+		// 引用一个切片变量（args）：追它的赋值，位置状态接着走。
+		// args = append(args, …) 里右边也有 args，所以要挡住自引用。
+		if ctx.assigned[v.Name] && !ctx.chasing[v.Name] {
+			ctx.chasing[v.Name] = true
+			last := prevIsFlag
+			for _, rhs := range assignmentsTo(ctx.fn, map[string]bool{v.Name: true}) {
+				last = checkArgExprFrom(t, ctx, rhs, prevIsFlag)
+			}
+			delete(ctx.chasing, v.Name)
+			return last
+		}
+		// 别的名字（入参等）落到下面按位置检查，不能直接放过。
+	}
+	return checkArgSequence(t, ctx, []ast.Expr{e}, prevIsFlag)
+}
+
+// checkArgSequence 按 argv 位置检查一串命令参数。
+func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr, prevIsFlag bool) bool {
+	t.Helper()
+	return walkArgPositions(elems, prevIsFlag, func(el ast.Expr, strict bool) {
+		checkNoOpaqueString(t, ctx.fset, ctx.where, el, ctx.fn,
+			ctx.params, ctx.assigned, ctx.declared, ctx.localHelpers, ctx.builtinHelpers, strict)
+	})
+}
+
+// walkArgPositions 按 argv 语义走一串参数，对每个非字面量元素回调，
+// 并说明它落在独立位置（strict）还是取值型 flag 后面的数据位。
+func walkArgPositions(elems []ast.Expr, prevIsFlag bool, visit func(ast.Expr, bool)) bool {
+	for _, el := range elems {
+		if s, ok := constStringOf(el); ok {
+			prevIsFlag = valueFlags[s]
+			continue
+		}
+		visit(el, !prevIsFlag)
+		prevIsFlag = false
+	}
+	return prevIsFlag
+}
+
+// strictParamNames 找出这个函数的哪些入参会落到命令的**独立位置**上。
+//
+// 位置信息本来卡在函数边界上：`probeSocket(ctx, e.Name(), …)` 在调用点看不出
+// 那个 socket 名进去之后是跟在 `-L` 后面的数据位，于是被当成独立位置严查，
+// 报出一堆跟命令无关的误报。
+//
+// 所以先把每个 wrapper 分析一遍：它的哪个入参最终站在独立位置上。
+// 调用点按这个结果决定严不严——**这不是「相信这个函数」，
+// 是把它内部的位置事实算出来带到调用点**。
+func strictParamNames(fn *ast.FuncDecl, builders map[string]bool,
+	known map[string]map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	params := paramNames(fn)
+	assigned := assignedNames(fn)
+	chasing := map[string]bool{}
+	var walkExpr func(ast.Expr, bool) bool
+	mark := func(e ast.Expr, strict bool) {
+		if !strict {
+			return
+		}
+		ids := map[string]bool{}
+		collectIdents(e, ids)
+		for name := range ids {
+			if params[name] {
+				out[name] = true
+			}
+		}
+	}
+	walkExpr = func(e ast.Expr, prevIsFlag bool) bool {
+		switch v := e.(type) {
+		case *ast.CompositeLit:
+			return walkArgPositions(v.Elts, prevIsFlag, mark)
+		case *ast.CallExpr:
+			if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
+				carried := walkExpr(v.Args[0], prevIsFlag)
+				return walkArgPositions(v.Args[1:], carried, mark)
+			}
+		case *ast.Ident:
+			if assigned[v.Name] && !chasing[v.Name] {
+				chasing[v.Name] = true
+				last := prevIsFlag
+				for _, rhs := range assignmentsTo(fn, map[string]bool{v.Name: true}) {
+					last = walkExpr(rhs, prevIsFlag)
+				}
+				delete(chasing, v.Name)
+				return last
+			}
+			// 入参或别处来的名字：它就站在这个位置上，按位置记一笔。
+			// （早先这里直接 return false，于是所有 wrapper 的 strict 集合
+			// 全是空的——位置事实一个也没传出去。）
+		}
+		return walkArgPositions([]ast.Expr{e}, prevIsFlag, mark)
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := calleeName(call.Fun)
+		if !builders[name] {
+			return true
+		}
+		// **对本包 wrapper 的调用不按 argv 位置算。** 它的参数不是 argv，
+		// 落在哪由那个 wrapper 内部决定——用它已经算出来的结论传播过来。
+		// 这就是为什么整件事要迭代到不动点：probeSocket 的 socket 是不是
+		// 独立位置，取决于它转手调用的 instanceIDOf 怎么用它。
+		if callee := findPackageFunc(name); callee != nil && callee != fn {
+			order := paramOrder(callee)
+			calleeStrict := known[name]
+			for i, arg := range call.Args {
+				if i < len(order) && !calleeStrict[order[i]] {
+					continue
+				}
+				ids := map[string]bool{}
+				collectIdents(arg, ids)
+				for id := range ids {
+					if params[id] {
+						out[id] = true
+					}
+				}
+			}
+			return true
+		}
+		first := 0
+		if name == "exec.CommandContext" {
+			first = 1
+		}
+		prevIsFlag := false
+		for _, arg := range call.Args[min(first, len(call.Args)):] {
+			prevIsFlag = walkExpr(arg, prevIsFlag)
+		}
+		return true
+	})
+	return out
 }
