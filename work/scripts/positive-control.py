@@ -188,6 +188,33 @@ func opaqueBuilder2(command string) { _ = exec.Command(command) }
 func callsIt() { opaqueBuilder2(opaqueViaLocal()) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
+# —— attempt 18：对着第十八轮评审的两条 ——
+case("用 tmux 的命令分隔符 ; 骗过位置状态机", "A18-1", "internal/agentdeck/attach.go",
+     """	return cmd, note, err
+}""",
+     """	return cmd, note, err
+}
+
+func opaqueSep() string { return string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115}) }
+
+func bypassViaSeparator() {
+	_ = exec.Command("tmux", append([]string{}, "list-sessions", ";", opaqueSep())...)
+}""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
+case("用本包方法造子命令", "A18-2", "internal/agentdeck/attach.go",
+     """	return cmd, note, err
+}""",
+     """	return cmd, note, err
+}
+
+type runnerProbe struct{}
+
+func (runnerProbe) command() string { return string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115}) }
+
+func bypassViaMethod() { _ = exec.Command("tmux", runnerProbe{}.command()) }""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
 def main():
     ok_count = 0
     print("=== attempt 13 阳性对照 ===\n")

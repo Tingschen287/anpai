@@ -217,10 +217,17 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 	files, fset := packageASTs(t)
 	declared := packageDeclNames(files)
 	pkgFuncIndex = map[string]*ast.FuncDecl{}
+	pkgMethodIndex = map[string][]*ast.FuncDecl{}
 	for _, f := range files {
 		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if fn.Recv == nil {
 				pkgFuncIndex[fn.Name.Name] = fn
+			} else {
+				pkgMethodIndex[fn.Name.Name] = append(pkgMethodIndex[fn.Name.Name], fn)
 			}
 		}
 	}
@@ -344,16 +351,72 @@ var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.S
 // 用来追本包包级函数的返回值。
 var pkgFuncIndex map[string]*ast.FuncDecl
 
+// pkgMethodIndex 按方法名收本包的方法。同名的全收——
+// 调用点写的是变量名，这里没有类型信息分不出是哪一个，那就全追一遍。
+var pkgMethodIndex map[string][]*ast.FuncDecl
+
 // tracing 挡住互相调用导致的无限下钻。
 var tracing = map[string]bool{}
 
 func findPackageFunc(name string) *ast.FuncDecl { return pkgFuncIndex[name] }
 
+// stringResultIndexes 说这个函数的第几个返回值是 string。
+//
+// 只追字符串。追一个返回 MenuEvent 的方法没有意义——
+// 结构体不会变成命令参数，真正变成参数的是从它里面取出来的那个字段，
+// 而取字段那一步是另一次调用，会被单独检查。
+func stringResultIndexes(fn *ast.FuncDecl) []int {
+	if fn.Type.Results == nil {
+		return nil
+	}
+	var out []int
+	pos := 0
+	for _, field := range fn.Type.Results.List {
+		n := len(field.Names)
+		if n == 0 {
+			n = 1
+		}
+		if id, ok := field.Type.(*ast.Ident); ok && id.Name == "string" {
+			for k := 0; k < n; k++ {
+				out = append(out, pos+k)
+			}
+		}
+		pos += n
+	}
+	return out
+}
+
+// returnedExprs 取出那些会成为字符串返回值的表达式。
 func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
+	want := stringResultIndexes(fn)
+	if len(want) == 0 {
+		return nil
+	}
+	total := 0
+	if fn.Type.Results != nil {
+		for _, f := range fn.Type.Results.List {
+			n := len(f.Names)
+			if n == 0 {
+				n = 1
+			}
+			total += n
+		}
+	}
 	var out []ast.Expr
 	ast.Inspect(fn, func(n ast.Node) bool {
-		if ret, ok := n.(*ast.ReturnStmt); ok {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		if len(ret.Results) != total {
+			// return f() 这种一次返回多值的写法，位置对不上，全追一遍。
 			out = append(out, ret.Results...)
+			return true
+		}
+		for _, i := range want {
+			if i < len(ret.Results) {
+				out = append(out, ret.Results[i])
+			}
 		}
 		return true
 	})
@@ -386,34 +449,66 @@ type argCtx struct {
 // 会逼人把白名单越加越长，最后谁都能进。
 func checkArgExpr(t *testing.T, ctx argCtx, e ast.Expr) {
 	t.Helper()
-	switch v := e.(type) {
-	case *ast.CompositeLit: // []string{...}
-		checkArgSequence(t, ctx, v.Elts)
-		return
-	case *ast.CallExpr:
-		if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
-			// append(args, ...) 头一个是被追加的切片，其余是新元素。
-			checkArgExpr(t, ctx, v.Args[0])
-			checkArgSequence(t, ctx, v.Args[1:])
-			return
-		}
-	}
-	// 单个值（比如直接写在 exec.Command 里的那几个），按独立位置办。
-	checkArgSequence(t, ctx, []ast.Expr{e})
+	checkArgExprFrom(t, ctx, e, false)
 }
 
-// checkArgSequence 按位置检查一串命令参数。
-func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr) {
+// checkArgExprFrom 带着「上一个位置是不是取值型 flag」往下走，
+// 这样 append 串起来的 argv 位置才是连续的。
+func checkArgExprFrom(t *testing.T, ctx argCtx, e ast.Expr, prevIsFlag bool) bool {
 	t.Helper()
-	prevIsFlag := false
+	switch v := e.(type) {
+	case *ast.CompositeLit: // []string{...}
+		return checkArgSequence(t, ctx, v.Elts, prevIsFlag)
+	case *ast.CallExpr:
+		if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
+			// append(args, ...) 头一个是被追加的切片，其余是新元素，
+			// 位置状态从前者接着往后走。
+			carried := checkArgExprFrom(t, ctx, v.Args[0], prevIsFlag)
+			return checkArgSequence(t, ctx, v.Args[1:], carried)
+		}
+	case *ast.Ident:
+		// 引用一个切片变量（args）——它自己的赋值会被单独检查，
+		// 这里不知道它末尾是不是 flag，保守当成不是。
+		return false
+	}
+	// 单个值（比如直接写在 exec.Command 里的那几个），按独立位置办。
+	return checkArgSequence(t, ctx, []ast.Expr{e}, prevIsFlag)
+}
+
+// valueFlags 是本包实际用到的、**后面必须跟一个取值**的命令行 flag。
+//
+// 这张表是显式的，不是「以 - 开头就算」，更不是「是个常量就算」。
+//
+// 上一轮那版用的是后者，独立评审一行就破了：
+//
+//	exec.Command("tmux", append([]string{}, "list-sessions", ";", opaque())...)
+//	// 实际 argv：tmux list-sessions ; send-keys
+//
+// `;` 是个常量，于是被当成 flag，后面那个位置就被当成「它的取值」放过了——
+// 可 `;` 在 tmux 里是**命令分隔符**，它后面正是下一条子命令的位置。
+//
+// 新增 flag 要往这里加一行，加的时候得想清楚它是不是真的吃一个参数。
+var valueFlags = map[string]bool{
+	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
+	"--model": true, "--listen": true, "--token": true,
+}
+
+// checkArgSequence 按 argv 位置检查一串命令参数。
+//
+// 位置状态跨调用连续：一次 append 的最后一个元素是 flag 时，
+// 下一次 append 的第一个元素就在它的取值位上。
+func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr, prevIsFlag bool) bool {
+	t.Helper()
 	for _, el := range elems {
-		if _, ok := constStringOf(el); ok {
-			// 字面量：它可能就是子命令名，本来就写死在源码里，守边测试扫得到。
-			prevIsFlag = true
+		if s, ok := constStringOf(el); ok {
+			// 字面量：它可能就是子命令名，写死在源码里，守边测试扫得到。
+			// **只有认得的取值型 flag 才把下一位变成数据位。**
+			prevIsFlag = valueFlags[s]
 			continue
 		}
 		if prevIsFlag {
-			// 数据位：前面那个字面量已经把它的含义定死了。
+			// 数据位：前面那个 flag 已经把它的含义定死了，
+			// tmux 不会把 -t 的取值当成子命令。
 			prevIsFlag = false
 			continue
 		}
@@ -422,6 +517,7 @@ func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr) {
 			ctx.params, ctx.assigned, ctx.declared, ctx.localHelpers, ctx.builtinHelpers)
 		prevIsFlag = false
 	}
+	return prevIsFlag
 }
 
 // assignedNames 列出本函数体里真正被赋过值的名字。
@@ -441,6 +537,17 @@ func assignedNames(fn *ast.FuncDecl) map[string]bool {
 					out[id.Name] = true
 				}
 			}
+		case *ast.DeclStmt:
+			// var x = ... 跟 x := ... 是一回事，别漏。
+			if gd, ok := v.Decl.(*ast.GenDecl); ok {
+				for _, spec := range gd.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, id := range vs.Names {
+							out[id.Name] = true
+						}
+					}
+				}
+			}
 		}
 		return true
 	})
@@ -451,18 +558,33 @@ func assignedNames(fn *ast.FuncDecl) map[string]bool {
 func assignmentsTo(fn *ast.FuncDecl, names map[string]bool) []ast.Expr {
 	var out []ast.Expr
 	ast.Inspect(fn, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		var touches bool
-		for _, lhs := range as.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && names[id.Name] {
-				touches = true
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			var touches bool
+			for _, lhs := range v.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && names[id.Name] {
+					touches = true
+				}
 			}
-		}
-		if touches {
-			out = append(out, as.Rhs...)
+			if touches {
+				out = append(out, v.Rhs...)
+			}
+		case *ast.DeclStmt:
+			gd, ok := v.Decl.(*ast.GenDecl)
+			if !ok {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, id := range vs.Names {
+					if names[id.Name] && i < len(vs.Values) {
+						out = append(out, vs.Values[i])
+					}
+				}
+			}
 		}
 		return true
 	})
@@ -676,11 +798,34 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 					delete(tracing, name)
 				}
 			default:
-				// 方法调用与外部包函数：它们是在**读**上游给的数据
-				// （菜单快照、会话列表、目录项），不是在造字符串。
-				// 实现不在本包，这里追不进去——**这是一条真实的边界**。
-				// 兜着它的是位置规则：这类值只出现在字面量 flag 后面的数据位，
-				// tmux 不会把 -t 的取值当成子命令。
+				// **本包的方法跟包级函数一样要追。**
+				//
+				// 上一版这里写着「方法通常是在读数据，不是在造字符串」，
+				// 独立评审四行就破了：
+				//
+				//	type runner struct{}
+				//	func (runner) command() string { return string([]byte{…}) }
+				//	exec.Command("tmux", runner{}.command())
+				//
+				// 三条测试全绿，跑起来就是 tmux send-keys。
+				// 「通常是」不是边界，是我自己编的分类——本包的方法源码就在这儿，
+				// 没有任何理由不追。
+				//
+				// 真正追不进去的只有**外部包**：它们的实现不在本包，
+				// 这里读不到。兜着它的是位置规则——这类值只出现在
+				// 取值型 flag 后面的数据位，tmux 不会把 -t 的取值当子命令。
+				tail := lastSegment(name)
+				if ms := pkgMethodIndex[tail]; len(ms) > 0 && !tracing[tail] {
+					tracing[tail] = true
+					for _, m := range ms {
+						for _, res := range returnedExprs(m) {
+							checkNoOpaqueString(t, fset, where+" → "+tail, res,
+								m, paramNames(m), assignedNames(m),
+								declared, localHelpers, builtinHelpers)
+						}
+					}
+					delete(tracing, tail)
+				}
 			}
 			return
 		}
