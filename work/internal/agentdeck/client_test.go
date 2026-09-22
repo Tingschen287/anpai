@@ -448,18 +448,35 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 
 // 副作用声明里写的上游依据，必须真的指着那件事。
 //
-// attempt 9 的版本只验证四件事：路径含冒号、文件存在、行号是正整数、
-// 行号没超过文件总行数。于是把依据改成同一个文件里的任意一行也照样通过——
-// 它验证的是「这个位置存在」，不是「这个位置讲的是这件事」。
-// 独立评审指出后改成现在这样：**锚点必须出现在指定的那一行上。**
+// 这条测试被两轮独立评审推着长到现在的样子，每一条检查都对应一次它曾经放过的假依据：
 //
-// 两种失败要分开报，因为修法不同：
-//   - 那一行没有锚点，但文件里别处有 → 上游动过，行号过期，报出新的候选行号。
-//   - 整个文件都找不到锚点 → 这条依据是凭空写的，或者上游已经删了这段。
+//	attempt 9  只比「行号没超出文件总行数」——把行号改成同文件任意一行也过。
+//	attempt 10 补了锚点，但锚点跟声明可以毫不相干：session output 声称
+//	           「跑 capture-pane 不发按键」，依据却指着 NewStorageWithProfile，照样绿。
+//
+// 所以现在验四件事，任何一件不成立都红：
+//
+//	1. 指定的那一行上确实有 Anchor（行号漂了要报出新行号，凭空写要报「上游里没有」）
+//	2. 那一行确实落在 Within 说的那个函数里（同一段调用在一个文件里常出现好几次）
+//	3. 依据不是 SharedStorageInit 那条——共有的 storage 初始化证明不了任何一条命令特有的事
+//	4. What 里点名的标识符，至少有一个真的出现在某条锚点上（描述与依据要讲同一件事）
 //
 // 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
 // 快照路径用 WORKDECK_UPSTREAM_SRC 指定。
 func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
+	src := requireUpstreamSnapshot(t)
+
+	for sub, e := range SideEffects {
+		checkEvidence(t, src, sub, e.Where)
+		checkEvidenceIsNotTheSharedOne(t, sub, e.Where)
+		checkWhatNamesWhatTheAnchorsShow(t, sub, e)
+	}
+	checkEvidence(t, src, "SharedStorageInit", SharedStorageInit.Where)
+	checkWhatNamesWhatTheAnchorsShow(t, "SharedStorageInit", SharedStorageInit)
+}
+
+func requireUpstreamSnapshot(t *testing.T) string {
+	t.Helper()
 	src := os.Getenv("WORKDECK_UPSTREAM_SRC")
 	if src == "" {
 		t.Skip("跳过：没有设 WORKDECK_UPSTREAM_SRC，无法核对上游依据")
@@ -467,32 +484,33 @@ func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(src, "go.mod")); err != nil {
 		t.Skipf("跳过：%s 看起来不是上游源码树（%v）", src, err)
 	}
+	return src
+}
 
-	check := func(label string, where []Evidence) {
-		for _, e := range where {
-			if e.Path == "" || e.Line < 1 {
-				t.Errorf("%s 的依据 %q 不完整：路径或行号缺失", label, e)
-				continue
-			}
-			// 锚点太短就不是锚点：一个花括号在任何文件里都找得到。
-			if len(strings.Join(strings.Fields(e.Anchor), "")) < 12 {
-				t.Errorf("%s 的依据 %q 锚点太短（%q），钉不住任何东西", label, e, e.Anchor)
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(src, e.Path))
-			if err != nil {
-				t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, e.Path, err)
-				continue
-			}
-			lines := strings.Split(string(data), "\n")
-			if e.Line > len(lines) {
-				t.Errorf("%s 的依据指向 %s，但那个文件只有 %d 行", label, e, len(lines))
-				continue
-			}
-			if strings.Contains(lines[e.Line-1], e.Anchor) {
-				continue
-			}
-			// 行号没对上。锚点还在别处吗？
+// checkEvidence 验第 1、2 条：锚点在指定行上，且那一行在 Within 说的函数里。
+func checkEvidence(t *testing.T, src, label string, where []Evidence) {
+	t.Helper()
+	for _, e := range where {
+		if e.Path == "" || e.Line < 1 || e.Within == "" {
+			t.Errorf("%s 的依据 %q 不完整：路径、行号、所属函数三者缺一不可", label, e)
+			continue
+		}
+		// 锚点太短就不是锚点：一个花括号在任何文件里都找得到。
+		if len(strings.Join(strings.Fields(e.Anchor), "")) < 12 {
+			t.Errorf("%s 的依据 %q 锚点太短（%q），钉不住任何东西", label, e, e.Anchor)
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, e.Path))
+		if err != nil {
+			t.Errorf("%s 的依据指向 %s，但上游里没有这个文件：%v", label, e.Path, err)
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		if e.Line > len(lines) {
+			t.Errorf("%s 的依据指向 %s，但那个文件只有 %d 行", label, e, len(lines))
+			continue
+		}
+		if !strings.Contains(lines[e.Line-1], e.Anchor) {
 			var elsewhere []int
 			for i, line := range lines {
 				if strings.Contains(line, e.Anchor) {
@@ -506,10 +524,68 @@ func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
 			}
 			t.Errorf("%s 的依据 %q 行号过期：锚点 %q 现在在第 %v 行，把行号改过来",
 				label, e, e.Anchor, elsewhere)
+			continue
+		}
+		// 同一段调用在一个文件里常常出现好几次，分属不同执行路径。
+		// 光证明「某一行有这段文本」分不清指的是哪一次。
+		if fn := enclosingFunc(lines, e.Line); !strings.Contains(fn, e.Within) {
+			t.Errorf("%s 的依据 %q 不在 %s 里，那一行属于：%s",
+				label, e, e.Within, strings.TrimSpace(fn))
 		}
 	}
-	for sub, e := range SideEffects {
-		check(sub, e.Where)
+}
+
+// enclosingFunc 从某一行往上找最近的函数声明。
+func enclosingFunc(lines []string, line int) string {
+	for i := line - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "func ") {
+			return lines[i]
+		}
 	}
-	check("SharedStorageInit", SharedStorageInit.Where)
+	return "(文件顶层，不在任何函数里)"
+}
+
+// checkEvidenceIsNotTheSharedOne 验第 3 条：不许拿共有的 storage 初始化充数。
+//
+// 「每条命令都会初始化 storage」证明不了「session output 跑了 capture-pane」。
+// attempt 10 的 web 与 session output 就是这么过的关。
+func checkEvidenceIsNotTheSharedOne(t *testing.T, sub string, where []Evidence) {
+	t.Helper()
+	for _, e := range where {
+		for _, shared := range SharedStorageInit.Where {
+			if e.Path == shared.Path && e.Line == shared.Line {
+				t.Errorf("%s 的依据 %q 就是 SharedStorageInit 那条——"+
+					"共有的 storage 初始化证明不了这条命令特有的副作用，"+
+					"要指向它自己的那一行", sub, e)
+			}
+		}
+	}
+}
+
+// identifier 抓 What 与 Anchor 里的技术记号：函数名、字段名、带连字符的子命令。
+var identifier = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_.\-]{7,}`)
+
+// checkWhatNamesWhatTheAnchorsShow 验第 4 条：描述与依据要讲同一件事。
+//
+// 做法是拿 What 里点名的标识符去锚点里对。至少要对上一个——
+// 对不上就说明这段描述在讲一件依据完全没有证明的事。
+//
+// 只要求「至少一个」而不是全部：一条 What 常常同时讲因果两头
+// （「跑 X，于是写了 Y」），依据未必两头都钉得住。但一个都钉不住，
+// 这条声明就是没有出处的。
+func checkWhatNamesWhatTheAnchorsShow(t *testing.T, sub string, e SideEffect) {
+	t.Helper()
+	var anchors string
+	for _, ev := range e.Where {
+		anchors += ev.Anchor + "\n"
+	}
+	anchorsLower := strings.ToLower(anchors)
+	named := identifier.FindAllString(e.What, -1)
+	for _, tok := range named {
+		if strings.Contains(anchorsLower, strings.ToLower(tok)) {
+			return
+		}
+	}
+	t.Errorf("%s 的 What 里没有一个标识符出现在依据的锚点上：What 点名了 %v，"+
+		"锚点却是 %q——描述与依据在讲两件事", sub, named, strings.TrimSpace(anchors))
 }

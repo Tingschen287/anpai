@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -262,5 +264,87 @@ func TestResolveSocketSaysWhenTheIdentityCannotBeRead(t *testing.T) {
 	// 不能被说成「会话已经结束」——那是另一回事。
 	if strings.Contains(err.Error(), "可能已经结束了") {
 		t.Errorf("把「读不到身份」说成了「会话结束」：%v", err)
+	}
+}
+
+// 探测本身失败，不能说成「会话不在了」。
+//
+// 这是独立评审连着两轮点的同一处：先是三种原因折叠成 bool，
+// 改完又把「探测失败」并进了「没有这个会话」。所有 socket 都探测不动时，
+// 界面照样讲「它可能已经结束了」——那句话没有任何依据支撑，
+// 而人会照着它去查一个根本没发生的问题。
+//
+// 这里把 tmux 从 PATH 上拿掉，制造「一次都没问成」的局面。
+func TestResolveSocketDoesNotClaimTheSessionIsGoneWhenItNeverAsked(t *testing.T) {
+	needTmux(t)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	name := "n037scan-unavail-" + randomHexPlain(t, 3)
+	newTmuxSessionWithID(t, sock, name, "the-real-one")
+
+	// 先确认这个会话本来是找得到的，免得下面测出来的是别的原因。
+	if _, err := ResolveSocketFor(context.Background(), name, "the-real-one"); err != nil {
+		t.Fatalf("阳性对照失败，会话本应找得到：%v", err)
+	}
+
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
+	_, err := ResolveSocketFor(context.Background(), name, "the-real-one")
+	if err == nil {
+		t.Fatal("探测不动时不能放行")
+	}
+	for _, must := range []string{"探测失败", "查不出", "tmux 可执行文件"} {
+		if !strings.Contains(err.Error(), must) {
+			t.Errorf("拒绝理由里缺 %q：%v", must, err)
+		}
+	}
+	if strings.Contains(err.Error(), "可能已经结束了") {
+		t.Errorf("一次都没问成，却说会话结束了：%v", err)
+	}
+}
+
+// context 已经取消时，同样属于「没问成」，不是「不在」。
+func TestResolveSocketTreatsACancelledProbeAsUnavailable(t *testing.T) {
+	needTmux(t)
+	sock := "n037scan" + randomHexPlain(t, 4)
+	name := "n037scan-cancel-" + randomHexPlain(t, 3)
+	newTmuxSessionWithID(t, sock, name, "the-real-one")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ResolveSocketFor(ctx, name, "the-real-one")
+	if err == nil {
+		t.Fatal("context 已取消时不能放行")
+	}
+	if !strings.Contains(err.Error(), "超时或被取消") {
+		t.Errorf("没说清是探测被取消：%v", err)
+	}
+	if strings.Contains(err.Error(), "可能已经结束了") {
+		t.Errorf("探测被取消，却说会话结束了：%v", err)
+	}
+}
+
+// 死掉的 socket 文件是常态，不该被当成「探测失败」吵出来。
+//
+// 目录里留着一堆没有 server 的 socket 文件是 tmux 的正常状态。
+// 如果把它们算进「探测失败」，每次拒绝都会附上一长串噪音，
+// 真正的原因反而被埋掉。
+func TestDeadSocketsAreQuietNotAnError(t *testing.T) {
+	needTmux(t)
+	dir := tmuxSocketDir()
+	dead := filepath.Join(dir, "n037scandead"+randomHexPlain(t, 4))
+	if err := os.WriteFile(dead, nil, 0o600); err != nil {
+		t.Fatalf("造不出死 socket：%v", err)
+	}
+	t.Cleanup(func() { os.Remove(dead) })
+
+	_, err := ResolveSocketFor(context.Background(), "n037scan-nobody-"+randomHexPlain(t, 4), "")
+	if err == nil {
+		t.Fatal("没有这个会话，应当拒绝")
+	}
+	if strings.Contains(err.Error(), "探测失败") {
+		t.Errorf("死 socket 被当成探测失败吵出来了：%v", err)
+	}
+	if !strings.Contains(err.Error(), "可能已经结束了") {
+		t.Errorf("确实问过且都答「没有」，该照直说：%v", err)
 	}
 }

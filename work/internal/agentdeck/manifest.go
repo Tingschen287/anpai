@@ -28,21 +28,32 @@ var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
 // Evidence 是一条副作用声明在上游源码里的依据。
 //
-// 为什么不只写 文件:行：行号会随上游改动漂移，而漂移之后旧行号多半仍落在文件
-// 范围内——attempt 9 的核对测试只比了「行号没超出文件总行数」，于是把行号改成
-// 同一个文件里的任意一行也照样通过。它验证的是「这个位置存在」，
-// 不是「这个位置讲的是这件事」。独立评审指出后才补上 Anchor。
+// 三个字段各有分工，少一个这条依据就证明不了什么：
 //
-// Anchor 是那一行必须含有的文本。行号漂了，测试会在全文里找 Anchor 并报出
-// 新的候选行号；Anchor 整个找不到，说明依据是凭空写的。两种情况都会红。
+//	Path + Line  指到具体一行
+//	Anchor       那一行必须含有的文本——行号会漂，这段文本不会
+//	Within       那一行所在的函数——同一段调用在一个文件里常常出现好几次，
+//	             光有 Anchor 分不清哪一次
 //
-// Anchor 不要求在文件里唯一——上游同一种写法重复出现是常态
-// （os.MkdirAll、RefreshInstancesForCLIStatus 在各自文件里都出现不止一次）。
-// 唯一性不是判据，「指定的那一行上有它」才是。
+// 这个形状是被两轮独立评审逼出来的：
+//
+//	attempt 9  只写 文件:行，测试只验「行号没超出文件总行数」，
+//	           把行号改成同文件任意一行也照样通过。
+//	attempt 10 补了 Anchor，但锚点可以跟声明毫不相干——
+//	           session output 声称「跑 capture-pane 不发按键」，
+//	           依据却指着 NewStorageWithProfile 这个构造函数，测试照样绿。
+//
+// 所以现在还有两条硬规矩，由 manifest_test 强制：
+//
+//	一、**依据要指向这条命令自己的副作用点**，不许拿所有命令共有的
+//	    storage 初始化（SharedStorageInit）充数。
+//	二、**What 里要写出被依据锚住的那个标识符**，测试拿它去锚点里对。
+//	    换句话说，描述和依据必须讲同一件事，而不是各说各话。
 type Evidence struct {
 	Path   string // 上游源码树里的相对路径
 	Line   int    // 行号，会漂
 	Anchor string // 那一行必须含有的文本，不会随行号漂
+	Within string // 那一行所在的函数名，用来分辨同一段调用的不同出现
 }
 
 // String 还原成人读的 文件:行。
@@ -50,8 +61,8 @@ func (e Evidence) String() string { return fmt.Sprintf("%s:%d", e.Path, e.Line) 
 
 // SideEffect 是一条上游命令跑完之后，上游那边会变什么。
 //
-// 写成结构而不是一句话，是为了让描述有据可查——
-// manifest_test 会拿 Where 里的位置与锚点去上游快照里核对，凭空写的依据过不了。
+// What 不是随便写的说明文字：它必须点名依据锚住的那个标识符，
+// 否则 manifest_test 不认——描述与依据讲同一件事，是这份清单唯一的价值。
 type SideEffect struct {
 	What  string
 	Where []Evidence
@@ -62,13 +73,18 @@ type SideEffect struct {
 // 每条 CLI 子命令跑起来都要先加载 profile，那条路会建 profile 目录、
 // 建 state.db、跑 schema 迁移，必要时还会把旧的 sessions.json 迁过来改名。
 // 也就是说**没有一条命令是纯读的**，哪怕它叫 list 或 output。
+//
+// 它单独放在这里，正是为了让各条命令**不能**拿它当自己的依据：
+// 「每条命令都会初始化 storage」这件事，证明不了「session output 跑了
+// capture-pane」。
 var SharedStorageInit = SideEffect{
-	What: "加载 profile 时建 profile 目录与 state.db、跑 schema 迁移、" +
-		"必要时迁移并重命名旧的 sessions.json",
+	What: "加载 profile 时 NewStorageWithProfile 建 profile 目录与 state.db、" +
+		"跑 schema 迁移、必要时迁移并重命名旧的 sessions.json",
 	Where: []Evidence{{
 		Path:   "internal/session/storage.go",
 		Line:   209,
 		Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
+		Within: "NewStorageWithProfile",
 	}},
 }
 
@@ -77,28 +93,41 @@ var SharedStorageInit = SideEffect{
 // **白名单管「允许跑哪些命令」，这份清单管「跑了之后上游会变什么」。**
 // 两件事分开记，因为「在允许清单里」不等于「没有副作用」。
 //
-// 这份清单错过三次：attempt 7 把 list 当成只读，attempt 8 把
-// session attach / session output 硬编码成「不写」，attempt 9 补了依据却让
-// 核对测试形同虚设（见 Evidence）。三次都是独立评审顺着上游源码追出来的。
-// 凡是这里写「不写」的，都得说得出依据。
+// 这份清单错过四次，每次都是独立评审顺着上游源码追出来的：
+// attempt 7 把 list 当成只读；attempt 8 把 session attach / session output
+// 硬编码成「不写」；attempt 9 补了依据但核对测试形同虚设；
+// attempt 10 的锚点可以跟声明毫不相干。见 Evidence 上的说明。
 //
 // 每条命令都要在这里有个交代，没有「只读桶」可以躲——
-// SharedStorageInit 对所有命令都成立，各条再补自己特有的。
+// SharedStorageInit 对所有命令都成立，各条再补自己特有的，
+// 且**不得拿它当自己的依据**。
 var SideEffects = map[string]SideEffect{
 	"launch": {
-		What: "新建并启动一个会话，写入上游存储；建 tmux 会话并写入会话环境变量",
-		Where: []Evidence{{
-			Path:   "internal/session/instance.go",
-			Line:   4939,
-			Anchor: `SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID)`,
-		}},
+		What: "新建并启动一个会话：storage.InsertSessionAndVerify 把它写进上游存储；" +
+			"会话起来后 SetEnvironment 把 AGENTDECK_INSTANCE_ID 写进 tmux 会话环境",
+		Where: []Evidence{
+			{
+				Path:   "cmd/agent-deck/launch_cmd.go",
+				Line:   626,
+				Anchor: "storage.InsertSessionAndVerify(newInstance, tree)",
+				Within: "handleLaunch",
+			},
+			{
+				Path:   "internal/session/instance.go",
+				Line:   4939,
+				Anchor: `SetEnvironment("AGENTDECK_INSTANCE_ID", i.ID)`,
+				Within: "Start",
+			},
+		},
 	},
 	"web": {
-		What: "起 headless 服务进程，把 instance 注册进 SQLite，可能执行 cost retention purge",
+		What: "起 headless 服务进程；启动时按配置跑 costStore.PurgeOlderThan，" +
+			"删掉超出保留期的成本记录",
 		Where: []Evidence{{
-			Path:   "internal/session/storage.go",
-			Line:   209,
-			Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
+			Path:   "cmd/agent-deck/main.go",
+			Line:   826,
+			Anchor: "costStore.PurgeOlderThan(retDays)",
+			Within: "main",
 		}},
 	},
 	"list": {
@@ -110,16 +139,19 @@ var SideEffects = map[string]SideEffect{
 				Path:   "cmd/agent-deck/main.go",
 				Line:   2277,
 				Anchor: "session.RefreshInstancesForCLIStatus(instances)",
+				Within: "handleList",
 			},
 			{
 				Path:   "internal/session/cli_status_refresh.go",
 				Line:   16,
 				Anchor: "func RefreshInstancesForCLIStatus(instances []*Instance) {",
+				Within: "RefreshInstancesForCLIStatus",
 			},
 			{
 				Path:   "internal/session/last_activity_persist.go",
 				Line:   107,
 				Anchor: "func (i *Instance) persistLastActivity(force bool) {",
+				Within: "persistLastActivity",
 			},
 		},
 	},
@@ -130,22 +162,34 @@ var SideEffects = map[string]SideEffect{
 			Path:   "internal/tmux/badge_update.go",
 			Line:   125,
 			Anchor: "os.MkdirAll(dir, 0o755)",
+			Within: "WatchBadgeUpdates",
 		}},
 	},
 	"session output": {
-		What: "跑 capture-pane 取画面，不发按键、不改会话状态；除共有的 storage 初始化外不写",
-		Where: []Evidence{{
-			Path:   "internal/session/storage.go",
-			Line:   209,
-			Anchor: "func NewStorageWithProfile(profile string) (*Storage, error) {",
-		}},
+		What: "走 -pane 分支调 PreviewFull，最终由 CaptureFullHistory 跑 " +
+			"tmux capture-pane 取画面；只读画面，不发按键、不改会话状态",
+		Where: []Evidence{
+			{
+				Path:   "cmd/agent-deck/session_cmd.go",
+				Line:   4409,
+				Anchor: "inst.PreviewFull()",
+				Within: "handleSessionOutput",
+			},
+			{
+				Path:   "internal/tmux/tmux.go",
+				Line:   3689,
+				Anchor: `runBoundedOutput("capture-pane"`,
+				Within: "CaptureFullHistory",
+			},
+		},
 	},
 	"session send": {
-		What: "把一段文本投进目标会话，对方会当成输入处理",
+		What: "executeSend 把一段文本投进目标会话，对方会当成输入处理",
 		Where: []Evidence{{
 			Path:   "cmd/agent-deck/session_cmd.go",
-			Line:   2685,
-			Anchor: "func handleSessionSend(profile string, args []string) {",
+			Line:   2894,
+			Anchor: "executeSend(tmuxSess, inst.Tool, message",
+			Within: "handleSessionSend",
 		}},
 	},
 }

@@ -35,24 +35,42 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 
 各条命令另外还写什么：
 
-| 命令 | 除共有的 storage 初始化外，还写什么 | 上游依据 |
+| 命令 | 除共有的 storage 初始化外，还写什么 | 上游依据（文件:行 · 所属函数） |
 |---|---|---|
-| `launch` | 新建并启动会话，建 tmux 会话并写会话环境变量 | `internal/session/instance.go:4939` |
-| `web` | 把 instance 注册进 SQLite，可能执行 cost retention purge | `internal/session/storage.go:209` |
-| `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） | `cmd/agent-deck/main.go:2277` |
-| `session attach` | 启动 badge watcher，其中 `os.MkdirAll` 建 badge 更新目录；给目标 tmux 会话加一个 attached client | `internal/tmux/badge_update.go:125` |
-| `session output` | 跑 `capture-pane` 取画面，不发按键、不改会话状态 | `internal/session/storage.go:209` |
-| `session send` | 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2685` |
+| `launch` | `InsertSessionAndVerify` 写进上游存储；`SetEnvironment` 写会话环境变量 | `cmd/agent-deck/launch_cmd.go:626` · `handleLaunch`<br>`internal/session/instance.go:4939` · `Start` |
+| `web` | 按配置跑 `costStore.PurgeOlderThan`，删超出保留期的成本记录 | `cmd/agent-deck/main.go:826` · `main` |
+| `list` | **写 `state.db` 的 `last_activity_at`**（下面详述） | `cmd/agent-deck/main.go:2277` · `handleList` 等三处 |
+| `session attach` | 启动 badge watcher，`os.MkdirAll` 建 badge 更新目录；给目标 tmux 会话加一个 attached client | `internal/tmux/badge_update.go:125` · `WatchBadgeUpdates` |
+| `session output` | `-pane` 分支调 `PreviewFull`，最终由 `CaptureFullHistory` 跑 `capture-pane`；只读画面 | `cmd/agent-deck/session_cmd.go:4409` · `handleSessionOutput`<br>`internal/tmux/tmux.go:3689` · `CaptureFullHistory` |
+| `session send` | `executeSend` 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2894` · `handleSessionSend` |
 
-这张表在 `manifest.go` 里有机器可读的同一份（`SideEffects` 与 `SharedStorageInit`），
-每条依据除了 `文件:行`，还带一段**锚点**——那一行必须含有的文本。
-`TestSideEffectEvidencePointsAtRealUpstreamCode` 拿锚点去上游快照里核对指定的那一行：
-对不上就在全文里找锚点，找得到就报「行号过期，现在在第几行」，找不到就报「这条依据
-讲的事情上游里没有」。两种都会让测试变红。
+这张表在 `manifest.go` 里有机器可读的同一份（`SideEffects` 与 `SharedStorageInit`）。
+每条依据有四个部分，`TestSideEffectEvidencePointsAtRealUpstreamCode` 逐条核对：
 
-**只记行号是不够的**：attempt 9 的版本只验证「行号没超出文件总行数」，
-于是把依据改成同一个文件里的任意一行也照样通过——它验证的是「这个位置存在」，
-不是「这个位置讲的是这件事」。独立评审指出后才补上锚点。
+| 部分 | 验什么 | 不合格时报什么 |
+|---|---|---|
+| `Path` + `Line` | 指到具体一行 | 文件不存在 / 行号超出文件 |
+| `Anchor` | 那一行必须含这段文本 | 行号过期（报出新行号）；上游里根本没有这段文本 |
+| `Within` | 那一行落在这个函数里 | 「不在 X 里，那一行属于 Y」 |
+| `What` | 描述里点名的标识符要出现在某条锚点上 | 「描述与依据在讲两件事」 |
+
+再加一条：**命令自己的依据不得等同于 `SharedStorageInit` 那条。**
+「每条命令都会初始化 storage」证明不了「`session output` 跑了 `capture-pane`」。
+
+> 这个形状是被三轮独立评审逼出来的，每加一条检查都对应一次它曾经放过的假依据：
+>
+> - **attempt 9**：只写 `文件:行`，测试只比「行号没超出文件总行数」。
+>   把行号改成同一个文件里的任意一行，照样通过。
+> - **attempt 10**：补了 `Anchor`，但锚点可以跟声明毫不相干——
+>   `session output` 声称「跑 `capture-pane` 不发按键」，依据却指着
+>   `NewStorageWithProfile` 这个构造函数，测试照样绿。评审直接把这条假依据
+>   写在报告里：**它只从「有效行号」升级成了「有效行文本」。**
+> - **attempt 11**：补上 `Within` 与 What 核对。评审还指出锚点不要求唯一，
+>   可以指向另一条执行路径上恰好同名的调用——`badge_update.go` 里
+>   `os.MkdirAll(dir, 0o755)` 就有两处，分属 `WatchBadgeUpdates` 与
+>   `WriteBadgeUpdate`。`Within` 正是为这个加的。
+>
+> 教训：**一份「有依据」的清单，和一份依据被真正核对过的清单，不是一回事。**
 
 `list --json` 在输出之前会先跑一遍状态刷新，那条路一直通到 SQLite：
 
@@ -214,14 +232,27 @@ tmux 的不同 server 各有各的命名空间，同名会话完全可能是毫�
 **一个都没对上时，三种情形分开说。** 放行与否都一样是拒绝，
 但人该去查的东西完全不同，所以不能都说成「找不到」：
 
-| 探测结论 | 拒绝时怎么说 | 人该做什么 |
-|---|---|---|
-| 名字都不在 | 会话可能已经结束了 | 去看会话是不是收了 |
-| 名字在，身份是别人 | 同名的是别人，并报出实际身份 | **千万别连**，那是另一个会话 |
-| 名字在，身份读不到 | 读不到 `AGENTDECK_INSTANCE_ID`，宁可不连 | 看那个 tmux server 是否还响应；或这会话不是上游建的 |
+| 探测结论 | 什么情况 | 拒绝时怎么说 | 人该做什么 |
+|---|---|---|---|
+| `probeNoSession` | tmux **明确答**「没有这个会话」 | 会话可能已经结束了 | 去看会话是不是收了 |
+| `probeDeadSocket` | socket 文件还在，server 已经没了 | 不说——这是常态 | 什么都不用做 |
+| `probeUnavailable` | 探测本身失败：tmux 不在、超时、权限、server 故障 | **查不出会话在不在**，附上每个 socket 的原因 | 先把探测修好，别去查会话 |
+| `probeIdentityUnknown` | 名字在，读不到 `AGENTDECK_INSTANCE_ID` | 证明不了就是它，宁可不连 | 看那个 server 是否还响应；或这会话不是上游建的 |
+| `probeIdentityMismatch` | 名字在，身份是别人 | 同名的是别人，**并报出实际身份** | **千万别连**，那是另一个会话 |
+| `probeMatch` | 名字在，身份也对 | 放行 | — |
 
-> 上一版把这三种一律折叠成 `false`，界面只能笼统说一句「找不到」。
-> 把「server 不响应」说成「会话已结束」，人会照着去查一个没发生的问题。
+判定始终 fail-closed：除 `probeMatch` 外一概不放行。分这么细只为一件事——
+**说得清**。
+
+> 这里也改过两轮。第一版把几种情形一律折叠成 `bool`，界面只能笼统说「找不到」。
+> 第二版分了身份那三种，却把「探测失败」并进了「没有这个会话」：
+> 所有 socket 都探测不动时，界面照样讲「它可能已经结束了」。
+>
+> **那是一句没有依据的断言。** 一次都没问成，凭什么说会话不在了。
+> 把「server 不响应」说成「会话已结束」，人会照着去查一个根本没发生的问题。
+>
+> 死 socket 单列一类，是因为目录里留着没有 server 的 socket 文件属于常态。
+> 把它们算进「探测失败」，每次拒绝都会附一长串噪音，真正的原因反而被埋掉。
 
 **为什么要加等号**：`-t name` 是前缀匹配。只有 `name-suffix` 存在时，
 `-t name` 照样 exit 0，随后 attach 进去的就是那个后缀会话。

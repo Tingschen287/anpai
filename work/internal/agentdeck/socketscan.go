@@ -2,6 +2,7 @@ package agentdeck
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -55,25 +56,69 @@ func tmuxSocketDir() string {
 
 // probeVerdict 是一次探测的结论。
 //
-// 为什么不用 bool：三种「不算命中」的情形，用户该做的事完全不同——
-// 没有这个会话就去看会话是不是结束了；身份对不上说明同名的是别人，
-// 不能连；读不到身份则多半是那个 server 不响应，或者会话不是上游建的。
-// 上一版把三者一律折叠成 false，界面只能笼统说一句「找不到」，
-// 独立评审指出这一点。fail-closed 的判定不变，变的是说得清。
+// 为什么不用 bool：几种「不算命中」的情形，用户该做的事完全不同——
+// 没有这个会话就去看会话是不是结束了；身份对不上说明同名的是别人，不能连；
+// 读不到身份多半是那个 server 不响应；而**探测本身失败**（tmux 不在、
+// 超时、权限不足）根本没查出任何事实，不能当成「会话不存在」来报。
+//
+// 上一版先是把三种折叠成 bool，改完又把「探测失败」并进了 probeNoSession：
+// 所有 socket 都探测失败时，界面照样说「它可能已经结束了」——
+// 那是一句没有依据的断言。独立评审两轮都点在这里。
+//
+// 判定仍然 fail-closed：除 probeMatch 外一概不放行。变的只是说得清。
 type probeVerdict int
 
 const (
-	probeNoSession       probeVerdict = iota // 这个 server 上没有这个名字（精确匹配）
-	probeIdentityUnknown                     // 名字在，但读不到 AGENTDECK_INSTANCE_ID
-	probeIdentityMismatch                    // 名字在，身份是别人
-	probeMatch                               // 名字在，身份也对
+	probeNoSession        probeVerdict = iota // tmux 明确答「没有这个会话」
+	probeDeadSocket                           // socket 文件还在，server 已经没了
+	probeUnavailable                          // 探测本身失败，什么都没查出来
+	probeIdentityUnknown                      // 名字在，但读不到 AGENTDECK_INSTANCE_ID
+	probeIdentityMismatch                     // 名字在，身份是别人
+	probeMatch                                // 名字在，身份也对
 )
 
-// probe 是一个 socket 上的探测结果，带上读到的身份好让错误信息说得出来。
+// probe 是一个 socket 上的探测结果。
+//
+// why 只在 probeUnavailable 时有意义：拒绝时要把原因原样带给人，
+// 「探测失败」本身不构成任何关于会话的结论。
 type probe struct {
 	socket  string
 	verdict probeVerdict
 	gotID   string // 只在 probeIdentityMismatch 时有意义
+	why     string // 只在 probeUnavailable 时有意义
+}
+
+// classifyHasSession 把 `has-session` 的失败分门别类。
+//
+// tmux 用退出码 1 加一句 stderr 回答「没有这个会话」；死掉的 socket 会说
+// "no server running"。除此之外的失败——二进制不在、context 到点、权限不足、
+// server 故障——**都没有回答我们的问题**，不能算作「会话不存在」。
+func classifyHasSession(socket string, ctxErr error, err error, stderr string) probe {
+	if ctxErr != nil {
+		return probe{socket: socket, verdict: probeUnavailable,
+			why: fmt.Sprintf("探测超时或被取消：%v", ctxErr)}
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return probe{socket: socket, verdict: probeUnavailable, why: "本机找不到 tmux 可执行文件"}
+	}
+	msg := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(msg, "no server running"):
+		return probe{socket: socket, verdict: probeDeadSocket}
+	case strings.Contains(msg, "can't find session"),
+		strings.Contains(msg, "no such session"),
+		strings.Contains(msg, "session not found"):
+		return probe{socket: socket, verdict: probeNoSession}
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && stderr == "" {
+		// tmux 以非零码退出却什么都没说。它对「没有这个会话」一向是会说话的，
+		// 所以这里不替它断言，只如实记下。
+		return probe{socket: socket, verdict: probeUnavailable,
+			why: fmt.Sprintf("tmux 退出码 %d，没有给出原因", exitErr.ExitCode())}
+	}
+	return probe{socket: socket, verdict: probeUnavailable,
+		why: fmt.Sprintf("探测失败：%v", err)}
 }
 
 // instanceIDOf 读一个 tmux 会话里的 AGENTDECK_INSTANCE_ID。
@@ -113,8 +158,11 @@ func probeSocket(ctx context.Context, socket, tmuxSession, wantInstanceID string
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	args := []string{"-L", socket, "has-session", "-t", exactTarget(tmuxSession)}
-	if err := exec.CommandContext(probeCtx, "tmux", args...).Run(); err != nil {
-		return probe{socket: socket, verdict: probeNoSession}
+	cmd := exec.CommandContext(probeCtx, "tmux", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return classifyHasSession(socket, probeCtx.Err(), err, strings.TrimSpace(stderr.String()))
 	}
 	if wantInstanceID == "" {
 		return probe{socket: socket, verdict: probeMatch}
@@ -171,7 +219,7 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 	if err != nil {
 		return "", err
 	}
-	var matched, mismatched, unknown []probe
+	var matched, mismatched, unknown, unavailable []probe
 	for _, p := range probes {
 		switch p.verdict {
 		case probeMatch:
@@ -180,6 +228,8 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 			mismatched = append(mismatched, p)
 		case probeIdentityUnknown:
 			unknown = append(unknown, p)
+		case probeUnavailable:
+			unavailable = append(unavailable, p)
 		}
 	}
 
@@ -190,7 +240,7 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 		}
 		return matched[0].socket, nil
 	case 0:
-		return "", noMatchError(tmuxSession, wantInstanceID, mismatched, unknown)
+		return "", noMatchError(tmuxSession, wantInstanceID, mismatched, unknown, unavailable)
 	default:
 		sockets := make([]string, 0, len(matched))
 		for _, p := range matched {
@@ -202,11 +252,14 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 
 // noMatchError 说清楚「一个都没对上」到底是哪一种。
 //
-// 三种情形的下一步不一样，所以不能都说「找不到」：
+// 几种情形的下一步不一样，所以不能都说「找不到」：
 // 同名但身份是别人 → 千万别连，那是另一个会话；
 // 读不到身份 → 多半是 server 不答，或者会话不是上游建的（老版本没写这个变量）；
-// 什么都没有 → 会话多半已经结束了。
-func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown []probe) error {
+// 探测失败 → **什么都没查出来**，不能说会话不在；
+// 以上都不是 → tmux 明确答过「没有这个会话」，那它多半真的结束了。
+//
+// 顺序是有讲究的：越具体、越该阻止人做错事的，越先说。
+func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown, unavailable []probe) error {
 	if len(mismatched) > 0 {
 		var parts []string
 		for _, p := range mismatched {
@@ -226,6 +279,18 @@ func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown []prob
 				"证明不了就是 %s：可能那个 tmux server 没响应，也可能这个会话不是上游建的。"+
 				"宁可不连",
 			tmuxSession, sockets, wantInstanceID)
+	}
+	if len(unavailable) > 0 {
+		var parts []string
+		for _, p := range unavailable {
+			parts = append(parts, fmt.Sprintf("%s（%s）", p.socket, p.why))
+		}
+		// 注意措辞：**没查出来**，不是「不在」。
+		// 说成「会话已结束」会让人去查一个根本没发生的问题。
+		return fmt.Errorf(
+			"有 %d 个 tmux server 探测失败，查不出会话 %s 在不在：%s。"+
+				"先把探测本身修好再说",
+			len(unavailable), tmuxSession, strings.Join(parts, "；"))
 	}
 	if wantInstanceID != "" {
 		return fmt.Errorf(
