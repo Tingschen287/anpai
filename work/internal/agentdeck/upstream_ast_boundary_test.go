@@ -1,6 +1,7 @@
 package agentdeck
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -130,8 +131,17 @@ var a = ("kill" + "-session")`, "kill-session"},
 	}
 }
 
-// 算不出来的就得老实说算不出来，不许猜。
-func TestRuntimeBuiltStringsAreNotGuessed(t *testing.T) {
+// 常量折叠有盲区，这条把盲区列出来。
+//
+// **它不是安全保证，别当保证读。** 独立评审批评过它的上一版：
+// 断言「Sprintf 算不出来」只是固化了求值器不处理 CallExpr 这个实现事实，
+// 测试会长期稳定通过，却什么也没保护——反而把一种已知绕过写成了预期行为。
+//
+// 保留它的理由变了：**盲区得有人记着**。哪天求值器开始处理某一种，
+// 这条会红，提醒人去看边界是不是可以收窄。
+// 真正拦住这些构造的是 TestCommandArgumentsAreBuiltFromConstantsOnly——
+// 它盯的是「算出来的字符串能不能成为跑出去的命令参数」，那才是出口。
+func TestConstantFolderKnowsItsBlindSpots(t *testing.T) {
 	const src = `package p
 
 import "fmt"
@@ -144,6 +154,173 @@ var a = fmt.Sprintf("send-%s", "keys")`
 		t.Fatal(err)
 	}
 	if got, ok := constStringDecl(f, "a"); ok {
-		t.Errorf("Sprintf 的结果要到运行时才知道，却算出了 %q", got)
+		t.Errorf("求值器现在能算 Sprintf 了（得到 %q）——"+
+			"盲区清单该更新，顺便看看命令参数那条边界能不能收窄", got)
 	}
+}
+
+// 命令参数只许由常量和函数入参构成。
+//
+// 这条是 attempt 14 加的，替掉原来那条只会永远通过的
+// TestRuntimeBuiltStringsAreNotGuessed。独立评审说得对：
+// 那条测试断言「Sprintf 的结果算不出来」，而求值器本来就不处理 CallExpr——
+// **它固化的是实现行为，不是安全边界**，而且正式记录了一种已知绕过能力。
+//
+// 评审给的反例是：
+//
+//	var hidden = string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})
+//
+// 运行时值是那个注入按键的子命令，按常量折叠扫源码看不见。
+// strings.Join 和 fmt.Sprintf 同理。
+//
+// 堵住「所有算不出的字符串」是做不到的。但**真正的风险有个很窄的出口**：
+// 一个字符串要造成伤害，得先成为跑出去的命令的参数。所以这条测试不扫全包，
+// 只盯那个出口：凡是函数里构造过 exec 命令，构成那些参数的表达式
+// 就只能是字面量、本函数的入参，或白名单里那几个辅助函数。
+//
+// 现在包里的子命令名全是字面量（"attach-session"、"has-session"、
+// "show-environment"），变量只承载数据（socket 名、会话名）。
+// 谁要往里塞一个算出来的子命令名，这条会红。
+func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
+	builders := map[string]bool{
+		"exec.Command": true, "exec.CommandContext": true, "interactiveCommand": true,
+	}
+	// 这几个的输出不可能是子命令名：append 拼切片，exactTarget 只在前面加等号。
+	allowedHelpers := map[string]bool{"append": true, "exactTarget": true}
+
+	files, fset := packageASTs(t)
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			var builderCalls []*ast.CallExpr
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && builders[calleeName(call.Fun)] {
+					builderCalls = append(builderCalls, call)
+				}
+				return true
+			})
+			if len(builderCalls) == 0 {
+				continue
+			}
+			allowed := paramNames(fn)
+			roots := map[string]bool{}
+			for _, call := range builderCalls {
+				// exec.CommandContext 的第一个参数是 context，不是命令的一部分。
+				first := 0
+				if calleeName(call.Fun) == "exec.CommandContext" {
+					first = 1
+				}
+				for _, arg := range call.Args[min(first, len(call.Args)):] {
+					collectIdents(arg, roots)
+					// 直接写在调用里的参数也要查。
+					checkNoOpaqueString(t, fset, fn.Name.Name, arg, allowed, allowedHelpers, roots)
+				}
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				var touches bool
+				for _, lhs := range as.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && roots[id.Name] {
+						touches = true
+					}
+				}
+				if !touches {
+					return true
+				}
+				for _, rhs := range as.Rhs {
+					checkNoOpaqueString(t, fset, fn.Name.Name, rhs, allowed, allowedHelpers, roots)
+				}
+				return true
+			})
+		}
+	}
+}
+
+// paramNames 收集一个函数的入参与接收者名字。它们的值由调用方负责，本测试不追。
+func paramNames(fn *ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+	add := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, field := range fl.List {
+			for _, id := range field.Names {
+				out[id.Name] = true
+			}
+		}
+	}
+	add(fn.Recv)
+	add(fn.Type.Params)
+	return out
+}
+
+// collectIdents 把表达式里出现的标识符名字收进集合。
+func collectIdents(e ast.Expr, into map[string]bool) {
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			into[id.Name] = true
+		}
+		return true
+	})
+}
+
+// checkNoOpaqueString 在一段表达式里找「算出来的字符串」。
+func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string,
+	e ast.Expr, params, helpers, roots map[string]bool) {
+	t.Helper()
+	var walk func(ast.Expr)
+	walk = func(x ast.Expr) {
+		if x == nil {
+			return
+		}
+		if _, ok := constStringOf(x); ok {
+			return // 算得出常量值，到此为止
+		}
+		switch v := x.(type) {
+		case *ast.Ident:
+			if params[v.Name] || roots[v.Name] || v.Name == "nil" {
+				return
+			}
+			// 包级常量也算数：它的值在源码里写死，守边测试扫得到。
+			return
+		case *ast.SelectorExpr:
+			return // c.Binary 这类字段读取，由类型和调用方负责
+		case *ast.CompositeLit:
+			for _, el := range v.Elts {
+				walk(el)
+			}
+			return
+		case *ast.BinaryExpr:
+			walk(v.X)
+			walk(v.Y)
+			return
+		case *ast.ParenExpr:
+			walk(v.X)
+			return
+		case *ast.Ellipsis:
+			walk(v.Elt)
+			return
+		case *ast.CallExpr:
+			name := calleeName(v.Fun)
+			if !helpers[name] {
+				pos := fset.Position(v.Pos())
+				t.Errorf("%s 里命令参数用到了 %s(...)（%s:%d）："+
+					"跑出去的命令参数只能是字面量、本函数入参，或白名单里的辅助函数。"+
+					"一个算出来的字符串可以是任何东西——包括替人敲键的那几个子命令",
+					where, name, filepath.Base(pos.Filename), pos.Line)
+				return
+			}
+			for _, a := range v.Args {
+				walk(a)
+			}
+			return
+		}
+	}
+	walk(e)
 }

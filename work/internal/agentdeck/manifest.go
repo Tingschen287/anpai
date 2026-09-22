@@ -185,7 +185,7 @@ var SharedStorageInit = SideEffect{
 		},
 		{
 			// 库文件就建在 profile 目录下，名字是 state.db。
-			Effect: Effect{Kind: EffectCalls, Target: "Join", Arg: "state.db"},
+			Effect: Effect{Kind: EffectCalls, Target: "filepath.Join", Arg: "state.db"},
 			Evidence: []Evidence{{
 				Path:   "internal/session/storage.go",
 				Line:   243,
@@ -226,7 +226,7 @@ var SideEffects = map[string]SideEffect{
 		Claims: []Claim{
 			{
 				// 把新会话写进上游存储。
-				Effect: Effect{Kind: EffectCalls, Target: "InsertSessionAndVerify"},
+				Effect: Effect{Kind: EffectCalls, Target: "storage.InsertSessionAndVerify"},
 				Evidence: []Evidence{{
 					Path:   "cmd/agent-deck/launch_cmd.go",
 					Line:   626,
@@ -237,7 +237,7 @@ var SideEffects = map[string]SideEffect{
 			{
 				// 会话起来后，实例 ID 被写进 tmux 会话环境——
 				// 后面认会话靠的就是它，不是靠名字。
-				Effect: Effect{Kind: EffectCalls, Target: "SetEnvironment", Arg: "AGENTDECK_INSTANCE_ID"},
+				Effect: Effect{Kind: EffectCalls, Target: "i.tmuxSession.SetEnvironment", Arg: "AGENTDECK_INSTANCE_ID"},
 				Evidence: []Evidence{{
 					Path:   "internal/session/instance.go",
 					Line:   4939,
@@ -250,7 +250,7 @@ var SideEffects = map[string]SideEffect{
 	"web": {
 		Claims: []Claim{{
 			// 启动时按配置删掉超出保留期的成本记录——起个服务也会删数据。
-			Effect: Effect{Kind: EffectCalls, Target: "PurgeOlderThan"},
+			Effect: Effect{Kind: EffectCalls, Target: "costStore.PurgeOlderThan"},
 			Evidence: []Evidence{{
 				Path:   "cmd/agent-deck/main.go",
 				Line:   826,
@@ -263,7 +263,7 @@ var SideEffects = map[string]SideEffect{
 		Claims: []Claim{
 			{
 				// 输出之前先暖 tmux 缓存并加载 hook 状态。所以 list 不是只读的。
-				Effect: Effect{Kind: EffectCalls, Target: "RefreshInstancesForCLIStatus"},
+				Effect: Effect{Kind: EffectCalls, Target: "session.RefreshInstancesForCLIStatus"},
 				Evidence: []Evidence{{
 					Path:   "cmd/agent-deck/main.go",
 					Line:   2277,
@@ -308,7 +308,7 @@ var SideEffects = map[string]SideEffect{
 		Claims: []Claim{
 			{
 				// 把当前终端接进目标会话，于是那个会话多出一个连着的客户端。
-				Effect: Effect{Kind: EffectCalls, Target: "Attach"},
+				Effect: Effect{Kind: EffectCalls, Target: "tmuxSession.Attach"},
 				Evidence: []Evidence{{
 					Path:   "cmd/agent-deck/session_cmd.go",
 					Line:   1370,
@@ -318,7 +318,7 @@ var SideEffects = map[string]SideEffect{
 			},
 			{
 				// badge watcher 起来时会建目录——attach 会在磁盘上留下东西。
-				Effect: Effect{Kind: EffectCalls, Target: "MkdirAll"},
+				Effect: Effect{Kind: EffectCalls, Target: "os.MkdirAll"},
 				Evidence: []Evidence{{
 					Path:   "internal/tmux/badge_update.go",
 					Line:   125,
@@ -332,7 +332,7 @@ var SideEffects = map[string]SideEffect{
 		Claims: []Claim{
 			{
 				// --pane 分支靠它取当前画面。
-				Effect: Effect{Kind: EffectCalls, Target: "PreviewFull"},
+				Effect: Effect{Kind: EffectCalls, Target: "inst.PreviewFull"},
 				Evidence: []Evidence{{
 					Path:   "cmd/agent-deck/session_cmd.go",
 					Line:   4409,
@@ -342,7 +342,7 @@ var SideEffects = map[string]SideEffect{
 			},
 			{
 				// 最终由 CaptureFullHistory 跑 capture-pane 取画面。
-				Effect: Effect{Kind: EffectCalls, Target: "runBoundedOutput", Arg: "capture-pane"},
+				Effect: Effect{Kind: EffectCalls, Target: "s.runBoundedOutput", Arg: "capture-pane"},
 				Evidence: []Evidence{{
 					Path:   "internal/tmux/tmux.go",
 					Line:   3689,
@@ -362,17 +362,24 @@ var SideEffects = map[string]SideEffect{
 				Absence: &Absence{
 					In: []FuncRef{
 						{Path: "cmd/agent-deck/session_cmd.go", Func: "handleSessionOutput"},
-						{Path: "internal/tmux/tmux.go", Func: "CaptureFullHistory"},
+						{Path: "internal/session/instance.go", Func: "Instance.PreviewFull"},
+						{Path: "internal/tmux/tmux.go", Func: "Session.CaptureFullHistory"},
+						{Path: "internal/tmux/socket.go", Func: "Session.runBoundedOutput"},
 					},
 					Absent: keyInjectionCommands,
 					NotCovered: []string{
-						"Arg", "Bool", "Copy", "Error", "Errorf", "Exit",
-						"GetLastResponseBestEffortChecked", "GetSessionIDFromTmux",
-						"GetTerminalInfo", "IsClaudeCompatible", "NewCLIOutput",
-						"NewFlagSet", "NoteClaudeSessionIDFromOwnPane", "Now",
-						"Parse", "PreviewFull", "Print", "PrintDefaults", "Println",
-						"ResolveSessionOrCurrent", "Sprintf", "String", "WriteString",
-						"loadSessionData", "normalizeArgs", "runBoundedOutput", "string",
+						"clipboard.Copy", "flag.NewFlagSet", "fmt.Errorf",
+						"fmt.Println", "fmt.Sprintf", "fs.Arg", "fs.Bool",
+						"fs.Parse", "fs.PrintDefaults",
+						"NewCLIOutput", "ResolveSessionOrCurrent",
+						"i.spawnFailurePreview",
+						"inst.GetLastResponseBestEffortChecked",
+						"inst.GetSessionIDFromTmux", "loadSessionData",
+						"normalizeArgs", "os.Exit", "out.Error",
+						"out.Print", "sb.String", "sb.WriteString",
+						"session.IsClaudeCompatible",
+						"session.NoteClaudeSessionIDFromOwnPane",
+						"string", "time.Now", "tmux.GetTerminalInfo",
 					},
 				},
 			},

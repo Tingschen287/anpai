@@ -6,7 +6,9 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"fmt"
 	"strconv"
+	"strings"
 )
 
 // 本文件是 attempt 13 的核心：**用语法树核对上游，不再用文本匹配。**
@@ -44,13 +46,130 @@ func upstreamFile(src, path string) (*ast.File, *token.FileSet, error) {
 // 差别在于它认的是语法树上的 FuncDecl.Name——
 // 字符串字面量里写什么都影响不到它。
 func findFunc(f *ast.File, name string) *ast.FuncDecl {
+	fn, _ := findFuncUnique(f, name)
+	return fn
+}
+
+// recvTypeName 取方法接收者的类型名，包级函数返回空串。
+func recvTypeName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return ""
+	}
+	t := fn.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// findFuncUnique 按名字找函数，**同名多个时拒绝猜**。
+//
+// name 可以写成 "Foo"（包级或唯一），也可以写成 "Session.Foo"（指定接收者）。
+//
+// 为什么非要这样：上游 internal/tmux/socket.go 里同时有包级 runBoundedOutput
+// 和 (*Session).runBoundedOutput，internal/session/instance.go 里同时有
+// (*Instance).getCodexHomeDir 和包级 getCodexHomeDir。
+// 原来那个「从上往下找第一个同名的」会固定返回其中一个，选错了也不说。
+// 独立评审把它列为机制缺陷——找不准就该说找不准，不该沉默地猜。
+func findFuncUnique(f *ast.File, name string) (*ast.FuncDecl, error) {
+	wantRecv, wantName := "", name
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		wantRecv, wantName = name[:i], name[i+1:]
+	}
+	var hits []*ast.FuncDecl
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == name {
+		if !ok || fn.Name.Name != wantName {
+			continue
+		}
+		if wantRecv != "" && recvTypeName(fn) != wantRecv {
+			continue
+		}
+		hits = append(hits, fn)
+	}
+	switch len(hits) {
+	case 0:
+		return nil, fmt.Errorf("找不到 %s", name)
+	case 1:
+		return hits[0], nil
+	}
+	var where []string
+	for _, fn := range hits {
+		if r := recvTypeName(fn); r != "" {
+			where = append(where, r+"."+fn.Name.Name)
+		} else {
+			where = append(where, "（包级）"+fn.Name.Name)
+		}
+	}
+	return nil, fmt.Errorf("%s 在这个文件里有 %d 个同名声明（%s），"+
+		"请写明接收者，例如 Session.%s", name, len(hits), strings.Join(where, " / "), wantName)
+}
+
+// callAtLine 找出**恰好起始于这一行**的那些调用。
+//
+// 这是 attempt 14 的关键：以前核对 Effect 时，在整个 Within 函数里找一个同名
+// 调用就算数，跟 Evidence 指的那一行没有关系。独立评审用一行改动证明了后果：
+// 把 session attach 的 Target 从 Attach 换成同函数错误分支里的 Exit，
+// Anchor 还指着 Attach 那一行，测试照样通过。
+//
+// 断言和它的出处必须钉在同一行，否则「有出处」只是碰巧同处一室。
+func callAtLine(fn *ast.FuncDecl, fset *token.FileSet, line int) []*ast.CallExpr {
+	var out []*ast.CallExpr
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok && fset.Position(call.Pos()).Line == line {
+			out = append(out, call)
+		}
+		return true
+	})
+	return out
+}
+
+// funcDeclAtLine 找恰好声明在这一行上的函数。
+func funcDeclAtLine(f *ast.File, fset *token.FileSet, line int) *ast.FuncDecl {
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok &&
+			fset.Position(fn.Pos()).Line == line {
 			return fn
 		}
 	}
 	return nil
+}
+
+// valueSpecAtLine 找恰好声明在这一行上的常量或变量，返回名字与算得出的值。
+func valueSpecAtLine(f *ast.File, fset *token.FileSet, line int) map[string]string {
+	out := map[string]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		for i, id := range vs.Names {
+			if fset.Position(id.Pos()).Line != line {
+				continue
+			}
+			val := ""
+			if i < len(vs.Values) {
+				if v, good := constStringOf(vs.Values[i]); good {
+					val = v
+				}
+			}
+			out[id.Name] = val
+		}
+		return true
+	})
+	return out
+}
+
+// qualifiedFuncName 把一个函数声明写成 Recv.Name 或 Name。
+func qualifiedFuncName(fn *ast.FuncDecl) string {
+	if r := recvTypeName(fn); r != "" {
+		return r + "." + fn.Name.Name
+	}
+	return fn.Name.Name
 }
 
 // enclosingFuncOf 说出某一行落在哪个函数里，没有就返回空串。
@@ -104,12 +223,19 @@ func callsIn(fn *ast.FuncDecl) []callSite {
 	return out
 }
 
-// calleeName 取被调用者的名字，只要最后一段。
+// calleeName 取被调用者写在源码里的**完整**形式。
+//
+// 以前它只取最后一段，于是 safe.Foo() 和 evil.Foo() 压成同一个名字——
+// 清单声称调用 safe.Foo，函数里只有 evil.Foo 也能通过。
+// 独立评审把这一点列为 EffectCalls 身份模型的真实缺陷，所以改成原样返回。
 func calleeName(e ast.Expr) string {
 	switch v := e.(type) {
 	case *ast.Ident:
 		return v.Name
 	case *ast.SelectorExpr:
+		if x := calleeName(v.X); x != "" {
+			return x + "." + v.Sel.Name
+		}
 		return v.Sel.Name
 	case *ast.IndexExpr: // 泛型实例化：Foo[T](...)
 		return calleeName(v.X)
@@ -119,6 +245,14 @@ func calleeName(e ast.Expr) string {
 		return calleeName(v.X)
 	}
 	return ""
+}
+
+// lastSegment 取调用名的最后一段，供 NotCovered 这类只关心「调了谁」的地方用。
+func lastSegment(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // constStringOf 把一个表达式算成字符串常量，算不出就说算不出。

@@ -232,6 +232,12 @@ func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
 // packageASTs 解析本包自己的非测试源码。
 //
 // 测试文件要排除：里面故意写着各种反例字符串，扫进来全是误报。
+//
+// **这是一条真实的边界，写在这里免得被误读。** 独立评审指出：
+// `_test.go` 可以通过 init、TestMain 或普通测试真的执行危险操作，
+// 它不进发布二进制，但会在测试进程和 CI 里跑。
+// 所以守边测试保证的是「发布进二进制的这部分代码不替人敲键、不杀会话」，
+// 不是「这个包的任何一行代码都不会」。名字里的 Adapter 指的就是前者。
 func packageASTs(t *testing.T) ([]*ast.File, *token.FileSet) {
 	t.Helper()
 	dir := packageDir(t)
@@ -559,13 +565,13 @@ func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
 		}
 		for i, c := range e.Claims {
 			label := fmt.Sprintf("%s 的第 %d 条断言", sub, i+1)
-			checkClaim(t, src, label, c)
+			checkClaim(t, src, label, c, e.Claims)
 			checkEvidenceIsNotTheSharedOne(t, label, c.Evidence)
 		}
 	}
 	for i, c := range SharedStorageInit.Claims {
 		label := fmt.Sprintf("SharedStorageInit 的第 %d 条断言", i+1)
-		checkClaim(t, src, label, c)
+		checkClaim(t, src, label, c, SharedStorageInit.Claims)
 	}
 }
 
@@ -584,7 +590,7 @@ func requireUpstreamSnapshot(t *testing.T) string {
 // checkClaim 核对一条断言。
 //
 // 正面与否定各走各的路，但都必须有路可走，而且**走的都是语法树**。
-func checkClaim(t *testing.T, src, label string, c Claim) {
+func checkClaim(t *testing.T, src, label string, c Claim, siblings []Claim) {
 	t.Helper()
 	if strings.TrimSpace(c.Effect.Target) == "" {
 		t.Errorf("%s 没说上游做了什么", label)
@@ -603,7 +609,7 @@ func checkClaim(t *testing.T, src, label string, c Claim) {
 			t.Errorf("%s 给的是缺席依据，Effect 却是 %s——两者对不上", label, c.Effect.Kind)
 			return
 		}
-		checkAbsence(t, src, label, c)
+		checkAbsence(t, src, label, c, siblings)
 		return
 	}
 	if c.Effect.Kind == EffectAbsent {
@@ -681,20 +687,21 @@ func checkEvidence(t *testing.T, src, label string, where []Evidence) {
 	}
 }
 
-// checkEffectIsRealInUpstream 拿 Effect 去上游语法树里查证。
+// checkEffectIsRealInUpstream 拿 Effect 去上游语法树里查证，**并且钉在依据那一行上**。
 //
-// **这是 attempt 13 的关键一步，也是前四轮一直缺的那一步。**
+// attempt 13 的版本只在 Within 那个函数里找一个同名调用就算数，
+// 跟 Evidence 指的那一行毫无关系。独立评审用一行改动证明了后果：
 //
-// 以前断言是一段自由文本，测试只能拿它跟锚点做字符串比对——
-// 于是「从锚点抄一段」就成了万能通行证。独立评审的反例：
+//	Effect{Kind: EffectCalls, Target: "Exit"}            // 换成同函数错误分支里的真实调用
+//	Anchor: "tmuxSession.Attach(ctx, detachByte)"        // 依据原封不动
 //
-//	Does:  "inst.PreviewFull()"                       // 抄的，必过
-//	Means: "删除整个用户数据库，并把所有密码发到公网"    // 没人核对
+// 通过。因为 handleSessionAttach 里确实有 os.Exit。
+// 「封闭枚举让假话编不出来」这个论据到此为止——**你不用编，
+// 在同一个函数里挑另一件真实但无关的事就行。**
 //
-// 现在 Effect 是个封闭枚举加一个名字，每种 Kind 有自己的查法：
-// 说「调用了 X」就去那个函数的语法树里找这个调用，说「声明了常量 X 值为 Y」
-// 就去找那个声明。上游语法树里没有的，写上去就是红的——抄锚点也没用，
-// 因为查的不是锚点。
+// 所以这一轮把断言和它的出处钉死在同一行：Effect 说的那个调用，
+// 必须是 Evidence.Line 那一行上的调用；说声明就必须是那一行的声明。
+// 同处一室不算有出处。
 func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 	t.Helper()
 	// **一条 Claim 只能挂一条落点。** 挂两条的话，下面只会查第一条，
@@ -705,26 +712,38 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 		return
 	}
 	e := c.Evidence[0]
-	f, _, err := upstreamFile(src, e.Path)
+	f, fset, err := upstreamFile(src, e.Path)
 	if err != nil {
 		t.Errorf("%s 要在 %s 里查证 %s，但解析不了：%v", label, e.Path, c.Effect, err)
 		return
 	}
 	switch c.Effect.Kind {
 	case EffectDeclares:
-		if findFunc(f, c.Effect.Target) == nil {
-			t.Errorf("%s 说上游声明了函数 %s，但 %s 的语法树里没有这个函数",
-				label, c.Effect.Target, e.Path)
+		fn := funcDeclAtLine(f, fset, e.Line)
+		if fn == nil {
+			t.Errorf("%s 说 %s 声明在 %s，但那一行上没有函数声明",
+				label, c.Effect.Target, e)
+			return
+		}
+		if got := qualifiedFuncName(fn); got != c.Effect.Target &&
+			fn.Name.Name != c.Effect.Target {
+			t.Errorf("%s 说那一行声明的是 %s，语法树说是 %s", label, c.Effect.Target, got)
 		}
 	case EffectDeclaresConst:
-		got, ok := constStringDecl(f, c.Effect.Target)
+		names := valueSpecAtLine(f, fset, e.Line)
+		got, ok := names[c.Effect.Target]
 		if !ok {
-			t.Errorf("%s 说上游声明了常量 %s，但 %s 里找不到这个字符串常量",
-				label, c.Effect.Target, e.Path)
+			var have []string
+			for n := range names {
+				have = append(have, n)
+			}
+			sort.Strings(have)
+			t.Errorf("%s 说 %s 声明在 %s，但那一行声明的是 %v",
+				label, c.Effect.Target, e, have)
 			return
 		}
 		if c.Effect.Arg != "" && got != c.Effect.Arg {
-			t.Errorf("%s 说常量 %s 的值是 %q，上游写的是 %q",
+			t.Errorf("%s 说常量 %s 的值是 %q，上游那一行写的是 %q",
 				label, c.Effect.Target, c.Effect.Arg, got)
 		}
 	case EffectCalls:
@@ -732,15 +751,23 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 			t.Errorf("%s 说有个调用，却没说在哪个函数里——没法查", label)
 			return
 		}
-		fn := findFunc(f, e.Within)
-		if fn == nil {
-			t.Errorf("%s 要在 %s 的 %s 里查 %s，但上游没有这个函数",
-				label, e.Path, e.Within, c.Effect)
+		fn, ferr := findFuncUnique(f, e.Within)
+		if ferr != nil {
+			t.Errorf("%s 要在 %s 里查 %s：%v", label, e.Path, c.Effect, ferr)
 			return
 		}
-		var matched, named bool
-		for _, call := range callsIn(fn) {
-			if call.Name != c.Effect.Target {
+		calls := callAtLine(fn, fset, e.Line)
+		if len(calls) == 0 {
+			t.Errorf("%s 说 %s 在 %s，但 %s 里那一行上没有任何调用起始",
+				label, c.Effect, e, e.Within)
+			return
+		}
+		var names []string
+		var named, matched bool
+		for _, call := range calls {
+			got := calleeName(call.Fun)
+			names = append(names, got)
+			if got != c.Effect.Target {
 				continue
 			}
 			named = true
@@ -749,7 +776,7 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 				break
 			}
 			for _, arg := range call.Args {
-				if arg == c.Effect.Arg {
+				if v, ok := constStringOf(arg); ok && v == c.Effect.Arg {
 					matched = true
 					break
 				}
@@ -760,11 +787,12 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 		}
 		switch {
 		case !named:
-			t.Errorf("%s 说 %s 里调用了 %s，但那个函数的语法树里没有这个调用",
-				label, e.Within, c.Effect.Target)
+			t.Errorf("%s 说那一行调用的是 %s，但 %s 那一行上的调用是 %v——"+
+				"断言必须钉在它自己的依据那一行，同一个函数里另有一个同名调用不算",
+				label, c.Effect.Target, e, names)
 		case !matched:
-			t.Errorf("%s 说 %s 调用 %s 时带着参数 %q，但那几处调用里没有这个常量参数",
-				label, e.Within, c.Effect.Target, c.Effect.Arg)
+			t.Errorf("%s 说 %s 带着常量参数 %q，但那一行的调用里没有这个参数",
+				label, c.Effect.Target, c.Effect.Arg)
 		}
 	default:
 		t.Errorf("%s 的 Effect 种类是 %s，正面依据这条路不认识它", label, c.Effect.Kind)
@@ -773,19 +801,22 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 
 // checkAbsence 验否定依据：那几个函数体里确实搜不到那些东西。
 //
-// 两件事都走语法树：
+// 三件事都走语法树：
 //
 //  1. **搜禁词搜的是折叠成常量之后的字符串**，所以 "send" + "-keys" 也算数。
-//     上一轮按文本搜，独立评审用这一招直接绕过。
 //  2. **NotCovered 必须跟真实调用两头对上**：编一个语法树里没有的名字会红，
-//     漏掉一个真实调用也会红。原来那个 Scope 是自由文本只验非空，
-//     评审实测填「覆盖范围有限」照样通过——那就没在保护什么。
+//     漏掉一个真实调用也会红。
+//  3. **本条命令自己声称走过的路，必须真的走进去看。**
 //
-// 它证不到的地方也说清楚：只看得见算得出常量值的字符串。
-// 如果上游把子命令名拼成 fmt.Sprintf("send-%s", x) 这种运行时才知道的形式，
-// 这里看不到——不过那种写法必然带着一个调用，而调用会出现在 NotCovered 里，
-// 读的人能看见「这里有一段没追进去」。
-func checkAbsence(t *testing.T, src, label string, c Claim) {
+// 第三条是 attempt 14 加的。上一轮 In 是人手挑的，挑窄了没人管：
+// 真实链是 handleSessionOutput → Instance.PreviewFull → Session.CaptureFullHistory，
+// 而 In 只有头尾两个，中间的 PreviewFull 被放进 NotCovered 就算交代过了。
+// 独立评审复制上游文件，在 PreviewFull 里加一行 `_ = "send-keys"`，测试照样通过。
+//
+// 所以现在：同一条命令里别的 Claim 说「调用了 X」，而 X 的函数体也在这条路上，
+// 那 X 就必须进 In 被实际搜过，**不能只写进 NotCovered 了事**。
+// 反过来，已经被 In 搜过的，也不许再声称「没追进去」——那是自相矛盾。
+func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 	t.Helper()
 	a := c.Absence
 	if len(a.In) == 0 || len(a.Absent) == 0 {
@@ -806,6 +837,12 @@ func checkAbsence(t *testing.T, src, label string, c Claim) {
 			label, c.Effect.Target, a.Absent)
 	}
 
+	// In 里每个函数的尾名：这些是**真的被搜过**的。
+	searched := map[string]bool{}
+	for _, ref := range a.In {
+		searched[lastSegment(ref.Func)] = true
+	}
+
 	actual := map[string]bool{}
 	for _, ref := range a.In {
 		f, _, err := upstreamFile(src, ref.Path)
@@ -813,16 +850,16 @@ func checkAbsence(t *testing.T, src, label string, c Claim) {
 			t.Errorf("%s 的缺席依据指向 %s，但解析不了：%v", label, ref.Path, err)
 			continue
 		}
-		fn := findFunc(f, ref.Func)
-		if fn == nil {
-			t.Errorf("%s 的缺席依据说要搜 %s，但上游语法树里找不到这个函数", label, ref)
+		fn, ferr := findFuncUnique(f, ref.Func)
+		if ferr != nil {
+			t.Errorf("%s 的缺席依据说要搜 %s：%v", label, ref, ferr)
 			continue
 		}
-		for _, s := range stringsIn(fn) {
+		for _, str := range stringsIn(fn) {
 			for _, forbidden := range a.Absent {
-				if strings.Contains(s, forbidden) {
+				if strings.Contains(str, forbidden) {
 					t.Errorf("%s 说这条路不碰 %q，但 %s 里算得出字符串 %q",
-						label, forbidden, ref, s)
+						label, forbidden, ref, str)
 				}
 			}
 		}
@@ -831,9 +868,31 @@ func checkAbsence(t *testing.T, src, label string, c Claim) {
 		}
 	}
 
+	// 同一条命令里别的 Claim 声称调用过的东西，如果这条路上真的调到了，
+	// 就必须被搜过，不能只记在「没追进去」那一栏。
+	for _, sib := range siblings {
+		if sib.Effect.Kind != EffectCalls {
+			continue
+		}
+		tail := lastSegment(sib.Effect.Target)
+		if searched[tail] {
+			continue
+		}
+		if actual[sib.Effect.Target] {
+			t.Errorf("%s 这条路上调用了 %s，而同一条命令另有一条断言说它就是干活的那一步——"+
+				"这种中间函数必须进 In 被搜过，只写进 NotCovered 等于没查",
+				label, sib.Effect.Target)
+		}
+	}
+
 	declared := map[string]bool{}
 	for _, name := range a.NotCovered {
 		declared[name] = true
+		if searched[lastSegment(name)] {
+			t.Errorf("%s 的 NotCovered 里写了 %q，但 In 已经搜过它的函数体——"+
+				"不能既说搜过又说没追进去", label, name)
+			continue
+		}
 		if !actual[name] {
 			t.Errorf("%s 的 NotCovered 里写了 %q，但被搜的那几个函数体里没有这个调用——"+
 				"边界声明不能凭空写", label, name)
@@ -841,9 +900,10 @@ func checkAbsence(t *testing.T, src, label string, c Claim) {
 	}
 	var missing []string
 	for name := range actual {
-		if !declared[name] {
-			missing = append(missing, name)
+		if declared[name] || searched[lastSegment(name)] {
+			continue
 		}
+		missing = append(missing, name)
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
