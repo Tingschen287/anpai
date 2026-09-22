@@ -172,6 +172,22 @@ func callsOpaqueBuilder() {
 }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
+case("用局部变量中转一个造出来的字符串", "A17-自查", "internal/agentdeck/attach.go",
+     """	return cmd, note, err
+}""",
+     """	return cmd, note, err
+}
+
+func opaqueViaLocal() string {
+	x := string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})
+	return x
+}
+
+func opaqueBuilder2(command string) { _ = exec.Command(command) }
+
+func callsIt() { opaqueBuilder2(opaqueViaLocal()) }""",
+     "TestCommandArgumentsAreBuiltFromConstantsOnly")
+
 def main():
     ok_count = 0
     print("=== attempt 13 阳性对照 ===\n")

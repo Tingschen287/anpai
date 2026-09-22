@@ -286,7 +286,7 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 			// 它的值从哪来本测试并不知道——放它过去等于自己把洞挖回来。
 			assigned := assignedNames(fn)
 			ctx := argCtx{
-				fset: fset, where: fn.Name.Name, params: params, assigned: assigned,
+				fset: fset, where: fn.Name.Name, fn: fn, params: params, assigned: assigned,
 				declared: declared, localHelpers: localHelpers, builtinHelpers: builtinHelpers,
 			}
 			for _, e := range direct {
@@ -362,10 +362,11 @@ func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
 
 // argCtx 把一次检查要用到的几张表打包，省得到处传。
 type argCtx struct {
-	fset                        *token.FileSet
-	where                       string
-	params, assigned            map[string]bool
-	declared                    packageNames
+	fset                         *token.FileSet
+	where                        string
+	fn                           *ast.FuncDecl
+	params, assigned             map[string]bool
+	declared                     packageNames
 	localHelpers, builtinHelpers map[string]bool
 }
 
@@ -417,7 +418,7 @@ func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr) {
 			continue
 		}
 		// 独立位置——这里的值可能被当成可执行文件或子命令，要有来源。
-		checkNoOpaqueString(t, ctx.fset, ctx.where, el,
+		checkNoOpaqueString(t, ctx.fset, ctx.where, el, ctx.fn,
 			ctx.params, ctx.assigned, ctx.declared, ctx.localHelpers, ctx.builtinHelpers)
 		prevIsFlag = false
 	}
@@ -564,9 +565,11 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 
 // checkNoOpaqueString 在一段表达式里找「算出来的字符串」。
 func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
-	params, assigned map[string]bool, declared packageNames,
+	fn *ast.FuncDecl, params, assigned map[string]bool, declared packageNames,
 	localHelpers, builtinHelpers map[string]bool) {
 	t.Helper()
+	// 追一个局部变量的来历时，防止它自己引用自己绕圈。
+	chasing := map[string]bool{}
 	at := func(n ast.Node) string {
 		pos := fset.Position(n.Pos())
 		return fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line)
@@ -582,9 +585,23 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 		switch v := x.(type) {
 		case *ast.Ident:
 			switch {
-			case params[v.Name], assigned[v.Name]:
-				// 入参由调用方负责；本函数里赋过值的局部变量，
-				// 它的每一次赋值都在本测试的检查范围内。
+			case params[v.Name]:
+				// 入参由调用方负责——它的来源在调用点查。
+			case assigned[v.Name]:
+				// **本函数里赋过值的局部变量，得追它到底被赋了什么。**
+				// 上一版到这里就放行，于是
+				//
+				//	x := string([]byte{…})
+				//	return x
+				//
+				// 一路绿灯：返回的是个「已赋值的局部变量」，没人问它赋了什么。
+				if fn != nil && !chasing[v.Name] {
+					chasing[v.Name] = true
+					for _, rhs := range assignmentsTo(fn, map[string]bool{v.Name: true}) {
+						walk(rhs)
+					}
+					delete(chasing, v.Name)
+				}
 			case declared.visible[v.Name], declared.funcs[v.Name]:
 				// 值折叠得出来的包级声明，守边测试扫得到它的内容。
 			case declared.opaque[v.Name]:
@@ -649,11 +666,11 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 				//
 				// 追进去要**换上下文**：里面的名字是它自己的入参和局部变量，
 				// 跟调用者那一套没关系。互相调用用 tracing 挡住。
-				if fn := findPackageFunc(name); fn != nil && !tracing[name] {
+				if callee := findPackageFunc(name); callee != nil && !tracing[name] {
 					tracing[name] = true
-					for _, res := range returnedExprs(fn) {
+					for _, res := range returnedExprs(callee) {
 						checkNoOpaqueString(t, fset, where+" → "+name, res,
-							paramNames(fn), assignedNames(fn),
+							callee, paramNames(callee), assignedNames(callee),
 							declared, localHelpers, builtinHelpers)
 					}
 					delete(tracing, name)
