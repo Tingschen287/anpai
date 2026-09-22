@@ -190,7 +190,13 @@ func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			// 禁令本身要放过：证明「不做某件事」，总得先说得出那件事叫什么。
 			// 认的是这一个变量声明，不是「哪一行里有这个名字」。
-			if spec, ok := n.(*ast.ValueSpec); ok && len(spec.Names) > 0 &&
+			//
+			// **只声明它一个名字时才放过。** 一条 var 可以同时声明好几个：
+			//
+			//	var keyInjectionCommands, evil = []string{...}, "send-keys"
+			//
+			// 只看 Names[0] 的话，evil 就跟着一起逃了。
+			if spec, ok := n.(*ast.ValueSpec); ok && len(spec.Names) == 1 &&
 				spec.Names[0].Name == "keyInjectionCommands" {
 				return false
 			}
@@ -691,7 +697,11 @@ func checkEvidence(t *testing.T, src, label string, where []Evidence) {
 // 因为查的不是锚点。
 func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 	t.Helper()
-	if len(c.Evidence) == 0 {
+	// **一条 Claim 只能挂一条落点。** 挂两条的话，下面只会查第一条，
+	// 第二条就成了没人核对的摆设——这正是这套清单栽过五次的那个形状。
+	if len(c.Evidence) != 1 {
+		t.Errorf("%s 挂了 %d 条落点：一条断言配一条落点，多出来的没人查",
+			label, len(c.Evidence))
 		return
 	}
 	e := c.Evidence[0]
