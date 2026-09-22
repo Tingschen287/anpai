@@ -712,7 +712,7 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 		return
 	}
 	e := c.Evidence[0]
-	f, fset, err := upstreamFile(src, e.Path)
+	f, fset, data, err := upstreamFileWithSource(src, e.Path)
 	if err != nil {
 		t.Errorf("%s 要在 %s 里查证 %s，但解析不了：%v", label, e.Path, c.Effect, err)
 		return
@@ -762,38 +762,52 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 				label, c.Effect, e, e.Within)
 			return
 		}
+		// 同一行可以有好几个调用，所以「在这一行」还不够。
+		// 要的是**锚点落在被选中那个调用自己的源码区间里**。
 		var names []string
-		var named, matched bool
+		var hits []*ast.CallExpr
+		var namedButElsewhere []string
 		for _, call := range calls {
 			got := calleeName(call.Fun)
 			names = append(names, got)
 			if got != c.Effect.Target {
 				continue
 			}
-			named = true
-			if c.Effect.Arg == "" {
-				matched = true
-				break
+			text := nodeText(data, fset, call)
+			if !strings.Contains(text, e.Anchor) {
+				namedButElsewhere = append(namedButElsewhere, text)
+				continue
 			}
-			for _, arg := range call.Args {
-				if v, ok := constStringOf(arg); ok && v == c.Effect.Arg {
-					matched = true
-					break
-				}
-			}
-			if matched {
-				break
-			}
+			hits = append(hits, call)
 		}
 		switch {
-		case !named:
+		case len(hits) == 0 && len(namedButElsewhere) > 0:
+			t.Errorf("%s 说那一行调用的是 %s，这一行上确实有它，"+
+				"但锚点 %q 不在这个调用自己的源码里（它写的是 %q）——"+
+				"同一行上还有别的调用，共线不等于同一件事",
+				label, c.Effect.Target, e.Anchor, strings.Join(namedButElsewhere, " / "))
+			return
+		case len(hits) == 0:
 			t.Errorf("%s 说那一行调用的是 %s，但 %s 那一行上的调用是 %v——"+
-				"断言必须钉在它自己的依据那一行，同一个函数里另有一个同名调用不算",
+				"断言必须钉在它自己的依据那一行",
 				label, c.Effect.Target, e, names)
-		case !matched:
-			t.Errorf("%s 说 %s 带着常量参数 %q，但那一行的调用里没有这个参数",
-				label, c.Effect.Target, c.Effect.Arg)
+			return
+		case len(hits) > 1:
+			t.Errorf("%s 那一行上有 %d 个都叫 %s、且都含锚点的调用，说不清指的是哪个——"+
+				"把锚点写得更具体，或者把依据指到只有一个的那一行",
+				label, len(hits), c.Effect.Target)
+			return
 		}
+		if c.Effect.Arg == "" {
+			return
+		}
+		for _, arg := range hits[0].Args {
+			if v, ok := constStringOf(arg); ok && v == c.Effect.Arg {
+				return
+			}
+		}
+		t.Errorf("%s 说 %s 带着常量参数 %q，但那个调用的参数里没有这个常量",
+			label, c.Effect.Target, c.Effect.Arg)
 	default:
 		t.Errorf("%s 的 Effect 种类是 %s，正面依据这条路不认识它", label, c.Effect.Kind)
 	}
@@ -837,10 +851,16 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 			label, c.Effect.Target, a.Absent)
 	}
 
-	// In 里每个函数的尾名：这些是**真的被搜过**的。
+	// **覆盖资格按调用写法算，不按尾名。**
+	//
+	// 上一轮这里是 searched[lastSegment(ref.Func)]，独立评审往上游副本加了个
+	// (*Other).PreviewFull，把 In 里的 Instance.PreviewFull 换成 Other.PreviewFull，
+	// 真正的那个一字节没搜，测试照样通过——尾名相同就算覆盖，等于谁都能顶替。
 	searched := map[string]bool{}
 	for _, ref := range a.In {
-		searched[lastSegment(ref.Func)] = true
+		if ref.Call != "" {
+			searched[ref.Call] = true
+		}
 	}
 
 	actual := map[string]bool{}
@@ -854,6 +874,26 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 		if ferr != nil {
 			t.Errorf("%s 的缺席依据说要搜 %s：%v", label, ref, ferr)
 			continue
+		}
+		// 非入口的每一跳都要交代：它在上一级里写成什么样，
+		// 以及那个变量凭什么是这个类型——后半句机器验不了，所以必须写出来。
+		if i := strings.LastIndex(ref.Call, "."); ref.Call != "" && i >= 0 {
+			// 带前缀的调用（x.Foo）才需要交代 x 是什么类型；
+			// 同包直接调用（Foo）的身份语法树自己就能定死。
+			holder := ref.Call[:i]
+			switch {
+			case strings.TrimSpace(ref.Note) == "":
+				t.Errorf("%s 的 %s 写了调用写法 %q 却没写 Note——"+
+					"从 %s 这个变量到 %s 这个类型，测试验不了，得有人写清楚",
+					label, ref, ref.Call, holder, ref.Func)
+			case !strings.Contains(ref.Note, holder):
+				t.Errorf("%s 的 %s 的 Note 没提到 %q——"+
+					"要交代的正是这个变量为什么是 %s", label, ref, holder, ref.Func)
+			}
+			if lastSegment(ref.Call) != lastSegment(ref.Func) {
+				t.Errorf("%s 的 %s 说调用写法是 %q，跟定义处的 %q 连名字都对不上",
+					label, ref, ref.Call, ref.Func)
+			}
 		}
 		for _, str := range stringsIn(fn) {
 			for _, forbidden := range a.Absent {
@@ -874,8 +914,7 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 		if sib.Effect.Kind != EffectCalls {
 			continue
 		}
-		tail := lastSegment(sib.Effect.Target)
-		if searched[tail] {
+		if searched[sib.Effect.Target] {
 			continue
 		}
 		if actual[sib.Effect.Target] {
@@ -885,10 +924,18 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 		}
 	}
 
+	// In 里声称的每一跳，那个调用得真的存在于被搜的函数体里。
+	for _, ref := range a.In {
+		if ref.Call != "" && !actual[ref.Call] {
+			t.Errorf("%s 的 %s 说它是通过 %q 被走到的，但被搜的那几个函数体里没有这个调用",
+				label, ref, ref.Call)
+		}
+	}
+
 	declared := map[string]bool{}
 	for _, name := range a.NotCovered {
 		declared[name] = true
-		if searched[lastSegment(name)] {
+		if searched[name] {
 			t.Errorf("%s 的 NotCovered 里写了 %q，但 In 已经搜过它的函数体——"+
 				"不能既说搜过又说没追进去", label, name)
 			continue
@@ -900,7 +947,7 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 	}
 	var missing []string
 	for name := range actual {
-		if declared[name] || searched[lastSegment(name)] {
+		if declared[name] || searched[name] {
 			continue
 		}
 		missing = append(missing, name)

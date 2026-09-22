@@ -108,10 +108,28 @@ func (e Effect) String() string {
 	return fmt.Sprintf("%s %s", e.Kind, e.Target)
 }
 
-// FuncRef 指一个上游函数。
+// FuncRef 指一个上游函数，并说清楚它是怎么被走到的。
+//
+// `Func` 是它在定义处的身份（`Instance.PreviewFull`）。
+// `Call` 是它在上一级函数体里被调用时写的样子（`inst.PreviewFull`）。
+//
+// **这两者之间那一跳，机器验不了。** 要知道 `inst` 这个变量的类型是不是
+// `*session.Instance`，得有完整的类型信息；测试只解析上游源码，不编译它。
+//
+// attempt 15 在这里栽过：那时 `In` 的覆盖资格按尾名算，独立评审往上游副本里
+// 加了一个 `(*Other).PreviewFull`，再把 `In` 里的 `Instance.PreviewFull`
+// 换成 `Other.PreviewFull`——真正的 `Instance.PreviewFull` 一个字节都没被搜，
+// 测试照样通过。尾名相同就算覆盖，等于让任何同名方法都能顶替。
+//
+// 所以现在分两半：机器核对 `Call` 真的出现在上一级的调用列表里、
+// `Func` 在 `Path` 里唯一存在；**而从 `Call` 那个变量到 `Func` 那个类型，
+// 由 `Note` 写明白是人读出来的**。跟 `Absence.NotCovered` 一个道理：
+// 验不了的就写出来，别假装验了。
 type FuncRef struct {
 	Path string
-	Func string
+	Func string // 定义处的身份，例如 Instance.PreviewFull
+	Call string // 在上一级函数体里的调用写法，例如 inst.PreviewFull；入口函数留空
+	Note string // Call 那个变量为什么是 Func 这个类型——人读的，测试不验证这句话本身
 }
 
 func (f FuncRef) String() string { return f.Path + " 的 " + f.Func }
@@ -361,10 +379,31 @@ var SideEffects = map[string]SideEffect{
 				Effect: Effect{Kind: EffectAbsent, Target: keyInjectionCommands[0]},
 				Absence: &Absence{
 					In: []FuncRef{
+						// 入口：CLI 的 session output 落在这里，没有上一级。
 						{Path: "cmd/agent-deck/session_cmd.go", Func: "handleSessionOutput"},
-						{Path: "internal/session/instance.go", Func: "Instance.PreviewFull"},
-						{Path: "internal/tmux/tmux.go", Func: "Session.CaptureFullHistory"},
-						{Path: "internal/tmux/socket.go", Func: "Session.runBoundedOutput"},
+						{
+							Path: "internal/session/instance.go", Func: "Instance.PreviewFull",
+							Call: "inst.PreviewFull",
+							Note: "handleSessionOutput 里的 inst 来自 ResolveSessionOrCurrent，" +
+								"类型是 *session.Instance；这一跳是人读出来的，测试只核对名字对得上",
+						},
+						{
+							Path: "internal/tmux/tmux.go", Func: "Session.CaptureFullHistory",
+							Call: "i.tmuxSession.CaptureFullHistory",
+							Note: "Instance.PreviewFull 里的 i.tmuxSession 是 *tmux.Session 字段；" +
+								"这一跳是人读出来的",
+						},
+						{
+							Path: "internal/tmux/socket.go", Func: "Session.runBoundedOutput",
+							Call: "s.runBoundedOutput",
+							Note: "CaptureFullHistory 的接收者 s 就是 *tmux.Session，" +
+								"所以 s.runBoundedOutput 是它自己的方法；这一跳是人读出来的",
+						},
+						// 链的末端：真正把参数交给 tmux 的就是这个包级函数。
+						{
+							Path: "internal/tmux/socket.go", Func: ".runBoundedOutput",
+							Call: "runBoundedOutput",
+						},
 					},
 					Absent: keyInjectionCommands,
 					NotCovered: []string{
@@ -380,6 +419,11 @@ var SideEffects = map[string]SideEffect{
 						"session.IsClaudeCompatible",
 						"session.NoteClaudeSessionIDFromOwnPane",
 						"string", "time.Now", "tmux.GetTerminalInfo",
+						// 链末端 runBoundedOutput 自己调的这些也没追进去。
+						// 它构造命令用的参数由调用方传入，那个常量已被上面
+						// 「调用 s.runBoundedOutput 且参数含 capture-pane」那条钉住。
+						"Output", "cancel", "context.Background",
+						"context.WithTimeout", "tmuxExecContext",
 					},
 				},
 			},

@@ -27,17 +27,47 @@ import (
 
 // upstreamFile 解析上游源码树里的一个文件。
 func upstreamFile(src, path string) (*ast.File, *token.FileSet, error) {
+	f, fset, _, err := upstreamFileWithSource(src, path)
+	return f, fset, err
+}
+
+// upstreamFileWithSource 除了语法树，还把原始字节一起给出来。
+//
+// 要它是为了 nodeText：**核对一段锚点文本时，得知道它落在哪个节点里面**，
+// 光有位置不够。见 checkEffectIsRealInUpstream 里的说明。
+func upstreamFileWithSource(src, path string) (*ast.File, *token.FileSet, []byte, error) {
 	data, err := os.ReadFile(filepath.Join(src, path))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fset := token.NewFileSet()
 	// ParseComments：注释也要在树里，否则位置会对不上。
 	f, err := parser.ParseFile(fset, path, data, parser.ParseComments)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return f, fset, nil
+	return f, fset, data, nil
+}
+
+// nodeText 取一个语法树节点在源码里的原样文本。
+//
+// 这是 attempt 16 的关键工具。上一轮把断言钉到了「同一物理行」，
+// 独立评审立刻指出：同一行可以有好几个调用。
+//
+//	outer(inner())
+//
+// 两个都起始于这一行，于是 Anchor 描述 outer、Target 写 inner，照样通过。
+// 评审实测更狠：在依据那一行里嵌一个 os.Exit()，Target 改成 os.Exit——**通过**。
+//
+// 「同一行」是共线关系，不是身份关系。锚点必须落在**被选中那个节点自己**的
+// 源码区间里，这条线才是实的。
+func nodeText(data []byte, fset *token.FileSet, n ast.Node) string {
+	start := fset.Position(n.Pos()).Offset
+	end := fset.Position(n.End()).Offset
+	if start < 0 || end > len(data) || start >= end {
+		return ""
+	}
+	return string(data[start:end])
 }
 
 // findFunc 按名字找函数或方法声明。
@@ -75,14 +105,25 @@ func recvTypeName(fn *ast.FuncDecl) string {
 // 原来那个「从上往下找第一个同名的」会固定返回其中一个，选错了也不说。
 // 独立评审把它列为机制缺陷——找不准就该说找不准，不该沉默地猜。
 func findFuncUnique(f *ast.File, name string) (*ast.FuncDecl, error) {
+	// 三种写法：
+	//
+	//	Foo            唯一的那个（同名多个就报错，见下）
+	//	Session.Foo    指名要 *Session 的方法
+	//	.Foo           指名要包级的那个——上游确实有包级函数与同名方法并存
 	wantRecv, wantName := "", name
-	if i := strings.LastIndex(name, "."); i >= 0 {
+	pkgLevelOnly := false
+	if strings.HasPrefix(name, ".") {
+		pkgLevelOnly, wantName = true, name[1:]
+	} else if i := strings.LastIndex(name, "."); i >= 0 {
 		wantRecv, wantName = name[:i], name[i+1:]
 	}
 	var hits []*ast.FuncDecl
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != wantName {
+			continue
+		}
+		if pkgLevelOnly && recvTypeName(fn) != "" {
 			continue
 		}
 		if wantRecv != "" && recvTypeName(fn) != wantRecv {

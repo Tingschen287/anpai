@@ -1,6 +1,7 @@
 package agentdeck
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -161,34 +162,42 @@ var a = fmt.Sprintf("send-%s", "keys")`
 
 // 命令参数只许由常量和函数入参构成。
 //
-// 这条是 attempt 14 加的，替掉原来那条只会永远通过的
-// TestRuntimeBuiltStringsAreNotGuessed。独立评审说得对：
-// 那条测试断言「Sprintf 的结果算不出来」，而求值器本来就不处理 CallExpr——
-// **它固化的是实现行为，不是安全边界**，而且正式记录了一种已知绕过能力。
+// 这条测试的上一版被独立评审用题目里给的写法原样绕过了：
 //
-// 评审给的反例是：
+//	evil := string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})
+//	args = append(args, evil, "-t", exactTarget(tmuxSession), "AGENTDECK_INSTANCE_ID")
 //
-//	var hidden = string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})
+// 两条守边测试都 PASS，而运行时那个值就是替人敲键的子命令，且确实进了
+// exec.CommandContext。原因有四个，这一轮四个都堵：
 //
-// 运行时值是那个注入按键的子命令，按常量折叠扫源码看不见。
-// strings.Join 和 fmt.Sprintf 同理。
+//  1. 只从 builder 的直接参数收集 roots——`evil` 不是直接参数，它的赋值没人追。
+//     现在**迭代到不动点**：凡是给 roots 赋过值的表达式里出现的标识符，
+//     也进 roots，再追它们的赋值。
+//  2. 普通标识符无条件放行。现在只放行函数入参、追踪过的 root、包级声明；
+//     来路不明的报错。
+//  3. `SelectorExpr` 无条件放行（注释写着「由类型和调用方负责」，
+//     其实没有任何检查）。现在只放行接收者与入参的字段读取。
+//  4. helper 白名单只按名字匹配。现在白名单资格绑定到**本包里那一个声明**，
+//     本包找不到这个函数就不认。
 //
-// 堵住「所有算不出的字符串」是做不到的。但**真正的风险有个很窄的出口**：
-// 一个字符串要造成伤害，得先成为跑出去的命令的参数。所以这条测试不扫全包，
-// 只盯那个出口：凡是函数里构造过 exec 命令，构成那些参数的表达式
-// 就只能是字面量、本函数的入参，或白名单里那几个辅助函数。
-//
-// 现在包里的子命令名全是字面量（"attach-session"、"has-session"、
-// "show-environment"），变量只承载数据（socket 名、会话名）。
-// 谁要往里塞一个算出来的子命令名，这条会红。
+// 堵不住的那部分照旧说明白：跨函数的数据流不追，函数入参的值由调用方负责。
 func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 	builders := map[string]bool{
 		"exec.Command": true, "exec.CommandContext": true, "interactiveCommand": true,
 	}
-	// 这几个的输出不可能是子命令名：append 拼切片，exactTarget 只在前面加等号。
-	allowedHelpers := map[string]bool{"append": true, "exactTarget": true}
+	// append 是内建，只拼切片不造字符串；exactTarget 必须是本包声明的那一个。
+	localHelpers := map[string]bool{"exactTarget": true}
+	builtinHelpers := map[string]bool{"append": true}
 
 	files, fset := packageASTs(t)
+	declared := packageDeclNames(files)
+	for name := range localHelpers {
+		if !declared.funcs[name] {
+			t.Errorf("白名单里的 %s 在本包里找不到声明——"+
+				"白名单资格要绑到具体那一个函数，不能只认名字", name)
+		}
+	}
+
 	for _, f := range files {
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -205,44 +214,98 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 			if len(builderCalls) == 0 {
 				continue
 			}
-			allowed := paramNames(fn)
+			params := paramNames(fn)
+
+			// roots：所有可能流进命令参数的本地名字，迭代到不动点。
 			roots := map[string]bool{}
+			var direct []ast.Expr
 			for _, call := range builderCalls {
-				// exec.CommandContext 的第一个参数是 context，不是命令的一部分。
 				first := 0
 				if calleeName(call.Fun) == "exec.CommandContext" {
-					first = 1
+					first = 1 // 第一个参数是 context，不是命令的一部分
 				}
 				for _, arg := range call.Args[min(first, len(call.Args)):] {
 					collectIdents(arg, roots)
-					// 直接写在调用里的参数也要查。
-					checkNoOpaqueString(t, fset, fn.Name.Name, arg, allowed, allowedHelpers, roots)
+					direct = append(direct, arg)
 				}
 			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				as, ok := n.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				var touches bool
-				for _, lhs := range as.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && roots[id.Name] {
-						touches = true
+			for grew := true; grew; {
+				grew = false
+				for _, rhs := range assignmentsTo(fn, roots) {
+					before := len(roots)
+					collectIdents(rhs, roots)
+					if len(roots) != before {
+						grew = true
 					}
 				}
-				if !touches {
-					return true
-				}
-				for _, rhs := range as.Rhs {
-					checkNoOpaqueString(t, fset, fn.Name.Name, rhs, allowed, allowedHelpers, roots)
-				}
-				return true
-			})
+			}
+
+			check := func(e ast.Expr) {
+				checkNoOpaqueString(t, fset, fn.Name.Name, e,
+					params, roots, declared, localHelpers, builtinHelpers)
+			}
+			for _, e := range direct {
+				check(e)
+			}
+			for _, rhs := range assignmentsTo(fn, roots) {
+				check(rhs)
+			}
 		}
 	}
 }
 
-// paramNames 收集一个函数的入参与接收者名字。它们的值由调用方负责，本测试不追。
+// assignmentsTo 找出所有给这些名字赋过值的右侧表达式。
+func assignmentsTo(fn *ast.FuncDecl, names map[string]bool) []ast.Expr {
+	var out []ast.Expr
+	ast.Inspect(fn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		var touches bool
+		for _, lhs := range as.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && names[id.Name] {
+				touches = true
+			}
+		}
+		if touches {
+			out = append(out, as.Rhs...)
+		}
+		return true
+	})
+	return out
+}
+
+// packageNames 是本包声明过的名字，用来判断一个标识符是不是本地有据可查的。
+type packageNames struct {
+	funcs  map[string]bool
+	values map[string]bool
+}
+
+func packageDeclNames(files []*ast.File) packageNames {
+	out := packageNames{funcs: map[string]bool{}, values: map[string]bool{}}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil {
+					out.funcs[d.Name.Name] = true
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, id := range vs.Names {
+							out.values[id.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// paramNames 收集一个函数的入参与接收者名字。它们的值由调用方负责，本测试不跨函数追。
 func paramNames(fn *ast.FuncDecl) map[string]bool {
 	out := map[string]bool{}
 	add := func(fl *ast.FieldList) {
@@ -271,9 +334,14 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 }
 
 // checkNoOpaqueString 在一段表达式里找「算出来的字符串」。
-func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string,
-	e ast.Expr, params, helpers, roots map[string]bool) {
+func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
+	params, roots map[string]bool, declared packageNames,
+	localHelpers, builtinHelpers map[string]bool) {
 	t.Helper()
+	at := func(n ast.Node) string {
+		pos := fset.Position(n.Pos())
+		return fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line)
+	}
 	var walk func(ast.Expr)
 	walk = func(x ast.Expr) {
 		if x == nil {
@@ -284,13 +352,30 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string,
 		}
 		switch v := x.(type) {
 		case *ast.Ident:
-			if params[v.Name] || roots[v.Name] || v.Name == "nil" {
-				return
+			switch {
+			case params[v.Name], roots[v.Name]:
+				// 入参由调用方负责；root 的每一次赋值都在本测试的检查范围内。
+			case declared.values[v.Name], declared.funcs[v.Name]:
+				// 本包声明的名字，值写在源码里，守边测试扫得到。
+			case v.Name == "nil" || v.Name == "true" || v.Name == "false":
+			default:
+				t.Errorf("%s 里命令参数用到了来路不明的 %s（%s）："+
+					"它既不是本函数入参，也不是被追踪的局部变量或本包声明",
+					where, v.Name, at(v))
 			}
-			// 包级常量也算数：它的值在源码里写死，守边测试扫得到。
 			return
 		case *ast.SelectorExpr:
-			return // c.Binary 这类字段读取，由类型和调用方负责
+			// 只认「接收者或入参的字段」。别的（包级变量、全局状态）说不清来源。
+			if id, ok := v.X.(*ast.Ident); ok && (params[id.Name] || roots[id.Name]) {
+				return
+			}
+			if id, ok := v.X.(*ast.Ident); ok && declared.values[id.Name] {
+				return
+			}
+			t.Errorf("%s 里命令参数读了 %s 的字段（%s）："+
+				"只有本函数的接收者、入参或本包声明的值可以这样读",
+				where, calleeName(v), at(v))
+			return
 		case *ast.CompositeLit:
 			for _, el := range v.Elts {
 				walk(el)
@@ -306,14 +391,17 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string,
 		case *ast.Ellipsis:
 			walk(v.Elt)
 			return
+		case *ast.IndexExpr:
+			walk(v.X)
+			return
 		case *ast.CallExpr:
 			name := calleeName(v.Fun)
-			if !helpers[name] {
-				pos := fset.Position(v.Pos())
-				t.Errorf("%s 里命令参数用到了 %s(...)（%s:%d）："+
-					"跑出去的命令参数只能是字面量、本函数入参，或白名单里的辅助函数。"+
-					"一个算出来的字符串可以是任何东西——包括替人敲键的那几个子命令",
-					where, name, filepath.Base(pos.Filename), pos.Line)
+			ok := builtinHelpers[name] || (localHelpers[name] && declared.funcs[name])
+			if !ok {
+				t.Errorf("%s 里命令参数用到了 %s(...)（%s）："+
+					"跑出去的命令参数只能是字面量、本函数入参，或白名单里那几个"+
+					"本包声明的辅助函数。一个算出来的字符串可以是任何东西——"+
+					"包括替人敲键的那几个子命令", where, name, at(v))
 				return
 			}
 			for _, a := range v.Args {
