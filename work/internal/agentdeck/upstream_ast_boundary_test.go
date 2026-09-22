@@ -240,9 +240,14 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 				}
 			}
 
+			// **被追踪 ≠ 有来源。** roots 是迭代出来的闭包，里面混着
+			// 「本函数赋过值的局部变量」和「只是出现在某个右侧的名字」。
+			// 后者（比如一个包级变量）在本函数里根本没有赋值语句，
+			// 它的值从哪来本测试并不知道——放它过去等于自己把洞挖回来。
+			assigned := assignedNames(fn)
 			check := func(e ast.Expr) {
 				checkNoOpaqueString(t, fset, fn.Name.Name, e,
-					params, roots, declared, localHelpers, builtinHelpers)
+					params, assigned, declared, localHelpers, builtinHelpers)
 			}
 			for _, e := range direct {
 				check(e)
@@ -252,6 +257,29 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 			}
 		}
 	}
+}
+
+// assignedNames 列出本函数体里真正被赋过值的名字。
+func assignedNames(fn *ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range v.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					out[id.Name] = true
+				}
+			}
+		case *ast.RangeStmt:
+			for _, e := range []ast.Expr{v.Key, v.Value} {
+				if id, ok := e.(*ast.Ident); ok {
+					out[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return out
 }
 
 // assignmentsTo 找出所有给这些名字赋过值的右侧表达式。
@@ -277,13 +305,28 @@ func assignmentsTo(fn *ast.FuncDecl, names map[string]bool) []ast.Expr {
 }
 
 // packageNames 是本包声明过的名字，用来判断一个标识符是不是本地有据可查的。
+//
+// 包级值分成两堆是有讲究的：**只有算得出常量字符串的那些才算「守边测试看得见」**。
+//
+//	var ok   = "attach-session"                      // 折叠得出来，守边扫得到
+//	var bad  = string([]byte{115, 101, 110, 100})    // 折叠不出来，守边看不见
+//
+// 如果这里不分堆，`bad` 就能以「本包声明的名字」这个身份混进命令参数——
+// 而那正是独立评审用来绕过上一版的那类构造。
 type packageNames struct {
-	funcs  map[string]bool
-	values map[string]bool
+	funcs map[string]bool
+	// visible：值能折叠成常量的包级声明，守边测试扫得到它的内容。
+	visible map[string]bool
+	// opaque：值算不出来的包级声明，谁也不知道它运行时是什么。
+	opaque map[string]bool
 }
 
 func packageDeclNames(files []*ast.File) packageNames {
-	out := packageNames{funcs: map[string]bool{}, values: map[string]bool{}}
+	out := packageNames{
+		funcs:   map[string]bool{},
+		visible: map[string]bool{},
+		opaque:  map[string]bool{},
+	}
 	for _, f := range files {
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
@@ -293,9 +336,31 @@ func packageDeclNames(files []*ast.File) packageNames {
 				}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, id := range vs.Names {
-							out.values[id.Name] = true
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, id := range vs.Names {
+						seen := false
+						if i < len(vs.Values) {
+							if _, good := constStringOf(vs.Values[i]); good {
+								seen = true
+							}
+							// 字符串切片这类复合字面量：元素全算得出就算看得见。
+							if lit, isLit := vs.Values[i].(*ast.CompositeLit); isLit && !seen {
+								seen = true
+								for _, el := range lit.Elts {
+									if _, good := constStringOf(el); !good {
+										seen = false
+										break
+									}
+								}
+							}
+						}
+						if seen {
+							out.visible[id.Name] = true
+						} else {
+							out.opaque[id.Name] = true
 						}
 					}
 				}
@@ -335,7 +400,7 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 
 // checkNoOpaqueString 在一段表达式里找「算出来的字符串」。
 func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
-	params, roots map[string]bool, declared packageNames,
+	params, assigned map[string]bool, declared packageNames,
 	localHelpers, builtinHelpers map[string]bool) {
 	t.Helper()
 	at := func(n ast.Node) string {
@@ -353,10 +418,15 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 		switch v := x.(type) {
 		case *ast.Ident:
 			switch {
-			case params[v.Name], roots[v.Name]:
-				// 入参由调用方负责；root 的每一次赋值都在本测试的检查范围内。
-			case declared.values[v.Name], declared.funcs[v.Name]:
-				// 本包声明的名字，值写在源码里，守边测试扫得到。
+			case params[v.Name], assigned[v.Name]:
+				// 入参由调用方负责；本函数里赋过值的局部变量，
+				// 它的每一次赋值都在本测试的检查范围内。
+			case declared.visible[v.Name], declared.funcs[v.Name]:
+				// 值折叠得出来的包级声明，守边测试扫得到它的内容。
+			case declared.opaque[v.Name]:
+				t.Errorf("%s 里命令参数用到了包级的 %s（%s）："+
+					"它的值折叠不出来，守边测试也看不见它运行时是什么",
+					where, v.Name, at(v))
 			case v.Name == "nil" || v.Name == "true" || v.Name == "false":
 			default:
 				t.Errorf("%s 里命令参数用到了来路不明的 %s（%s）："+
@@ -366,10 +436,10 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 			return
 		case *ast.SelectorExpr:
 			// 只认「接收者或入参的字段」。别的（包级变量、全局状态）说不清来源。
-			if id, ok := v.X.(*ast.Ident); ok && (params[id.Name] || roots[id.Name]) {
+			if id, ok := v.X.(*ast.Ident); ok && (params[id.Name] || assigned[id.Name]) {
 				return
 			}
-			if id, ok := v.X.(*ast.Ident); ok && declared.values[id.Name] {
+			if id, ok := v.X.(*ast.Ident); ok && declared.visible[id.Name] {
 				return
 			}
 			t.Errorf("%s 里命令参数读了 %s 的字段（%s）："+

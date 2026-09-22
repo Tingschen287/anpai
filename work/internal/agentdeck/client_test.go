@@ -864,7 +864,13 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 	}
 
 	actual := map[string]bool{}
-	for _, ref := range a.In {
+	// 每个 In 条目各自调了什么，分开记——链是有顺序的。
+	perRef := make([]map[string]bool, len(a.In))
+	for i, ref := range a.In {
+		perRef[i] = map[string]bool{}
+		_ = ref
+	}
+	for i, ref := range a.In {
 		f, _, err := upstreamFile(src, ref.Path)
 		if err != nil {
 			t.Errorf("%s 的缺席依据指向 %s，但解析不了：%v", label, ref.Path, err)
@@ -905,6 +911,28 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 		}
 		for _, call := range callsIn(fn) {
 			actual[call.Name] = true
+			perRef[i][call.Name] = true
+		}
+	}
+
+	// **每一跳的调用得出现在它前面那些函数里，不是「In 里随便哪个」。**
+	// 否则 In 只是一堆函数的集合，谈不上覆盖了某条链：
+	// 把链末端的函数摆进去，它自己调的东西就能替前面的跳背书。
+	for i, ref := range a.In {
+		if ref.Call == "" {
+			continue
+		}
+		var reachedFrom = -1
+		for j := 0; j < i; j++ {
+			if perRef[j][ref.Call] {
+				reachedFrom = j
+				break
+			}
+		}
+		if reachedFrom < 0 {
+			t.Errorf("%s 的 %s 说它是通过 %q 被走到的，但 In 里排在它前面的函数"+
+				"没有一个调用了这个——链要按顺序写，前一跳得真的调到后一跳",
+				label, ref, ref.Call)
 		}
 	}
 
@@ -921,14 +949,6 @@ func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
 			t.Errorf("%s 这条路上调用了 %s，而同一条命令另有一条断言说它就是干活的那一步——"+
 				"这种中间函数必须进 In 被搜过，只写进 NotCovered 等于没查",
 				label, sib.Effect.Target)
-		}
-	}
-
-	// In 里声称的每一跳，那个调用得真的存在于被搜的函数体里。
-	for _, ref := range a.In {
-		if ref.Call != "" && !actual[ref.Call] {
-			t.Errorf("%s 的 %s 说它是通过 %q 被走到的，但被搜的那几个函数体里没有这个调用",
-				label, ref, ref.Call)
 		}
 	}
 
