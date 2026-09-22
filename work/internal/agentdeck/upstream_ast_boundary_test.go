@@ -182,8 +182,33 @@ var a = fmt.Sprintf("send-%s", "keys")`
 //
 // 堵不住的那部分照旧说明白：跨函数的数据流不追，函数入参的值由调用方负责。
 func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
-	builders := map[string]bool{
-		"exec.Command": true, "exec.CommandContext": true, "interactiveCommand": true,
+	// 起点只有标准库那两个。**本包里替它们转发参数的函数自己长出来。**
+	//
+	// 上一轮这里是写死的三个名字，独立评审一眼看出后果：
+	//
+	//	func wrap(cmd string) { exec.Command(cmd) }
+	//	wrap(opaqueFn())                          // 绿
+	//
+	// 「命令参数只能是常量或入参」这句话，实际只在**同一个函数内**成立——
+	// 包一层就没了。评审说得对：这不是罕见写法，是普通的 helper 重构。
+	//
+	// 所以现在迭代：谁把自己的入参喂给了 builder，谁就也是 builder，
+	// 它的调用点同样要查。到不动点为止。
+	builders := map[string]bool{"exec.Command": true, "exec.CommandContext": true}
+	for grew := true; grew; {
+		grew = false
+		for _, f := range mustPackageASTs(t) {
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || builders[fn.Name.Name] {
+					continue
+				}
+				if forwardsParamsToBuilder(fn, builders) {
+					builders[fn.Name.Name] = true
+					grew = true
+				}
+			}
+		}
 	}
 	// append 是内建，只拼切片不造字符串；exactTarget 必须是本包声明的那一个。
 	localHelpers := map[string]bool{"exactTarget": true}
@@ -191,6 +216,21 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 
 	files, fset := packageASTs(t)
 	declared := packageDeclNames(files)
+	pkgFuncIndex = map[string]*ast.FuncDecl{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				pkgFuncIndex[fn.Name.Name] = fn
+			}
+		}
+	}
+	// 白名单辅助函数不能同时是 builder，否则它会替自己的实参开后门。
+	for name := range localHelpers {
+		if builders[name] {
+			t.Errorf("%s 既在辅助函数白名单里，又会把入参喂给命令构造器——"+
+				"这两个身份不能同时有", name)
+		}
+	}
 	for name := range localHelpers {
 		if !declared.funcs[name] {
 			t.Errorf("白名单里的 %s 在本包里找不到声明——"+
@@ -245,17 +285,141 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 			// 后者（比如一个包级变量）在本函数里根本没有赋值语句，
 			// 它的值从哪来本测试并不知道——放它过去等于自己把洞挖回来。
 			assigned := assignedNames(fn)
-			check := func(e ast.Expr) {
-				checkNoOpaqueString(t, fset, fn.Name.Name, e,
-					params, assigned, declared, localHelpers, builtinHelpers)
+			ctx := argCtx{
+				fset: fset, where: fn.Name.Name, params: params, assigned: assigned,
+				declared: declared, localHelpers: localHelpers, builtinHelpers: builtinHelpers,
 			}
 			for _, e := range direct {
-				check(e)
+				checkArgExpr(t, ctx, e)
 			}
 			for _, rhs := range assignmentsTo(fn, roots) {
-				check(rhs)
+				checkArgExpr(t, ctx, rhs)
 			}
 		}
+	}
+}
+
+// mustPackageASTs 是 packageASTs 的缓存版，迭代找 wrapper 时会反复用到。
+var packageASTCache []*ast.File
+
+func mustPackageASTs(t *testing.T) []*ast.File {
+	t.Helper()
+	if packageASTCache == nil {
+		packageASTCache, _ = packageASTs(t)
+	}
+	return packageASTCache
+}
+
+// forwardsParamsToBuilder 判断这个函数是不是「把自己的入参转手交给命令构造器」。
+//
+// 判得宽一点：只要有任何一个入参出现在 builder 调用的参数里就算。
+// 宁可多查几个函数，也不放过一层 wrapper。
+func forwardsParamsToBuilder(fn *ast.FuncDecl, builders map[string]bool) bool {
+	params := paramNames(fn)
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !builders[calleeName(call.Fun)] {
+			return true
+		}
+		for _, arg := range call.Args {
+			used := map[string]bool{}
+			collectIdents(arg, used)
+			for name := range used {
+				if params[name] {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// stringBuilders 是造字符串的原语。它们出现在命令参数里就是红的。
+var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.Sprint": true}
+
+// findPackageFunc / returnedExprs 由 TestCommandArguments 初始化一次，
+// 用来追本包包级函数的返回值。
+var pkgFuncIndex map[string]*ast.FuncDecl
+
+// tracing 挡住互相调用导致的无限下钻。
+var tracing = map[string]bool{}
+
+func findPackageFunc(name string) *ast.FuncDecl { return pkgFuncIndex[name] }
+
+func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
+	var out []ast.Expr
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if ret, ok := n.(*ast.ReturnStmt); ok {
+			out = append(out, ret.Results...)
+		}
+		return true
+	})
+	return out
+}
+
+// argCtx 把一次检查要用到的几张表打包，省得到处传。
+type argCtx struct {
+	fset                        *token.FileSet
+	where                       string
+	params, assigned            map[string]bool
+	declared                    packageNames
+	localHelpers, builtinHelpers map[string]bool
+}
+
+// checkArgExpr 检查一段会成为命令参数的表达式。
+//
+// **位置决定语义，所以检查也按位置分。** tmux 的 argv 里：
+//
+//	tmux -L <socket> attach-session -t <target>
+//	     ^^flag ^^data ^^subcommand  ^^flag ^^data
+//
+// 跟在字面量 flag 后面的那个值，tmux 只会当成这个 flag 的取值；
+// 它就算等于 send-keys 也不会被执行。**能变成子命令的是那些
+// 前面没有 flag、自己独立站着的位置。**
+//
+// 上一轮这里不分位置，一律要求「字面量或入参」，于是把
+// menu.TmuxTargetOf() 这类取会话名的正常调用也拦了——那是误报，
+// 会逼人把白名单越加越长，最后谁都能进。
+func checkArgExpr(t *testing.T, ctx argCtx, e ast.Expr) {
+	t.Helper()
+	switch v := e.(type) {
+	case *ast.CompositeLit: // []string{...}
+		checkArgSequence(t, ctx, v.Elts)
+		return
+	case *ast.CallExpr:
+		if calleeName(v.Fun) == "append" && len(v.Args) > 0 {
+			// append(args, ...) 头一个是被追加的切片，其余是新元素。
+			checkArgExpr(t, ctx, v.Args[0])
+			checkArgSequence(t, ctx, v.Args[1:])
+			return
+		}
+	}
+	// 单个值（比如直接写在 exec.Command 里的那几个），按独立位置办。
+	checkArgSequence(t, ctx, []ast.Expr{e})
+}
+
+// checkArgSequence 按位置检查一串命令参数。
+func checkArgSequence(t *testing.T, ctx argCtx, elems []ast.Expr) {
+	t.Helper()
+	prevIsFlag := false
+	for _, el := range elems {
+		if _, ok := constStringOf(el); ok {
+			// 字面量：它可能就是子命令名，本来就写死在源码里，守边测试扫得到。
+			prevIsFlag = true
+			continue
+		}
+		if prevIsFlag {
+			// 数据位：前面那个字面量已经把它的含义定死了。
+			prevIsFlag = false
+			continue
+		}
+		// 独立位置——这里的值可能被当成可执行文件或子命令，要有来源。
+		checkNoOpaqueString(t, ctx.fset, ctx.where, el,
+			ctx.params, ctx.assigned, ctx.declared, ctx.localHelpers, ctx.builtinHelpers)
+		prevIsFlag = false
 	}
 }
 
@@ -466,19 +630,95 @@ func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.
 			return
 		case *ast.CallExpr:
 			name := calleeName(v.Fun)
-			ok := builtinHelpers[name] || (localHelpers[name] && declared.funcs[name])
-			if !ok {
+			switch {
+			case builtinHelpers[name] || (localHelpers[name] && declared.funcs[name]):
+				for _, a := range v.Args {
+					walk(a)
+				}
+			case stringBuilders[name] || strings.HasPrefix(name, "strings.") ||
+				strings.HasPrefix(name, "strconv.") || strings.HasPrefix(name, "bytes."):
+				// 造字符串的原语。它们的结果运行时才知道是什么。
 				t.Errorf("%s 里命令参数用到了 %s(...)（%s）："+
-					"跑出去的命令参数只能是字面量、本函数入参，或白名单里那几个"+
-					"本包声明的辅助函数。一个算出来的字符串可以是任何东西——"+
-					"包括替人敲键的那几个子命令", where, name, at(v))
-				return
-			}
-			for _, a := range v.Args {
-				walk(a)
+					"这是在**造**一个字符串，造出来的可以是任何东西——"+
+					"包括替人敲键的那几个子命令。这个位置只接受字面量、"+
+					"本函数入参，或读取现成数据", where, name, at(v))
+			case declared.funcs[name]:
+				// 本包的包级函数：追进去看它 return 什么。
+				// 独立评审的反例就是这一种——把 string([]byte{…}) 包进一个
+				// 小函数，外面看起来只是个普通调用。
+				//
+				// 追进去要**换上下文**：里面的名字是它自己的入参和局部变量，
+				// 跟调用者那一套没关系。互相调用用 tracing 挡住。
+				if fn := findPackageFunc(name); fn != nil && !tracing[name] {
+					tracing[name] = true
+					for _, res := range returnedExprs(fn) {
+						checkNoOpaqueString(t, fset, where+" → "+name, res,
+							paramNames(fn), assignedNames(fn),
+							declared, localHelpers, builtinHelpers)
+					}
+					delete(tracing, name)
+				}
+			default:
+				// 方法调用与外部包函数：它们是在**读**上游给的数据
+				// （菜单快照、会话列表、目录项），不是在造字符串。
+				// 实现不在本包，这里追不进去——**这是一条真实的边界**。
+				// 兜着它的是位置规则：这类值只出现在字面量 flag 后面的数据位，
+				// tmux 不会把 -t 的取值当成子命令。
 			}
 			return
 		}
 	}
 	walk(e)
+}
+
+// 锚点匹配必须无视注释。
+//
+// 独立评审的反例：在另一个同名调用里写一段注释，内容就抄原锚点——
+//
+//	inst.PreviewFull(/* tmuxSession.Attach(ctx, detachByte) */)
+//
+// 锚点确实落在这个 CallExpr 的源码区间里，但它只是注释，不是那件事。
+// 把证据指到这个调用上，冒充就成立了。
+func TestAnchorMatchingIgnoresComments(t *testing.T) {
+	const src = `package p
+
+func f() {
+	a.Foo( /* b.Bar(x, y) */ )
+	b.Bar(x, y)
+}
+`
+	fset, path := fixture(t, src)
+	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foo *ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && calleeName(call.Fun) == "a.Foo" {
+			foo = call
+		}
+		return true
+	})
+	if foo == nil {
+		t.Fatal("测试自己写坏了：找不到 a.Foo 那个调用")
+	}
+	const anchor = "b.Bar(x, y)"
+	if raw := nodeText([]byte(src), fset, foo); !strings.Contains(raw, anchor) {
+		t.Fatalf("测试前提不成立：注释本该让原始文本含有锚点，实际是 %q", raw)
+	}
+	clean := nodeTextWithoutComments([]byte(src), fset, file, foo)
+	if strings.Contains(clean, anchor) {
+		t.Errorf("剔除注释后仍含锚点 %q：%q——注释里抄一份锚点就能冒充", anchor, clean)
+	}
+	// 真正的那个调用当然还得匹配得上。
+	var bar *ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && calleeName(call.Fun) == "b.Bar" {
+			bar = call
+		}
+		return true
+	})
+	if got := nodeTextWithoutComments([]byte(src), fset, file, bar); !strings.Contains(got, anchor) {
+		t.Errorf("真正那个调用反而匹配不上了：%q", got)
+	}
 }

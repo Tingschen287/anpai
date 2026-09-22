@@ -70,6 +70,41 @@ func nodeText(data []byte, fset *token.FileSet, n ast.Node) string {
 	return string(data[start:end])
 }
 
+// nodeTextWithoutComments 跟 nodeText 一样，但把节点内的注释挖掉。
+//
+// 上一轮独立评审的反例：
+//
+//	inst.PreviewFull(/* tmuxSession.Attach(ctx, detachByte) */)
+//
+// 锚点确实落在这个 CallExpr 的源码区间里——**但它只是一段注释**。
+// 把证据指到这个调用上，冒充就成立了。
+//
+// 注释不是代码。核对锚点时把它们换成空格，位置和长度都不变，
+// 跨注释的锚点也就匹配不上了。
+func nodeTextWithoutComments(data []byte, fset *token.FileSet, f *ast.File, n ast.Node) string {
+	start := fset.Position(n.Pos()).Offset
+	end := fset.Position(n.End()).Offset
+	if start < 0 || end > len(data) || start >= end {
+		return ""
+	}
+	text := []byte(string(data[start:end]))
+	for _, group := range f.Comments {
+		for _, c := range group.List {
+			cs := fset.Position(c.Pos()).Offset
+			ce := fset.Position(c.End()).Offset
+			if cs < start || ce > end {
+				continue
+			}
+			for i := cs - start; i < ce-start && i < len(text); i++ {
+				if text[i] != '\n' {
+					text[i] = ' '
+				}
+			}
+		}
+	}
+	return string(text)
+}
+
 // findFunc 按名字找函数或方法声明。
 //
 // 跟原来那个「从上往下找第一行 `func ` 开头、名字后面跟括号」的做法比，

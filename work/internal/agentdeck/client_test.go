@@ -773,7 +773,8 @@ func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
 			if got != c.Effect.Target {
 				continue
 			}
-			text := nodeText(data, fset, call)
+			// 剔掉注释再比：注释里抄一份锚点不算数。
+			text := nodeTextWithoutComments(data, fset, f, call)
 			if !strings.Contains(text, e.Anchor) {
 				namedButElsewhere = append(namedButElsewhere, text)
 				continue
