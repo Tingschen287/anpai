@@ -255,6 +255,12 @@ UI_PLAIN_EXEC = ("package ui\n\nimport \"os/exec\"\n\n"
 case("adapter 包外直接写 exec.Command", "A21-1", "internal/ui/ctl_a21.go", None, UI_PLAIN_EXEC,
      "TestEachAdapterOnlyTouchesItsOwnUpstream", pkg="./internal/projectctl/")
 
+# —— attempt 24 加的：预览只读那条文本扫描有个跳行规则，AST 守卫得接得住 ——
+# 同一段注入在 GAPS K8 里要求 TestPreviewPathIsReadOnly 仍绿；这里要求 AST 守卫变红。
+KEYDECL = 'var keyInjectionCommands = []string{"send-keys", "paste-buffer"}'
+SKIPLINE = KEYDECL + '\n\nvar previewProbe = "kill-session" // keyInjectionCommands = '
+case("行尾注释蹭上禁令变量名，藏一个 kill-session", "A24-1", M, KEYDECL, SKIPLINE, GUARD)
+
 # —— 已知缺口：注入后守边测试**必须仍然绿** ——
 #
 # owner 2026-09-23 裁定改按有限边界验收。下面是评审找到、这一版不修的绕过。
@@ -329,6 +335,11 @@ gap("adapter 包外写 exec . Command（选择器中间带空白）", "K7",
       "package ui\n\nimport \"os/exec\"\n\n"
       "func gapSpacedExec() { _ = exec . Command(\"tmux\", \"send-keys\") }\n")],
     pkg="./internal/projectctl/", pattern="TestEachAdapterOnlyTouchesItsOwnUpstream")
+
+# TestPreviewPathIsReadOnly 按文本逐行扫，含 "keyInjectionCommands = " 的整行跳过。
+# 行尾写个这样的注释，这一行就不查了。AST 守卫接得住（对照 A24-1）。
+gap("行尾注释蹭上禁令变量名，预览只读的文本扫描跳过整行", "K8",
+    [(M, KEYDECL, SKIPLINE)], pattern="TestPreviewPathIsReadOnly")
 
 def apply_edits(edits):
     """按顺序改文件，返回原文用于还原；改点找不到返回 None。"""
