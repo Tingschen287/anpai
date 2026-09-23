@@ -15,14 +15,15 @@ if not ENV.get("WORKDECK_UPSTREAM_SRC"):
     print("需要先设 WORKDECK_UPSTREAM_SRC 指向上游源码快照", file=sys.stderr)
     raise SystemExit(2)
 
-def run_test(pattern):
-    r = subprocess.run(["go", "test", "./internal/agentdeck/", "-run", pattern, "-count=1"],
+def run_test(pattern, pkg="./internal/agentdeck/"):
+    r = subprocess.run(["go", "test", pkg, "-run", pattern, "-count=1"],
                        cwd=WORK, env=ENV, capture_output=True, text=True)
     return r.returncode != 0, (r.stdout + r.stderr)
 
 CASES = []
-def case(desc, blocker, path, old, new, pattern):
-    CASES.append((desc, blocker, path, old, new, pattern))
+def case(desc, blocker, path, old, new, pattern, pkg="./internal/agentdeck/"):
+    """old 为 None 表示新建 path 这个文件，跑完删掉。"""
+    CASES.append((desc, blocker, path, old, new, pattern, pkg))
 
 M = "internal/agentdeck/manifest.go"
 T = "internal/agentdeck/client_test.go"
@@ -248,6 +249,12 @@ case("外部包返回值直接站在子命令位上", "A20-3", SS, TAIL,
 func bypassExtern() { _ = exec.Command("tmux", os.Getenv("REVIEW_COMMAND")) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
+# —— 跨包那条守卫：包外直接造命令必须红（K6 的反面，证明它确实扫到 internal/ui）——
+UI_PLAIN_EXEC = ("package ui\n\nimport \"os/exec\"\n\n"
+                 "func ctlPlainExec() { _ = exec.Command(\"tmux\", \"send-keys\") }\n")
+case("adapter 包外直接写 exec.Command", "A21-1", "internal/ui/ctl_a21.go", None, UI_PLAIN_EXEC,
+     "TestEachAdapterOnlyTouchesItsOwnUpstream", pkg="./internal/projectctl/")
+
 # —— 已知缺口：注入后守边测试**必须仍然绿** ——
 #
 # owner 2026-09-23 裁定改按有限边界验收。下面是评审找到、这一版不修的绕过。
@@ -255,8 +262,10 @@ func bypassExtern() { _ = exec.Command("tmux", os.Getenv("REVIEW_COMMAND")) }"""
 # 去 4.eval/results/n037_workbench_attach/boundary-limits.md 把它挪出清单。
 # 反过来，清单里写了、这里注入却变红，说明清单写错了。
 GAPS = []
-def gap(desc, gid, edits):
-    GAPS.append((desc, gid, edits))
+GAP_GUARD = GUARD + "|TestCommandArgumentsAreBuiltFromConstantsOnly"
+def gap(desc, gid, edits, pkg="./internal/agentdeck/", pattern=GAP_GUARD):
+    """edits 里 old 为 None 表示新建这个文件，还原时删掉。"""
+    GAPS.append((desc, gid, edits, pkg, pattern))
 
 SEND_KEYS = "string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})"
 BT = "internal/agentdeck/upstream_ast_boundary_test.go"
@@ -304,11 +313,25 @@ gap("valueFlags 误列一个布尔 flag，后一位放进外部值", "K5",
     [(BT, '"--message-file": true,', '"--message-file": true, "--no-wait": true,')] + tail(
     "func gapFlag() { _ = exec.Command(\"tmux\", \"--no-wait\", os.Getenv(\"REVIEW_COMMAND\")) }"))
 
+# 跨包那条守卫按文本找 "exec.Command"。给 os/exec 起个别名，它就看不见了。
+gap("adapter 包外用别名导入 os/exec 直接造命令", "K6",
+    [("internal/ui/gap_k6.go", None,
+      "package ui\n\nimport ex \"os/exec\"\n\n"
+      "func gapAliasExec() { _ = ex.Command(\"tmux\", \"send-keys\") }\n")],
+    pkg="./internal/projectctl/", pattern="TestEachAdapterOnlyTouchesItsOwnUpstream")
+
 def apply_edits(edits):
     """按顺序改文件，返回原文用于还原；改点找不到返回 None。"""
     originals = {}
     for rel, old, new in edits:
         p = WORK / rel
+        if old is None:
+            if p.exists():
+                restore(originals)
+                return None
+            originals[rel] = None
+            p.write_text(new)
+            continue
         if rel not in originals:
             originals[rel] = p.read_text()
         cur = p.read_text()
@@ -320,20 +343,23 @@ def apply_edits(edits):
 
 def restore(originals):
     for rel, text in originals.items():
-        (WORK / rel).write_text(text)
+        if text is None:
+            (WORK / rel).unlink(missing_ok=True)
+        else:
+            (WORK / rel).write_text(text)
 
 def main():
     ok_count = 0
     print("=== attempt 13 阳性对照 ===\n")
-    for desc, blocker, rel, old, new, pattern in CASES:
-        p = WORK / rel
-        original = p.read_text()
-        if old not in original:
+    for desc, blocker, rel, old, new, pattern, pkg in CASES:
+        originals = apply_edits([(rel, old, new)])
+        if originals is None:
             print(f"[跳过] {desc}：改点找不到，对照本身写坏了")
             continue
-        p.write_text(original.replace(old, new, 1))
-        red, out = run_test(pattern)
-        p.write_text(original)
+        try:
+            red, out = run_test(pattern, pkg)
+        finally:
+            restore(originals)
         if red:
             ok_count += 1
             first = next((l for l in out.splitlines() if "client_test.go" in l or "的第" in l), "")
@@ -347,15 +373,16 @@ def main():
 
     print("\n=== 已知缺口（注入后必须仍然绿）===\n")
     gap_ok = 0
-    for desc, gid, edits in GAPS:
+    for desc, gid, edits, pkg, pattern in GAPS:
         originals = apply_edits(edits)
         if originals is None:
             print(f"[跳过] {gid} {desc}：改点找不到，缺口对照本身写坏了")
             continue
         try:
-            built = subprocess.run(["go", "vet", "./internal/agentdeck/"], cwd=WORK, env=ENV,
+            touched = sorted({"./" + str(pathlib.Path(rel).parent) + "/" for rel, _, _ in edits})
+            built = subprocess.run(["go", "vet"] + touched, cwd=WORK, env=ENV,
                                    capture_output=True, text=True)
-            red, out = run_test(GUARD + "|TestCommandArgumentsAreBuiltFromConstantsOnly")
+            red, out = run_test(pattern, pkg)
         finally:
             restore(originals)
         if built.returncode != 0:

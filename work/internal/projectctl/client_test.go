@@ -92,7 +92,9 @@ func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 	//
 	// 这里查的是「真的在调它」的证据：账本文件名、控制器脚本、上游的 HTTP 路径
 	// 和环境变量。光在注释或错误文案里提到上游的名字不算越界，那反而是在说明
-	// 边界在哪；真要绕过 adapter 去 exec 它，会被上面那条 exec 检查抓住。
+	// 边界在哪；直接写 exec.Command 去 exec 它，会被下面那条 exec 检查抓住。
+	// 那条检查按文本找 "exec.Command"：给 os/exec 起别名（ex.Command）它就看不见，
+	// 对照脚本 GAPS K6 注入的正是这种写法，见 boundary-limits.md。
 	owner := map[string]string{
 		"events.jsonl":     "internal/projectctl",
 		"ledger-head.json": "internal/projectctl",
