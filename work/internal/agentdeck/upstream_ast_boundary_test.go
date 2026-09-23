@@ -180,7 +180,12 @@ var a = fmt.Sprintf("send-%s", "keys")`
 //  4. helper 白名单只按名字匹配。现在白名单资格绑定到**本包里那一个声明**，
 //     本包找不到这个函数就不认。
 //
-// 堵不住的那部分照旧说明白：跨函数的数据流不追，函数入参的值由调用方负责。
+// **这条测试有边界，名字比它做到的多。** 名字说「只由常量构成」，实际是：
+// 对照脚本列出的写法它拦得住，GAPS 列出的写法它拦不住。
+// 第二个返回值、函数变量与接口调用、切片中转、字段与下标原地写入，都在拦不住那边。
+// 边界与剩余风险见 4.eval/results/n037_workbench_attach/boundary-limits.md，
+// owner 2026-09-23 裁定按这个有限边界验收。名字保留，是因为改名要连动对照脚本和
+// 八轮评审记录里的引用；读名字的人请先读这一段。
 func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 	// 起点只有标准库那两个。**本包里替它们转发参数的函数自己长出来。**
 	//
@@ -232,7 +237,9 @@ func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 		}
 	}
 	// 每个 wrapper 先自己算一遍：哪些入参最终站在独立位置上。
-	// 这样调用点就知道该严还是该松，位置事实不会卡在函数边界上。
+	// 这样调用点就知道该严还是该松。
+	// 只认入参**直接**站在 builder 参数里的情形：先装进切片再展开（GAPS K3）
+	// 算不出来，strict 集合是空的，调用点就放过了。
 	wrapperStrictParams = map[string]map[string]bool{}
 	for grew := true; grew; {
 		grew = false
@@ -510,11 +517,15 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 // 独立评审每次都给出可编译可运行的反例，三条全中。
 //
 // 分类的毛病在于它是我顺手划的，而反例只需要找到分类的边上那一格。
-// 所以现在反过来：**能说出来源的才放行，说不出的一律拒绝**——
+// 所以现在反过来：**能说出来源的才放行，说不出的拒绝**——
+//
+// 这个默认值只管**到了这个函数面前**的表达式。
+// attempt 20 的独立评审指出，有几条路在到这里之前就被跳过了（GAPS K1–K4）：
+// 第二个返回值、经函数变量或接口的调用、切片中转、字段与下标原地写入。
 //
 //	字面量                 源头写在源码里，守边测试扫得到
-//	本函数入参             来源在调用点，而调用点一定会被检查
-//	                       （builder 是迭代发现的，转发参数的函数自己也是 builder）
+//	本函数入参             来源在调用点。调用点按名字认 builder，
+//	                       经函数变量、接口、接收者变量的调用认不出（GAPS K2）
 //	本包声明且值折叠得出来  同上，值在源码里
 //	本包函数 / 方法调用      追进去看它 return 什么，不看它声明的返回类型
 //	本函数赋过值的变量      追那次赋值
@@ -526,8 +537,9 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 //
 // strict 为 false 时（取值型 flag 后面的数据位）只放宽一条：
 // 允许外部包的返回值。那个位置 tmux 只当成 flag 的取值，不会执行它。
-// 这样即使 valueFlags 写错一行，后果也只是「允许了一个外部值」，
-// 而不是整格放行——上一轮评审把布尔 flag 加进那张表，后面那位就完全没人管了。
+// 所以 valueFlags 写错一行（把布尔 flag 列进去），后一位就能放进一个外部值。
+// 那一位实际是独立位置，外部值可能就是一条子命令（GAPS K5）。
+// 这张表写错是真风险，不是「最多放宽一点」。
 func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
 	fn *ast.FuncDecl, params, assigned map[string]bool, declared packageNames,
 	localHelpers, builtinHelpers map[string]bool, strict bool) {
@@ -739,8 +751,10 @@ var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.S
 // `;` 是个常量，于是被当成 flag，后面那个位置就被当成「它的取值」放过了——
 // 可 `;` 在 tmux 里是命令分隔符，它后面正是下一条子命令的位置。
 //
-// **写错这张表的后果被限制住了**：数据位只放宽「允许外部包的返回值」一条，
-// 其余规则照旧。评审上一轮把布尔 flag 加进表后那一位完全没人管，现在不会了。
+// **写错这张表有真后果**：数据位允许外部包的返回值。把布尔 flag 误列进来，
+// 后一位其实是独立位置，却会放进外部值（GAPS K5）。
+// 所以每加一行都要去上游核对这个 flag 真的吃一个取值。
+// 本包实际用到的布尔 flag 是 launch.go 的 `--no-wait`，它**不能**进这张表。
 var valueFlags = map[string]bool{
 	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
 	"--model": true, "--listen": true, "--token": true,

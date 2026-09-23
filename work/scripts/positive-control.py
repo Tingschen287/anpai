@@ -248,6 +248,80 @@ case("外部包返回值直接站在子命令位上", "A20-3", SS, TAIL,
 func bypassExtern() { _ = exec.Command("tmux", os.Getenv("REVIEW_COMMAND")) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
+# —— 已知缺口：注入后守边测试**必须仍然绿** ——
+#
+# owner 2026-09-23 裁定改按有限边界验收。下面是评审找到、这一版不修的绕过。
+# 写成对照，清单就不靠嘴说：哪天某条变红，说明洞补上了，
+# 去 4.eval/results/n037_workbench_attach/boundary-limits.md 把它挪出清单。
+# 反过来，清单里写了、这里注入却变红，说明清单写错了。
+GAPS = []
+def gap(desc, gid, edits):
+    GAPS.append((desc, gid, edits))
+
+SEND_KEYS = "string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115})"
+BT = "internal/agentdeck/upstream_ast_boundary_test.go"
+
+def tail(code):
+    return [(SS, TAIL, TAIL + "\n\n" + code)]
+
+gap("危险值放在第二个返回值", "K1", tail(
+    "func opaquePair() (error, string) { return nil, " + SEND_KEYS + " }\n\n"
+    "func gapSecondReturn() { _, x := opaquePair(); _ = exec.Command(\"tmux\", x) }"))
+
+gap("经函数变量调用 wrapper", "K2a", tail(
+    "func gapWrap(x string) { _ = exec.Command(\"tmux\", x) }\n\n"
+    "func opaqueK2a() string { return " + SEND_KEYS + " }\n\n"
+    "func gapFuncValue() { f := gapWrap; f(opaqueK2a()) }"))
+
+gap("经接口变量调用 wrapper 方法", "K2b", tail(
+    "type gapRunner interface{ Run(string) }\n\n"
+    "type gapR struct{}\n\n"
+    "func (gapR) Run(x string) { _ = exec.Command(\"tmux\", x) }\n\n"
+    "func opaqueK2b() string { return " + SEND_KEYS + " }\n\n"
+    "func gapIface() { var r gapRunner = gapR{}; r.Run(opaqueK2b()) }"))
+
+gap("经接收者变量调用 wrapper 方法", "K2c", tail(
+    "type gapR2 struct{}\n\n"
+    "func (gapR2) Run(x string) { _ = exec.Command(\"tmux\", x) }\n\n"
+    "func opaqueK2c() string { return " + SEND_KEYS + " }\n\n"
+    "func gapRecv() { r := gapR2{}; r.Run(opaqueK2c()) }"))
+
+gap("wrapper 先把入参装进切片再展开", "K3", tail(
+    "func gapSliceWrap(x string) { a := []string{x}; _ = exec.Command(\"tmux\", a...) }\n\n"
+    "func opaqueK3() string { return " + SEND_KEYS + " }\n\n"
+    "func gapSlice() { gapSliceWrap(opaqueK3()) }"))
+
+gap("字段原地改写", "K4a", tail(
+    "type gapP struct{ Name string }\n\n"
+    "func opaqueK4a() string { return " + SEND_KEYS + " }\n\n"
+    "func gapField() { p := gapP{Name: \"list-sessions\"}; p.Name = opaqueK4a(); _ = exec.Command(\"tmux\", p.Name) }"))
+
+gap("切片下标原地改写", "K4b", tail(
+    "func opaqueK4b() string { return " + SEND_KEYS + " }\n\n"
+    "func gapIndex() { a := []string{\"list-sessions\"}; a[0] = opaqueK4b(); _ = exec.Command(\"tmux\", a...) }"))
+
+gap("valueFlags 误列一个布尔 flag，后一位放进外部值", "K5",
+    [(BT, '"--message-file": true,', '"--message-file": true, "--no-wait": true,')] + tail(
+    "func gapFlag() { _ = exec.Command(\"tmux\", \"--no-wait\", os.Getenv(\"REVIEW_COMMAND\")) }"))
+
+def apply_edits(edits):
+    """按顺序改文件，返回原文用于还原；改点找不到返回 None。"""
+    originals = {}
+    for rel, old, new in edits:
+        p = WORK / rel
+        if rel not in originals:
+            originals[rel] = p.read_text()
+        cur = p.read_text()
+        if old not in cur:
+            restore(originals)
+            return None
+        p.write_text(cur.replace(old, new, 1))
+    return originals
+
+def restore(originals):
+    for rel, text in originals.items():
+        (WORK / rel).write_text(text)
+
 def main():
     ok_count = 0
     print("=== attempt 13 阳性对照 ===\n")
@@ -270,6 +344,31 @@ def main():
             print(f"[没红！] {blocker} {desc}  ← 这条测试没在盯着它")
         sys.stdout.flush()
     print(f"\n{ok_count}/{len(CASES)} 处对照按预期变红")
-    return 0 if ok_count == len(CASES) else 1
+
+    print("\n=== 已知缺口（注入后必须仍然绿）===\n")
+    gap_ok = 0
+    for desc, gid, edits in GAPS:
+        originals = apply_edits(edits)
+        if originals is None:
+            print(f"[跳过] {gid} {desc}：改点找不到，缺口对照本身写坏了")
+            continue
+        try:
+            built = subprocess.run(["go", "vet", "./internal/agentdeck/"], cwd=WORK, env=ENV,
+                                   capture_output=True, text=True)
+            red, out = run_test(GUARD + "|TestCommandArgumentsAreBuiltFromConstantsOnly")
+        finally:
+            restore(originals)
+        if built.returncode != 0:
+            # 注入代码编译不过，绿也不说明任何事——这就是假零。
+            print(f"[编译失败] {gid} {desc}  ← 注入代码写错了，这条不算数")
+            print("      " + (built.stdout + built.stderr).strip().splitlines()[-1][:150])
+        elif red:
+            print(f"[变红了] {gid} {desc}  ← 洞已补上，或清单写错了：更新 boundary-limits.md")
+        else:
+            gap_ok += 1
+            print(f"[仍绿] {gid} {desc}")
+        sys.stdout.flush()
+    print(f"\n{gap_ok}/{len(GAPS)} 处已知缺口按清单仍然绿")
+    return 0 if ok_count == len(CASES) and gap_ok == len(GAPS) else 1
 
 sys.exit(main())
