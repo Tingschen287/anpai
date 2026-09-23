@@ -5,7 +5,8 @@ Work Deck 对 upstream agent-deck 的全部依赖列在这里。上游升级时�
 - 这里说的 **upstream agent-deck** 是开源项目 `github.com/asheshgoplani/agent-deck`，
   **不是**本仓自己那个同名的 Agent Deck 启动器。约定见项目的 `2.code/link.md`。
 - 核对过的版本：**Agent Deck v1.15.0**，快照提交 `01c011b`
-- 机器可读的同一份清单在 `manifest.go`，`manifest_test.go` 盯着两者与真实代码一致
+- 机器可读的同一份清单在 `manifest.go`。一致性测试在 `client_test.go`，各自核到哪一步写在 `manifest.go` 头部注释里——
+  不是「清单外的东西一律会红」，例如拼出来的端点路径就看不见
 
 ## 1. 命令行子命令
 
@@ -195,7 +196,9 @@ internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
 > 1. **一个命令叫什么名字，不说明它做了什么。** 加进白名单之前追到底。
 > 2. **声明要有据可查。** 现在每条副作用都带上游源码位置，测试会去核对。
 
-机器可读的同一份声明在 `manifest.go` 的 `SideEffects`，一致性测试盯着两者不漂移。
+机器可读的同一份声明在 `manifest.go` 的 `SideEffects`。`TestEveryAllowedSubcommandDeclaresItsSideEffects`
+要求白名单每条命令都有声明，`TestSideEffectEvidencePointsAtRealUpstreamCode` 拿依据去上游快照核对；
+后者核到哪一步是有边界的（`NotCovered` 不追进去，锚点比对只剔注释），见其注释。
 
 `session send` 是 n037 attempt 6 加的。派评审必须分两步——先起空会话、
 核验上游返回的会话号、再投递 brief——否则 brief 随 launch 出去，

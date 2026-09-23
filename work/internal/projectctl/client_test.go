@@ -59,6 +59,9 @@ func TestPackageExposesNoDispatchAttachOrWriteMethods(t *testing.T) {
 }
 
 // exec 只能出现在 client.go 一处。多一处就意味着绕过了白名单。
+//
+// 按连续文本找 "exec.Command"：别名导入或选择器中间带空白的写法看不见。
+// 跟 TestEachAdapterOnlyTouchesItsOwnUpstream 是同一种查法（那条有对照 GAPS K6、K7），这条本身没做对照。
 func TestExecHappensOnlyInClient(t *testing.T) {
 	dir := "."
 	entries, err := os.ReadDir(dir)
@@ -85,6 +88,9 @@ func TestExecHappensOnlyInClient(t *testing.T) {
 // 仓里有两个 adapter：本包对 Graph 控制器，internal/agentdeck 对 upstream agent-deck。
 // 它们各自是唯一的出口，互相之间也不越界——agentdeck 不许碰账本，
 // 本包不许 exec 上游那个二进制。除这两个包之外，任何地方都不准出现 exec。
+//
+// 这是规则；测试执行到的是「非测试源码里按连续文本找不到 exec.Command」，
+// 不进 testdata 目录。拦不住的写法见对照脚本 GAPS K6、K7。
 func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 	root := moduleRoot(t)
 

@@ -90,7 +90,9 @@ func TestLaunchRequestRefusesUnknownModel(t *testing.T) {
 	}
 }
 
-// 依赖清单不能写完就烂掉：清单里列的字段必须真的是结构体在读的字段。
+// 依赖清单不能写完就烂掉：清单里列的字段必须真的是结构体在读的字段，反过来也一样。
+//
+// 只核下面三个结构体。ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在这里核。
 func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
 	check := func(name string, listed []string, v any) {
 		t.Helper()
@@ -144,6 +146,9 @@ func TestManifestSubcommandsMatchAllowList(t *testing.T) {
 }
 
 // 人读清单与机器清单不能各说各话。
+//
+// 只查一个方向：机器清单里的端点、版本、提交、子命令、环境变量，都要在 MANIFEST.md 里出现。
+// MANIFEST.md 多写了什么，这里不查。
 func TestHumanReadableManifestStaysInSync(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
 	if err != nil {
@@ -180,6 +185,10 @@ func TestHumanReadableManifestStaysInSync(t *testing.T) {
 //
 // 现在扫的是**折叠成常量之后**的字符串，拼接算得出来；
 // 放过的是语法树上那一个变量声明，换个名字就蹭不到了。
+//
+// **它也有边界。** 折叠不出来的字符串（例如运行时用 []byte 拼的）它看不见，
+// 那一类由 TestCommandArgumentsAreBuiltFromConstantsOnly 在命令参数处管，而那条也有拦不住的写法。
+// 拦得住与拦不住的写法见对照脚本与 boundary-limits.md。
 func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
 	forbiddenSub := append([]string{"kill-session", "kill-server", "respawn-pane"},
 		keyInjectionCommands...)
@@ -347,7 +356,12 @@ func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
 	}
 }
 
-// 预览是只读的：命令里不许出现任何会改动会话的动作。
+// 预览是只读的：命令里不许出现会改动会话的动作。
+//
+// **这条按文本逐行扫，有一个跳行规则**：含 "keyInjectionCommands = " 的整行不查
+// （为了放过禁令声明本身）。所以行尾写个这样的注释，同一行的 kill-session 它就看不见
+// （对照脚本 GAPS K8）。同一段注入会让 TestAdapterMayAttachButNeverSendsKeysOrKills 变红
+// （对照 A24-1），这一类由那条语法树守卫接住。
 func TestPreviewPathIsReadOnly(t *testing.T) {
 	forbidden := append([]string{"kill-session", "kill-server", "respawn"}, keyInjectionCommands...)
 	for _, bad := range forbidden {
@@ -458,6 +472,9 @@ func TestManifestListsSocketName(t *testing.T) {
 
 // 源码里请求的每一个端点，都必须在清单里。
 //
+// **它按字面量找**：只认源码里完整写出的 "/api/..."、"/events/..." 字符串。
+// 拼出来的路径（例如 "/api/"+"x"）它看不见，独立评审实测注入这样一个调用仍然绿。
+//
 // 这是原先缺掉的那一半。旧的一致性测试只查「清单列的端点能在源码里找到」，
 // 反过来没人查——于是 `GET /api/menu` 在生产路径上被调了整整一个节点，
 // 依赖清单里却一直没有它，而测试全绿。独立评审把这个单向性挑了出来。
@@ -542,7 +559,10 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 	}
 }
 
-// 每一条副作用断言，都必须有一份真的支撑它的依据。
+// 每一条副作用断言，都必须有一份指向上游真实代码、并与断言对得上的依据。
+//
+// 「对得上」核到哪一步是有边界的：否定断言只追 In 链上的函数，NotCovered 列出的不追进去；
+// 锚点比对只剔注释，字符串字面量里的锚点仍参与匹配。见 boundary-limits.md 第三节。
 //
 // 这条测试被四轮独立评审推着长到现在的样子，每一关都对应一次它曾经放过的假依据：
 //

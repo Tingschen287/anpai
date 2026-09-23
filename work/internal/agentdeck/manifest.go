@@ -5,9 +5,15 @@ import "fmt"
 // 本文件是 Work Deck 对 upstream agent-deck 的依赖清单，逐条列出所用的子命令、
 // 命令行参数、HTTP 端点、依赖的输出字段与 tmux 约定。
 //
-// 它存在的理由：上游一改，这里就是核对基准。清单里的每一项都有测试盯着，
-// 代码用了清单外的东西、或者清单列了代码根本不用的东西，测试都会失败，
-// 所以它不会写完就烂掉。人读版本在同目录的 MANIFEST.md。
+// 它存在的理由：上游一改，这里就是核对基准。人读版本在同目录的 MANIFEST.md。
+//
+// 有测试盯着它不漂移，但**各条测试查到哪一步是有边界的**，不是「清单外的东西一律会红」：
+//   - 字段：只核 LaunchResult、Session、MenuEvent 三个结构体，两个方向都核；
+//     ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在核对范围内。
+//   - 子命令：白名单与测试里写死的那张表必须完全相等。
+//   - 端点：按字面量找源码里的 "/api/..."、"/events/..."；拼出来的路径看不见。
+//   - 人读清单：机器清单里的每一项要在 MANIFEST.md 出现；MANIFEST.md 多写了什么不查。
+// 边界总表见 4.eval/results/n037_workbench_attach/boundary-limits.md。
 
 // UpstreamVersion 是本清单核对过的上游版本。
 const UpstreamVersion = "Agent Deck v1.15.0"

@@ -54,7 +54,8 @@ import (
 //
 // 写的只是一个活动时间戳，不改会话状态、不停会话，但它确实是持久化写入。
 // 白名单的含义因此是「允许的命令」，不是「无副作用的命令」——
-// SideEffects 里逐条记着哪几条会写，manifest_test 盯着这份声明。
+// SideEffects 里逐条记着哪几条会写。client_test.go 的 TestEveryAllowedSubcommandDeclaresItsSideEffects
+// 与 TestSideEffectEvidencePointsAtRealUpstreamCode 核对这份声明，核到哪一步见后者的注释。
 //
 // 这条是独立评审顺着源码追出来的。我读过 `list --json` 那段代码，
 // RefreshInstancesForCLIStatus 就在我查的结构体下面几行，我没追进去看它做什么。
