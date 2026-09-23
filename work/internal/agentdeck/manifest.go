@@ -484,7 +484,8 @@ var EnvVars = []string{"AGENTDECK_PROFILE"}
 //
 // 自 n037 起 Work Deck 会 attach（按 a 走上游 session attach，按 T 直连 tmux），
 // 但一律不发按键：除了 keyInjectionCommands 那一行禁令，包内不出现这些子命令，
-// 两条测试扫源码盯着。
+// 两条测试扫源码盯着——只盯得住对照脚本列出的写法，
+// 盯不住的写法见 GAPS 与 boundary-limits.md；现有代码不含后者，是人工审计的结论。
 // 这段注释在 attempt 6 之前还写着「本轮不 attach」，那是 n036 时的话。
 var TmuxConventions = []string{
 	"会话名形如 agentdeck_<title>_<hash>，由上游生成，Work Deck 只读不拼",

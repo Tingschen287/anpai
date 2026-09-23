@@ -402,10 +402,14 @@ adapter 的 `prepareNested` 在检测到自己处于 tmux 内时，把 `TMUX` �
 进去之后是人在操作真实 CLI。Work Deck 不替他敲任何键：包内没有 `send-keys`，
 测试 `TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着这条。
 
+它盯得住的是对照脚本列出的写法（字面量、拼接、可折叠常量、算出来的字符串经
+本包函数与局部变量中转等）；盯不住的写法列在脚本的 GAPS 里，
+边界与人工审计见 `4.eval/results/n037_workbench_attach/boundary-limits.md`。
+
 
 - 会话名形如 `agentdeck_<title>_<hash>`，由上游生成
 - Work Deck **只读**这个名字，从 `tmuxSession` 字段取，不自己按标题推算
-- 不发按键（包内没有 `send-keys`，`TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着）
+- 不发按键（包内没有 `send-keys`，`TestAdapterMayAttachButNeverSendsKeysOrKills` 在有限边界内盯着，见 5b）
 - attach 自 n037 起已经在用，这一行原先写着「本轮不 attach」，那是 n036 时的话
 
 ## 6. 明确不依赖的东西

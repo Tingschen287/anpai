@@ -140,8 +140,9 @@ var a = ("kill" + "-session")`, "kill-session"},
 //
 // 保留它的理由变了：**盲区得有人记着**。哪天求值器开始处理某一种，
 // 这条会红，提醒人去看边界是不是可以收窄。
-// 真正拦住这些构造的是 TestCommandArgumentsAreBuiltFromConstantsOnly——
+// 管这些构造的是 TestCommandArgumentsAreBuiltFromConstantsOnly——
 // 它盯的是「算出来的字符串能不能成为跑出去的命令参数」，那才是出口。
+// 它也有边界：拦得住对照脚本列出的写法，拦不住 GAPS 列出的写法。
 func TestConstantFolderKnowsItsBlindSpots(t *testing.T) {
 	const src = `package p
 
@@ -537,7 +538,7 @@ func collectIdents(e ast.Expr, into map[string]bool) {
 //
 // strict 为 false 时（取值型 flag 后面的数据位）只放宽一条：
 // 允许外部包的返回值。那个位置 tmux 只当成 flag 的取值，不会执行它。
-// 所以 valueFlags 写错一行（把布尔 flag 列进去），后一位就能放进一个外部值。
+// 所以 valueFlags 写错一行（把 tmux 的布尔选项如 `-u` 列进去），后一位就能放进一个外部值。
 // 那一位实际是独立位置，外部值可能就是一条子命令（GAPS K5）。
 // 这张表写错是真风险，不是「最多放宽一点」。
 func checkNoOpaqueString(t *testing.T, fset *token.FileSet, where string, e ast.Expr,
@@ -754,7 +755,8 @@ var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.S
 // **写错这张表有真后果**：数据位允许外部包的返回值。把布尔 flag 误列进来，
 // 后一位其实是独立位置，却会放进外部值（GAPS K5）。
 // 所以每加一行都要去上游核对这个 flag 真的吃一个取值。
-// 本包实际用到的布尔 flag 是 launch.go 的 `--no-wait`，它**不能**进这张表。
+// 本包实际用到的布尔 flag 是 launch.go 的 `--no-wait`（agent-deck 的），
+// tmux 那边有 `-u` 这类全局布尔选项，它们都**不能**进这张表。
 var valueFlags = map[string]bool{
 	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
 	"--model": true, "--listen": true, "--token": true,
@@ -784,8 +786,11 @@ func findPackageFunc(name string) *ast.FuncDecl { return pkgFuncIndex[name] }
 // 函数被整个跳过，而 `p := build(); exec.Command("tmux", p.Command)` 也是绿的。
 //
 // 两条都是按类型的写法分类。现在改成按**位置**：只看第一个返回值。
-// Go 的惯例是 (值, error)，能流进命令参数的是前者；追 error 那一路
-// 会一路追进 HTTP 错误分支，全是噪音。位置没有别名。
+// 追 error 那一路会一路追进 HTTP 错误分支，全是噪音，所以只追第一个。
+//
+// **这是一个缺口，不是一条事实。** 第二个返回值同样能流进命令参数：
+// `_, x := f(); exec.Command("tmux", x)` 守边测试是绿的（GAPS K1）。
+// 只追第一个，是为了压噪音做的取舍，不是因为别的位置流不进去。
 func returnedExprs(fn *ast.FuncDecl) []ast.Expr {
 	var out []ast.Expr
 	ast.Inspect(fn, func(n ast.Node) bool {

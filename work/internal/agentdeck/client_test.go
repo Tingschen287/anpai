@@ -236,8 +236,12 @@ func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
 // **这是一条真实的边界，写在这里免得被误读。** 独立评审指出：
 // `_test.go` 可以通过 init、TestMain 或普通测试真的执行危险操作，
 // 它不进发布二进制，但会在测试进程和 CI 里跑。
-// 所以守边测试保证的是「发布进二进制的这部分代码不替人敲键、不杀会话」，
-// 不是「这个包的任何一行代码都不会」。名字里的 Adapter 指的就是前者。
+// 所以守边测试只看「发布进二进制的这部分代码」，不看测试文件。
+// 名字里的 Adapter 指的就是这部分。
+//
+// **它也不是保证。** 即使在这部分代码里，它拦得住的也只是对照脚本列出的写法；
+// GAPS 列出的写法（第二个返回值、函数变量与接口调用、切片中转、原地写入）它拦不住。
+// 现有代码不含这些写法，是人工审计的结论，见 boundary-limits.md 第四节。
 func packageASTs(t *testing.T) ([]*ast.File, *token.FileSet) {
 	t.Helper()
 	dir := packageDir(t)

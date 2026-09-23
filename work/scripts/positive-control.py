@@ -309,15 +309,25 @@ gap("切片下标原地改写", "K4b", tail(
     "func opaqueK4b() string { return " + SEND_KEYS + " }\n\n"
     "func gapIndex() { a := []string{\"list-sessions\"}; a[0] = opaqueK4b(); _ = exec.Command(\"tmux\", a...) }"))
 
+# 用 tmux 真实的全局布尔选项 -u。attempt 21 这里用的是 --no-wait，
+# 评审实测它不是 tmux 选项（tmux 只打印 usage），这条对照于是没验证它声称的位置。
+# 本机 tmux 3.4 实测：`tmux -L <不存在> -u list-sessions` 去连 server，即 -u 后一位就是命令。
 gap("valueFlags 误列一个布尔 flag，后一位放进外部值", "K5",
-    [(BT, '"--message-file": true,', '"--message-file": true, "--no-wait": true,')] + tail(
-    "func gapFlag() { _ = exec.Command(\"tmux\", \"--no-wait\", os.Getenv(\"REVIEW_COMMAND\")) }"))
+    [(BT, '"--message-file": true,', '"--message-file": true, "-u": true,')] + tail(
+    "func gapFlag() { _ = exec.Command(\"tmux\", \"-u\", os.Getenv(\"REVIEW_COMMAND\")) }"))
 
 # 跨包那条守卫按文本找 "exec.Command"。给 os/exec 起个别名，它就看不见了。
 gap("adapter 包外用别名导入 os/exec 直接造命令", "K6",
     [("internal/ui/gap_k6.go", None,
       "package ui\n\nimport ex \"os/exec\"\n\n"
       "func gapAliasExec() { _ = ex.Command(\"tmux\", \"send-keys\") }\n")],
+    pkg="./internal/projectctl/", pattern="TestEachAdapterOnlyTouchesItsOwnUpstream")
+
+# 同一条守卫按连续文本找。Go 允许选择器中间有空白，gofmt 之前这是合法代码。
+gap("adapter 包外写 exec . Command（选择器中间带空白）", "K7",
+    [("internal/ui/gap_k7.go", None,
+      "package ui\n\nimport \"os/exec\"\n\n"
+      "func gapSpacedExec() { _ = exec . Command(\"tmux\", \"send-keys\") }\n")],
     pkg="./internal/projectctl/", pattern="TestEachAdapterOnlyTouchesItsOwnUpstream")
 
 def apply_edits(edits):

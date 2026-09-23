@@ -205,9 +205,11 @@ func scanSockets(ctx context.Context, tmuxSession, wantInstanceID string) ([]pro
 //
 // 三种结果，只有一种放行：
 //
-//	恰好一个 server 上有它  → 目标唯一，把 socket 名带回去
-//	一个都没有              → 会话不在了（或身份对不上），拒绝
-//	多个 server 上都有      → 说不清是哪个，拒绝
+//	恰好一个 server 上名字和身份都对上  → 目标唯一，把 socket 名带回去
+//	一个都没对上                        → 拒绝，原因分四种，见 noMatchError
+//	多个 server 上都对上                → 说不清是哪个，拒绝
+//
+// 「一个都没对上」不等于会话不在了：可能同名的是别人、读不到身份、或者探测失败。
 //
 // 返回的 socket 名为 "default" 时给出空串：那就是默认 server，
 // 空串沿用本包一贯的「空即默认」约定。
