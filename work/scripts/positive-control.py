@@ -98,7 +98,7 @@ case("一条 Claim 挂两条落点，第二条没人查", "自查", M,
 					Within: "handleSessionSend",
 				}},''', PAT)
 
-# —— attempt 14：对着第十四轮评审的三条 blocker ——
+# —— attempt 14 加的：对着 attempt 13 评审的三条 blocker ——
 case("Effect 换成同函数里另一个真实但无关的调用", "A14-1", M,
      'Effect: Effect{Kind: EffectCalls, Target: "tmuxSession.Attach"},',
      'Effect: Effect{Kind: EffectCalls, Target: "os.Exit"},', PAT)
@@ -115,7 +115,7 @@ case("命令参数塞一个算出来的字符串", "A14-3", "internal/agentdeck/
      'args = append(args, "attach-session", "-t", exactTarget(tmuxSession))\n\targs = append(args, string([]byte{115, 101, 110, 100, 45, 107, 101, 121, 115}))',
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
-# —— attempt 16：对着第十六轮评审的三条 blocker ——
+# —— attempt 16 加的：对着 attempt 15 评审的三条 blocker ——
 case("Anchor 落在依据行上，却不在被选中那个调用的节点里", "A16-1", M,
      'Anchor: "tmuxSession.Attach(ctx, detachByte)",',
      'Anchor: "if err := tmuxSession",', PAT)
@@ -153,7 +153,7 @@ func instanceIDOf(ctx context.Context, socket, tmuxSession string) (string, bool
 	args := []string{opaqueProbe}''',
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
-# —— attempt 17：对着第十七轮评审的跨函数反例 ——
+# —— attempt 17 加的：对着 attempt 16 评审的跨函数反例 ——
 case("把命令构造包一层，实参从另一个函数拿", "A17-1", "internal/agentdeck/attach.go",
      """	return cmd, note, err
 }""",
@@ -189,7 +189,7 @@ func opaqueBuilder2(command string) { _ = exec.Command(command) }
 func callsIt() { opaqueBuilder2(opaqueViaLocal()) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
-# —— attempt 18：对着第十八轮评审的两条 ——
+# —— attempt 18 加的：对着 attempt 17 评审的两条 ——
 case("用 tmux 的命令分隔符 ; 骗过位置状态机", "A18-1", "internal/agentdeck/attach.go",
      """	return cmd, note, err
 }""",
@@ -216,7 +216,7 @@ func (runnerProbe) command() string { return string([]byte{115, 101, 110, 100, 4
 func bypassViaMethod() { _ = exec.Command("tmux", runnerProbe{}.command()) }""",
      "TestCommandArgumentsAreBuiltFromConstantsOnly")
 
-# —— attempt 20：对着第二十轮评审的三条 ——
+# —— attempt 20 加的：对着 attempt 19 评审的三条 ——
 SS = "internal/agentdeck/socketscan.go"
 TAIL = """	return probes, nil
 }"""
@@ -360,7 +360,7 @@ def restore(originals):
 
 def main():
     ok_count = 0
-    print("=== attempt 13 阳性对照 ===\n")
+    print("=== 阳性对照（改坏必红）===\n")
     for desc, blocker, rel, old, new, pattern, pkg in CASES:
         originals = apply_edits([(rel, old, new)])
         if originals is None:

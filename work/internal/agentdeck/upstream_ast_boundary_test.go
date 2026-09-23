@@ -186,7 +186,7 @@ var a = fmt.Sprintf("send-%s", "keys")`
 // 第二个返回值、函数变量与接口调用、切片中转、字段与下标原地写入，都在拦不住那边。
 // 边界与剩余风险见 4.eval/results/n037_workbench_attach/boundary-limits.md，
 // owner 2026-09-23 裁定按这个有限边界验收。名字保留，是因为改名要连动对照脚本和
-// 八轮评审记录里的引用；读名字的人请先读这一段。
+// 多轮评审记录里的引用；读名字的人请先读这一段。
 func TestCommandArgumentsAreBuiltFromConstantsOnly(t *testing.T) {
 	// 起点只有标准库那两个。**本包里替它们转发参数的函数自己长出来。**
 	//

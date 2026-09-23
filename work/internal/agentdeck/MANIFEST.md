@@ -399,8 +399,10 @@ adapter 的 `prepareNested` 在检测到自己处于 tmux 内时，把 `TMUX` �
 
 ## 5b. 不发按键
 
-进去之后是人在操作真实 CLI。Work Deck 不替他敲任何键：包内没有 `send-keys`，
-测试 `TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着这条。
+进去之后是人在操作真实 CLI。Work Deck 不替他敲任何键：包内不执行 `send-keys`。
+这个词在发布代码里只出现在一处——`manifest.go` 的禁令列表 `keyInjectionCommands`，
+那是拿去上游函数体里搜、证明 session output 不碰它的否定断言，不是要跑的命令。
+测试 `TestAdapterMayAttachButNeverSendsKeysOrKills` 盯着这条，并且只放过那一个声明。
 
 它盯得住的是对照脚本列出的写法（字面量、拼接、可折叠常量、算出来的字符串经
 本包函数与局部变量中转等）；盯不住的写法列在脚本的 GAPS 里，
@@ -409,7 +411,7 @@ adapter 的 `prepareNested` 在检测到自己处于 tmux 内时，把 `TMUX` �
 
 - 会话名形如 `agentdeck_<title>_<hash>`，由上游生成
 - Work Deck **只读**这个名字，从 `tmuxSession` 字段取，不自己按标题推算
-- 不发按键（包内没有 `send-keys`，`TestAdapterMayAttachButNeverSendsKeysOrKills` 在有限边界内盯着，见 5b）
+- 不发按键（包内不执行 `send-keys`，它只出现在禁令列表里；`TestAdapterMayAttachButNeverSendsKeysOrKills` 在有限边界内盯着，见 5b）
 - attach 自 n037 起已经在用，这一行原先写着「本轮不 attach」，那是 n036 时的话
 
 ## 6. 明确不依赖的东西
