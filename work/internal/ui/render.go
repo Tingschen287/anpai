@@ -59,6 +59,9 @@ type Screen struct {
 	DetailOf string
 	// 是否把已验收的节点也列出来。
 	ShowAll bool
+	// 进入会话前要知道的按键用法（嵌套 tmux 时要按两次前缀）。常驻显示在按键说明上方：
+	// 按下 a/T 那一刻的 Notice 只停一帧——交出终端时 bubbletea 立刻退出全屏界面。
+	EnterHint string
 }
 
 // Render 把快照画成一屏。width 是终端宽度。
@@ -256,6 +259,9 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	}
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
+	}
+	if sc.EnterHint != "" {
+		w("%s", styleDim.Render(sc.EnterHint))
 	}
 	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。

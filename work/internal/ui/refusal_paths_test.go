@@ -373,13 +373,13 @@ func TestKeyHintMentionsEveryKeyTheScreenHandles(t *testing.T) {
 // adapter 退到次一等的取数来源时，界面必须把代价说出来。
 //
 // 按 T 的主场景恰好是「服务的菜单看不见这个会话」，那时 adapter 只能从 list
-// 取会话名。list 不含 socket 名，socket 是靠扫本机 tmux server、
+// 取会话名。list 不含 socket 名，socket 是靠扫本用户 tmux socket 目录下的 server、
 // 按会话身份认出来的——走了哪条来源、最后连的是哪个 server，都得在进去之前讲，
 // 进去之后界面就不在屏幕上了。
 func TestDirectAttachTellsYouWhenItFellBack(t *testing.T) {
 	nodes, binds := boundNode()
 	fa := &fakeAttacher{directNote: "菜单里没有这个会话，已改从 list 取 tmux 会话名，" +
-		"并扫描本机 tmux server 按会话身份确认目标只在一处，连的是默认 tmux server。"}
+		"并扫描本用户 tmux socket 目录下的 server，按会话身份确认目标只在一处，连的是默认 tmux server。"}
 	after, cmd := press(modelWithAttacher(t, nodes, fa, binds), 'T')
 
 	if cmd == nil {
@@ -398,6 +398,12 @@ func TestDirectAttachTellsYouWhenItFellBack(t *testing.T) {
 	// 前缀键的话还得在。
 	if !strings.Contains(after.notice, "C-b") {
 		t.Errorf("降级说明把前缀键提示挤掉了：%q", after.notice)
+	}
+	// 上面这行 notice 与交出终端在同一次 Update，真终端上只停一帧。
+	// 回来之后降级说明必须还在，人才读得到。
+	next, _ := after.Update(attachDoneMsg{sessionID: "sess-1"})
+	if back := next.(Model); !strings.Contains(back.notice, "改从 list 取") {
+		t.Errorf("回来之后降级说明没了：%q", back.notice)
 	}
 }
 

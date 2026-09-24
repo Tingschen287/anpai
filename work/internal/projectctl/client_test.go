@@ -96,8 +96,9 @@ func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 
 	// 接口标识 -> 只允许出现在这个包里。
 	//
-	// 这里查的是「真的在调它」的证据：账本文件名、控制器脚本、上游的 HTTP 路径
-	// 和环境变量。光在注释或错误文案里提到上游的名字不算越界，那反而是在说明
+	// 这里查的是「真的在调它」的证据：账本文件名、控制器脚本、上游的两个 HTTP 路径
+	// 和一个环境变量。表里只有下面这几项：现用的 /api/menu 不在表里，
+	// 它出现在 adapter 包外这条不会红（boundary-limits.md 第三节）。光在注释或错误文案里提到上游的名字不算越界，那反而是在说明
 	// 边界在哪；直接写 exec.Command 去 exec 它，会被下面那条 exec 检查抓住。
 	// 那条检查按文本找 "exec.Command"：给 os/exec 起别名（ex.Command）它就看不见，
 	// 对照脚本 GAPS K6 注入的正是这种写法，见 boundary-limits.md。

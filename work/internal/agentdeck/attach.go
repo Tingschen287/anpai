@@ -33,7 +33,7 @@ func interactiveCommand(name string, args ...string) *exec.Cmd {
 // 走的是上游自己的 `session attach`：会话在哪个 tmux socket 上，上游自己最清楚，
 // 这条路不需要本包操心 socket。
 //
-// （socket 名其实是拿得到的，见 DirectTmuxAttachCommand 与 MANIFEST.md 第 7 节。
+// （socket 名其实是拿得到的，见 DirectTmuxAttachCommand 与 MANIFEST.md 第 5 节。
 // 这里不用它，是因为没必要，不是因为取不到。）
 func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
 	if sessionID == "" {
@@ -115,7 +115,7 @@ func (c *Client) PaneOutput(ctx context.Context, sessionID string) (string, erro
 // 与 Sessions 的区别：这是上游菜单的原始形态，含分组层级。
 // tmux 会话名和 socket 名都在里面，直连 tmux 的那条路就靠它取数——
 // socket 名带 omitempty，用默认 server 时字段不出现，空值即默认，
-// 不是「没查到」。见 MANIFEST.md 第 7 节。
+// 不是「没查到」。见 MANIFEST.md 第 5 节。
 func (c *Client) MenuSnapshot(ctx context.Context) (MenuEvent, error) {
 	var out MenuEvent
 	if err := c.get(ctx, "/api/menu", &out); err != nil {
@@ -176,7 +176,7 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 // 我把它写进了注释当作 T 存在的理由，却没想到 T 自己也依赖那个被缓存的接口。
 //
 // `list` 不经服务，看得见；代价是它的行里没有 socket 名（上游结构体里就没这个
-// 字段，见 MANIFEST.md 第 7 节）。socket 名靠扫描本机 tmux server 找回来，
+// 字段，见 MANIFEST.md 第 5 节）。socket 名靠扫描本用户 tmux socket 目录下的 server 找回来，
 // 同时用会话里的 AGENTDECK_INSTANCE_ID 证明目标就是它——
 // 会话名可能撞，也可能被 tmux 的前缀匹配蒙混过去，只有身份是一对一的。
 // 证明不了就拒绝，见 ResolveSocketFor。
@@ -217,7 +217,7 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	// 不带 -L 连上的是默认 server 上那个——连错比连不上严重得多，
 	// 而且它不会报错，你会以为自己进对了地方。
 	//
-	// 所以扫一遍本机所有 tmux server，证明这个名字只在一个上面，
+	// 所以扫一遍本用户 tmux socket 目录下的所有 server，证明这个名字只在一个上面，
 	// 顺便把 socket 名找回来。证明不了就拒绝。
 	// 身份一并传下去：会话名只当查找键，认不认这个会话由 AGENTDECK_INSTANCE_ID 说了算。
 	socketName, err := ResolveSocketFor(ctx, tmuxSession, sessionID)
@@ -236,6 +236,6 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	}
 	note := fmt.Sprintf(
 		"菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名，"+
-			"并扫描本机 tmux server 按会话身份确认目标只在一处，连的是 %s。", where)
+			"并扫描本用户 tmux socket 目录下的 server，按会话身份确认目标只在一处，连的是 %s。", where)
 	return cmd, note, err
 }

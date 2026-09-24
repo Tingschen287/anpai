@@ -444,12 +444,30 @@ func TestAttachTellsAboutPrefixKeyBeforeHandingOverTheTerminal(t *testing.T) {
 		t.Errorf("进错了会话：%v", fa.attached)
 	}
 	// 进去之后就看不见 Work Deck 了，所以话必须在进去之前说。
+	// 这里只证明 notice 字段与渲染结果里有这句话；真终端上它只停一帧，
+	// 人能读到的是常驻那一行，见 TestPrefixKeyAdviceIsOnScreenBeforeAnyKeyPress。
 	if !strings.Contains(after.notice, "按两次 C-b") {
 		t.Errorf("进入前没讲前缀键：%q", after.notice)
 	}
 	out := RenderScreen(after.snap, 100, Screen{Notice: after.notice, NoticeOK: after.noticeOK})
 	if !strings.Contains(out, "按两次 C-b") {
 		t.Error("前缀键提示没画到屏幕上")
+	}
+}
+
+// 前缀键用法要在按下 a/T 之前就常驻在屏幕上。
+//
+// 上一条测试断言的 notice 与交出终端发生在同一次 Update：bubbletea 交出终端时
+// 先停渲染器再退出全屏界面，那行 notice 在真终端上最多停一帧，回来后又被「已返回」盖掉。
+// 所以人真正能读到的是这一行。
+func TestPrefixKeyAdviceIsOnScreenBeforeAnyKeyPress(t *testing.T) {
+	fa := &fakeAttacher{advice: "两层 tmux，按两次 C-b"}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
+	if !strings.Contains(m.View(), "按两次 C-b") {
+		t.Error("还没按键，屏幕上就该有前缀键用法")
+	}
+	if strings.Contains(New(nil).View(), "C-b") {
+		t.Error("没有接管能力时不该提示进入会话的按键")
 	}
 }
 

@@ -64,6 +64,9 @@ type Model struct {
 
 	// 进入会话与预览。没配置时为 nil，按键会说清楚缺什么。
 	attacher Attacher
+	// enterNote 是这次进入前 adapter 给的降级说明（按 T 退到次一等来源时才有）。
+	// 进入前的 notice 在真终端上只停一帧，所以回来之后再说一遍。
+	enterNote string
 	bindings Bindings
 	// 预览内容，非空时占据屏幕下半部分。
 	preview     string
@@ -181,6 +184,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				"。按 p 看一眼那个会话还在不在，按 T 绕开上游直连 tmux，或按 r 刷新", false
 		} else {
 			m.notice, m.noticeOK = "已从会话 "+msg.sessionID+" 返回", true
+		}
+		if m.enterNote != "" {
+			m.notice += "。进入时的说明：" + m.enterNote
+			m.enterNote = ""
 		}
 		if !m.inflight {
 			m.inflight = true
@@ -395,6 +402,8 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// 前缀键的事必须在进去之前讲：进去之后就看不见 Work Deck 了。
+	// 这行 notice 在真终端上只停一帧；人读得到的是常驻那一行（Screen.EnterHint）。
+	m.enterNote = ""
 	m.notice = m.attacher.NestingAdvice()
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
@@ -410,7 +419,7 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 // CLI 刚起的会话它可能一直看不到，这是实测过的。
 //
 // 取数在 adapter 里分两处：先问 `GET /api/menu`（唯一给 socket 名的来源），
-// 菜单里没有这个会话时退到 CLI `list --json`，再扫本机 tmux server 把 socket
+// 菜单里没有这个会话时退到 CLI `list --json`，再扫本用户 tmux socket 目录下的 server 把 socket
 // 名找回来并证明目标唯一。证明不了就拒绝，不盲连。细节见 adapter 的
 // DirectAttachCommand 与 ResolveSocketFor。
 func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
@@ -428,7 +437,7 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 		m.notice, m.noticeOK = err.Error(), false
 		return m, nil
 	}
-	// 带超时：直连要扫本机每个 tmux server，僵死的 server 不该把界面卡住。
+	// 带超时：直连要扫本用户 socket 目录下每个 tmux server，僵死的 server 不该把界面卡住。
 	// adapter 内部对单个探测另有更短的上限，这里是整趟的兜底。
 	//
 	// **这个 deadline 只管解析目标那一段。** 下面 defer 的 cancel 在本函数返回时
@@ -444,6 +453,7 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.notice = "绕开上游，直连 tmux。"
+	m.enterNote = note
 	if note != "" {
 		// adapter 退到了次一等的来源，把代价讲清楚再进去。
 		m.notice += note
@@ -669,5 +679,14 @@ func (m Model) View() string {
 		Detail:      m.detail,
 		DetailOf:    m.detailOf,
 		ShowAll:     m.showAll,
+		EnterHint:   m.enterHint(),
 	})
+}
+
+// enterHint 是常驻在屏幕上的前缀键用法。没有接管能力时不显示。
+func (m Model) enterHint() string {
+	if m.attacher == nil {
+		return ""
+	}
+	return m.attacher.NestingAdvice()
 }

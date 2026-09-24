@@ -378,7 +378,7 @@ func TestIntegrationListSeesWhatTheCachedMenuCannot(t *testing.T) {
 	// 四、socket 名是扫出来的，不是猜的，而且认的是会话身份不是名字。
 	//
 	// list 给不出 socket 名，而不带 -L 盲连会撞上默认 server 的同名会话。
-	// 所以降级路径要扫本机每个 tmux server，用 AGENTDECK_INSTANCE_ID
+	// 所以降级路径要扫本用户 socket 目录下每个 tmux server，用 AGENTDECK_INSTANCE_ID
 	// 确认目标就是它、且只在一处，顺便把 socket 名找回来。
 	// 这里确认扫描结论与命令一致——而且这是真上游派出来的会话，
 	// 它的身份是上游自己写进 tmux 会话环境的。

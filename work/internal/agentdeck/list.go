@@ -11,7 +11,7 @@ import (
 // 注意它和 Session（`/api/sessions` 与菜单事件用的那个）不是同一组字段：
 // 命名风格是 snake_case，**而且没有 socket 名**。
 // 上游 `cmd/agent-deck/main.go:2250` 的 sessionJSON 结构体里就没有那个字段，
-// 所以它不可能出现——这和「字段有但这次为空」是两回事，见 MANIFEST.md 第 7 节。
+// 所以它不可能出现——这和「字段有但这次为空」是两回事，见 MANIFEST.md 第 5 节。
 type ListedSession struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`

@@ -2,8 +2,11 @@ package agentdeck
 
 import "fmt"
 
-// 本文件是 Work Deck 对 upstream agent-deck 的依赖清单，逐条列出所用的子命令、
-// 命令行参数、HTTP 端点、依赖的输出字段与 tmux 约定。
+// 本文件是 Work Deck 对 upstream agent-deck 依赖的机器可读清单：子命令白名单在 client.go，
+// 这里列 launch 的参数、HTTP 端点、部分输出字段、环境变量、各命令的副作用与 tmux 约定。
+// 它不是全集：session output 的 -pane、session send 的 --message-file、list 的 --json
+// 这几个参数，以及 ListedSession、MenuItem、Group 的字段，这里没有机器可读的条目，
+// 只写在 MANIFEST.md 里。
 //
 // 它存在的理由：上游一改，这里就是核对基准。人读版本在同目录的 MANIFEST.md。
 //
@@ -29,7 +32,9 @@ var CLIJSONFields = []string{"id", "title", "tool", "status", "path", "group", "
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
 var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wait"}
 
-// WebFlags 是 Work Deck 启动 headless 服务时用的全部参数。
+// WebFlags 是集成测试起 headless 服务时用的参数（integration_test.go）。
+// 发布代码不启动 web：Work Deck 连配置里 upstream_addr 指向的现成服务。
+// 没有测试核对这份列表。
 var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
 // Evidence 是一条断言在上游源码里的落点：某一行代码。
@@ -51,8 +56,9 @@ func (e Evidence) String() string { return fmt.Sprintf("%s:%d", e.Path, e.Line) 
 
 // EffectKind 是上游可能做的几类事。**它是封闭的**，这一点是关键。
 //
-// 自由文本可以写任何话，枚举不行：想说一件这里没有的事，
-// 你连个 Kind 都挑不出来。
+// 自由文本可以写任何话，枚举至少把「说的是哪一类事」收窄了。
+// 光有枚举不够：attempt 13 的评审在同一个函数里挑了另一件真实但无关的调用，
+// 照样通过。所以还要配合落点核对，见 Evidence 与测试。
 type EffectKind int
 
 const (
@@ -98,7 +104,7 @@ func (k EffectKind) String() string {
 //	Effect{Kind: EffectCalls, Target: "PreviewFull", ...}
 //	→ 测试去 handleSessionOutput 的语法树里找这个调用，找不到就红
 //
-// 假话编不出来：语法树里没有的调用，写上去就是红的。
+// 语法树里没有的调用，写上去就是红的。能核到哪一步有边界，见 boundary-limits.md。
 // 人读的解释一律放在**代码注释**里——注释不参与核对，
 // 也就不会被误当成有依据的断言。
 type Effect struct {
@@ -182,7 +188,7 @@ type Absence struct {
 // 没有第三个字段。人读的解释写在每条 Claim 上方的注释里——
 // 注释是注释，不会被当成有依据的断言。
 //
-// 这一条来之不易，五轮独立评审换的：
+// 这一条来之不易，六轮独立评审换的：
 // attempt 7 把 list 当成只读；attempt 8 把 attach/output 硬编码成「不写」；
 // attempt 9 补了依据但核对测试形同虚设；attempt 10 的锚点可以跟声明毫不相干；
 // attempt 11 的 What 是自由文本，一个 token 命中就整条放行；
@@ -239,9 +245,10 @@ var SharedStorageInit = SideEffect{
 // 下面 session output 的否定断言拿它去上游函数体里搜，证明那条路不碰它们。
 //
 // 守边测试 TestAdapterMayAttachButNeverSendsKeysOrKills 会放过这个声明，
-// 但**它认的是语法树上的这个变量**，不是「哪一行文本里有这个名字」。
-// 上一轮是按行文本跳过的，于是 alternatekeyInjectionCommands 这种名字
-// 也能蹭过去；这一轮换个名字就蹭不到了。
+// 它认的是语法树上的这个变量，不是「哪一行文本里有这个名字」，
+// 所以另起一个名字含这个子串的变量蹭不过去（对照脚本 B4）。
+// 另一条 TestPreviewPathIsReadOnly 仍按行文本跳过含 `keyInjectionCommands = ` 的整行，
+// 那是已知缺口 K8；同一段注入会让前一条变红（对照 A24-1）。
 var keyInjectionCommands = []string{"send-keys", "paste-buffer"}
 
 // SideEffects 逐条记下白名单里每条命令在上游留下什么。
@@ -389,13 +396,13 @@ var SideEffects = map[string]SideEffect{
 				}},
 			},
 			{
-				// 取画面这条路上的两个函数体里不出现替人敲键的子命令。
+				// 取画面这条路上，In 列的五个函数体里不出现替人敲键的子命令。
 				//
 				// **这条证明比它听起来的窄得多。** NotCovered 里那一长串
-				// 就是这两个函数体调用了、而本证明追不进去的东西——
-				// 二十七个。上游 internal/tmux/tmux.go 另有 21 处调用
-				// 这些子命令，所以「上游不发按键」是句假话；
-				// 能证的只有「我们走的这两个函数体里没有」。
+				// 就是这五个函数体调用了、而本证明追不进去的东西——
+				// 三十一个。上游 internal/tmux/tmux.go 另有 8 处把这些子命令
+				// 交给 tmux 的调用（快照 01c011b），所以「上游不发按键」是句假话；
+				// 能证的只有「我们走的这五个函数体里没有」。
 				Effect: Effect{Kind: EffectAbsent, Target: keyInjectionCommands[0]},
 				Absence: &Absence{
 					In: []FuncRef{
@@ -463,7 +470,8 @@ var SideEffects = map[string]SideEffect{
 	},
 }
 
-// HTTPEndpoints 是 Work Deck 会请求的全部端点。
+// HTTPEndpoints 是 Work Deck 会请求的端点。
+// TestEveryEndpointInSourceIsListed 按字面量核对源码里的端点都在这里，拼出来的路径看不见。
 var HTTPEndpoints = []string{"/api/sessions", "/api/menu", "/events/menu"}
 
 // LaunchFields 是 Work Deck 从 launch --json 里读的字段。
@@ -497,9 +505,9 @@ var TmuxConventions = []string{
 	"会话名形如 agentdeck_<title>_<hash>，由上游生成，Work Deck 只读不拼",
 	"会话名从 /api/sessions 或 /api/menu 的 tmuxSession 字段取，不自己根据标题推算",
 	"服务缓存看不见刚 launch 的会话时，会话名改从 list --json 的 tmux_session 取",
-	"socket 名只有 /api/menu 给，list --json 的行里没有这个字段；空值即默认 server",
-	"socket 名拿不到时，扫 $TMUX_TMPDIR（或 /tmp/tmux-<uid>）下每个 socket 跑 has-session，" +
-		"证明会话名只在一个 server 上才连；多个或零个都拒绝",
+	"socket 名在 HTTP 的会话对象里有（tmuxSocketName），list --json 的行里没有这个字段；空值即默认 server",
+	"socket 名拿不到时，扫 $TMUX_TMPDIR/tmux-<uid>（未设时 /tmp/tmux-<uid>）下每个 socket，" +
+		"会话名与 AGENTDECK_INSTANCE_ID 都对上的恰好一个 server 才连；多个或零个都拒绝",
 	"has-session 与 show-environment 都只查询，不改会话状态——" +
 		"各跑三次实测 session_activity 不变（前后两次都取到了值，不是空对空）；死 socket 会报错，自然跳过",
 	"目标一律用 tmux 的精确形式 =<session>：不带等号时 -t 是前缀匹配，" +

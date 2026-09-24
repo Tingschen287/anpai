@@ -44,7 +44,7 @@ func (e *ErrAmbiguousTmuxTarget) Error() string {
 		e.Session, len(e.Sockets), e.Sockets)
 }
 
-// tmuxSocketDir 是本机 tmux socket 的存放目录。
+// tmuxSocketDir 是本用户 tmux socket 的存放目录。
 //
 // tmux 的约定：$TMUX_TMPDIR 优先，否则 /tmp/tmux-<uid>。
 func tmuxSocketDir() string {
@@ -178,7 +178,7 @@ func probeSocket(ctx context.Context, socket, tmuxSession, wantInstanceID string
 	}
 }
 
-// scanSockets 扫本机每一个 tmux server，把每个的探测结论都带回来。
+// scanSockets 扫 socket 目录下每一个 tmux server，把每个的探测结论都带回来。
 //
 // 死掉的 socket 文件会留在目录里，对它们探测会失败并落进 probeNoSession；
 // 僵死但仍在监听的 server 由 probeTimeout 兜着，不会拖住调用方。
@@ -296,8 +296,8 @@ func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown, unava
 	}
 	if wantInstanceID != "" {
 		return fmt.Errorf(
-			"本机没有任何 tmux server 上有会话 %s 且身份对得上 %s：它可能已经结束了",
+			"socket 目录下没有任何 tmux server 上有会话 %s 且身份对得上 %s：它可能已经结束了",
 			tmuxSession, wantInstanceID)
 	}
-	return fmt.Errorf("本机没有任何 tmux server 上有会话 %s，它可能已经结束了", tmuxSession)
+	return fmt.Errorf("socket 目录下没有任何 tmux server 上有会话 %s，它可能已经结束了", tmuxSession)
 }
