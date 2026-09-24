@@ -36,7 +36,8 @@ const HeartbeatFreshWithin = 15 * time.Second
 // Intake 是一轮取数的体检结果。
 //
 // 它存在的理由：inbox export 返回空数组有三种可能——真没有、notify-daemon 没在记录、
-// 读取本身失败。三种看起来一模一样。队列为空只有在第一种情况下才能这么说。
+// 读取本身失败。三种看起来一模一样；而且即使各项自检都过，也确认不了在跑的 daemon
+// 写的就是当前数据目录，所以 Work Deck 从不说「队列为空」。
 type Intake struct {
 	CheckedAt time.Time
 	// Configured 为 false 表示没配置 upstream agent-deck，根本没去取。
@@ -126,7 +127,8 @@ func (in Intake) Alert() string {
 	return ""
 }
 
-// Healthy 是来源可信时给人看的一句依据；有告警时返回空串。
+// Healthy 是自检全过时给人看的依据；有告警时返回空串。
+// 自检全过也不等于能说「队列为空」：见界面的 unconfirmedEmpty。
 func (in Intake) Healthy() string {
 	if in.Alert() != "" {
 		return ""

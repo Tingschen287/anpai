@@ -29,3 +29,20 @@ func TestOnceRenderCarriesTheQueueAlert(t *testing.T) {
 		t.Errorf("没配置上游，--once 必须说明运行时来源取不到：\n%s", out)
 	}
 }
+
+// --once 与交互界面用同一套 Graph 合并判断：取数失败的空快照不结案旧门。
+func TestOnceKeepsGatesWhenTheSnapshotFailed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("WORKDECK_CONFIG", filepath.Join(dir, "config.json"))
+	gate := projectctl.Node{ID: "g1", Kind: "human_gate", Risk: "high",
+		State: projectctl.Known(projectctl.StateReady), Attempt: projectctl.Unknown[int]("没开过工")}
+	renderOnce(context.Background(), projectctl.Snapshot{ProjectID: "p", Nodes: []projectctl.Node{gate}}, "p", 100)
+	out := renderOnce(context.Background(), projectctl.Snapshot{ProjectID: "p", Problems: []string{"brief 失败"}}, "p", 100)
+	if !strings.Contains(out, "1 条待你拍板") {
+		t.Errorf("取数失败的空快照不该让门离开队列：\n%s", out)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "queue.json"))
+	if !strings.Contains(string(data), `"status": "open"`) {
+		t.Errorf("落盘的门应当仍是 open：\n%s", data)
+	}
+}

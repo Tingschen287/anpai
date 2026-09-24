@@ -113,12 +113,31 @@ func contains(list []string, s string) bool {
 // 这一轮没再出现的旧条目：graph 条目说明节点已换状态，open 的标为 resolved；
 // session 条目只标 Present=false（记录可能被 conductor drain 走了，owner 未必看过）。
 func (s *Store) Merge(kind string, fresh []Item, now time.Time) (int, error) {
+	return s.mergeKeeping(kind, fresh, now, nil)
+}
+
+// mergeKeeping 与 Merge 相同，另外 keep 返回真的旧条目即使这一轮没出现也原样保留
+// （不转 resolved、不标 present=false）。用于「这一轮没取到它的状态」的情形。
+func (s *Store) mergeKeeping(kind string, fresh []Item, now time.Time, keep func(Item) bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 落盘失败时整轮退回：先留一份原样。
+	backup := make(map[string]Item, len(s.items))
+	for id, it := range s.items {
+		backup[id] = *it
+	}
+	restore := func() {
+		s.items = make(map[string]*Item, len(backup))
+		for id, it := range backup {
+			it := it
+			s.items[id] = &it
+		}
+	}
 	seen := map[string]bool{}
 	added := 0
 	for _, f := range fresh {
 		if f.Source.Kind != kind {
+			restore()
 			return 0, fmt.Errorf("条目 %s 的来源是 %q，不是这一轮合并的 %q", f.ID, f.Source.Kind, kind)
 		}
 		seen[f.ID] = true
@@ -146,6 +165,9 @@ func (s *Store) Merge(kind string, fresh []Item, now time.Time) (int, error) {
 		if it.Source.Kind != kind || seen[id] {
 			continue
 		}
+		if keep != nil && keep(*it) {
+			continue
+		}
 		switch kind {
 		case SourceGraph:
 			if it.Status == StatusOpen {
@@ -155,7 +177,11 @@ func (s *Store) Merge(kind string, fresh []Item, now time.Time) (int, error) {
 			it.Source.Present = false
 		}
 	}
-	return added, s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		restore()
+		return 0, err
+	}
+	return added, nil
 }
 
 // Record 记下 owner 对一个条目的回答，并落盘。

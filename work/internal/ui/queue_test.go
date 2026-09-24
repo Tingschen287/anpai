@@ -88,11 +88,20 @@ func TestQueueIsNotCalledEmptyBeforeTheFirstPoll(t *testing.T) {
 	}
 }
 
-// 只有 daemon 在跑、读取成功、确实没有条目时，才说空。
-func TestQueueIsCalledEmptyOnlyWhenTheSourcesAreTrustworthy(t *testing.T) {
-	m := polled(t, queueModel(t, &fakeInbox{st: agentdeck.WriterStatus{Running: true}}, nil))
-	if out := m.View(); !strings.Contains(out, "决策队列为空") {
-		t.Errorf("来源可信且没有条目时应当说空：\n%s", out)
+// 自检全过、确实没有条目时，也不说「队列为空」：确认不了在跑的 daemon 写的是当前数据目录。
+// 本目录的 daemon 刚退出、心跳还在 15 秒内、本机另有 daemon 在跑时，自检就是全过的。
+func TestQueueIsNeverCalledEmpty(t *testing.T) {
+	m := polled(t, queueModel(t, &fakeInbox{st: agentdeck.WriterStatus{Running: true, LastHeartbeat: time.Now()}}, nil))
+	out := m.View()
+	if strings.Contains(out, "队列为空") {
+		t.Errorf("任何情况下都不该说队列为空：\n%s", out)
+	}
+	if !strings.Contains(out, "无法确认当前数据目录的 notify-daemon 在跑") || !strings.Contains(out, "空不代表没有") {
+		t.Errorf("自检全过又没有条目时，要说明确认不了：\n%s", out)
+	}
+	m, _ = press(m, 'i')
+	if out := m.View(); strings.Contains(out, "队列为空") || !strings.Contains(out, "空不代表没有") {
+		t.Errorf("队列视图里也不能说空：\n%s", out)
 	}
 }
 

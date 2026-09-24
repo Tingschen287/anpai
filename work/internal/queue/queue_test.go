@@ -535,3 +535,57 @@ func TestFailedFlushLeavesNoPhantomInFlight(t *testing.T) {
 		t.Errorf("落盘失败后内存里不该留下在途标记：%+v", it.Answer)
 	}
 }
+
+// 快照没取全时不能结案旧门：整份没取到就不合并；某个门状态取不到就保留它。
+func TestMergeGraphDoesNotResolveGatesItCouldNotSee(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	snap := fixtureSnapshot()
+	MergeGraph(s, snap, nil, "p", t0)
+	gate := "graph:f06_owner_gate#0:ready"
+	if it, ok := s.Get(gate); !ok || it.Status != StatusOpen {
+		t.Fatalf("门应当在队列里：%+v", it)
+	}
+
+	// 整份没取到：零节点、带问题。
+	if _, skipped, _ := MergeGraph(s, projectctl.Snapshot{Problems: []string{"brief 失败"}}, nil, "p", t0); !skipped {
+		t.Error("零节点带问题的快照应当跳过")
+	}
+	if it, _ := s.Get(gate); it.Status != StatusOpen {
+		t.Errorf("没取到的快照不该结案门：%s", it.Status)
+	}
+
+	// 这个门的状态取不到。
+	partial := fixtureSnapshot()
+	for i := range partial.Nodes {
+		if partial.Nodes[i].ID == "f06_owner_gate" {
+			partial.Nodes[i].State = projectctl.Unknown[projectctl.State]("brief 超时")
+		}
+	}
+	partial.Problems = []string{"f06 brief 超时"}
+	MergeGraph(s, partial, nil, "p", t0)
+	if it, _ := s.Get(gate); it.Status != StatusOpen {
+		t.Errorf("状态取不到的门不该结案：%s", it.Status)
+	}
+
+	// 合法的空 Graph：结案。
+	MergeGraph(s, projectctl.Snapshot{}, nil, "p", t0)
+	if it, _ := s.Get(gate); it.Status != StatusResolved {
+		t.Errorf("合法的空 Graph 应当结案旧门：%s", it.Status)
+	}
+}
+
+// Merge 落盘失败时整轮退回，不留下没持久化的条目。
+func TestFailedMergeFlushRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(filepath.Join(dir, "queue.json"))
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0)}, t0), t0)
+	os.Chmod(dir, 0o500)
+	defer os.Chmod(dir, 0o700)
+	_, err := s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0), waiting("c2", "h2", t0)}, t0), t0)
+	if err == nil {
+		t.Skip("当前环境下目录只读没能挡住写入（可能以 root 运行），跳过")
+	}
+	if n := len(s.Items()); n != 1 {
+		t.Errorf("落盘失败后应当退回 1 条，实际 %d", n)
+	}
+}

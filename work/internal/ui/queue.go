@@ -94,22 +94,16 @@ func (m Model) pollQueue() tea.Cmd {
 	}
 }
 
-// mergeGraph 把当前快照里的 Graph 门并进队列。
+// mergeGraph 把当前快照里的 Graph 门并进队列。判断在 queue.MergeGraph 里，与 --once 共用。
 func (m Model) mergeGraph() string {
 	if m.qw.store == nil {
 		return ""
 	}
-	// 零节点又带着取数问题，是没取到，不是 Graph 真的空了：不合并，免得把门误标成「已不等」。
-	// 零节点且没有问题，是合法的空 Graph：照常合并，旧门转为 resolved。
-	if len(m.snap.Nodes) == 0 && len(m.snap.Problems) > 0 {
-		return ""
-	}
-	now := time.Now()
 	var b queue.Bindings
 	if m.bindings != nil {
 		b = m.bindings
 	}
-	if _, err := m.qw.store.Merge(queue.SourceGraph, queue.FromGraph(m.snap, b, m.qw.script, now), now); err != nil {
+	if _, _, err := queue.MergeGraph(m.qw.store, m.snap, b, m.qw.script, time.Now()); err != nil {
 		return "决策队列落盘失败：" + err.Error()
 	}
 	return ""
@@ -286,7 +280,9 @@ func renderQueueSummary(q QueueScreen, openCount int, w func(string, ...any)) {
 	case q.Alert != "" || q.Healthy == "":
 		w("%s", styleDim.Render("决策队列暂无条目——但来源不可信，这不代表没有待决事项（按 i 打开）"))
 	default:
-		w("%s", styleDim.Render("决策队列为空："+q.Healthy+"，Graph 里也没有门在等（按 i 打开）"))
+		// 即使各项自检都过，也不说「为空」：上游心跳不带进程号，确认不了在跑的 daemon
+		// 写的就是当前数据目录（本目录的 daemon 刚退出、别的目录的 daemon 在跑时，自检照样全过）。
+		w("%s", styleAlert.Render(unconfirmedEmpty(q.Healthy)))
 	}
 	if q.Foreign != "" {
 		w("%s", styleDim.Render(q.Foreign))
@@ -306,7 +302,7 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 		if q.Alert != "" || q.Healthy == "" {
 			w("%s", styleAlert.Render("队列里暂无条目，但来源不可信，不能当作没有待决事项"))
 		} else {
-			w("%s", styleDim.Render("队列为空："+q.Healthy))
+			w("%s", styleAlert.Render(unconfirmedEmpty(q.Healthy)))
 		}
 		w("%s", styleDim.Render("i/Esc 返回　r 立即重取"))
 		return
@@ -369,6 +365,12 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 		}
 	}
 	w("%s", styleDim.Render("↑↓ 选　数字 选选项（再按 y 确认）　R/K 结案中断的投递　r 立即重取　i/Esc 返回"))
+}
+
+// unconfirmedEmpty 是自检全过、队列里又没有条目时的说法。Work Deck 从不说「队列为空」。
+func unconfirmedEmpty(evidence string) string {
+	return "决策队列暂无条目，但无法确认当前数据目录的 notify-daemon 在跑（上游心跳不带进程号；" +
+		evidence + "）：空不代表没有"
 }
 
 func statusLabel(s string) string {

@@ -212,7 +212,7 @@ func onceQueue(ctx context.Context, snap projectctl.Snapshot, script string) (ui
 	if _, bs, err := buildAttacher(); err == nil {
 		b = bs
 	}
-	if _, err := store.Merge(queue.SourceGraph, queue.FromGraph(snap, b, script, now), now); err != nil {
+	if _, _, err := queue.MergeGraph(store, snap, b, script, now); err != nil {
 		return ui.QueueSnapshot(nil, queue.Intake{}, err)
 	}
 	var up queue.Upstream
