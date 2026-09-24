@@ -33,9 +33,12 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   按 T 直连时先问 `/api/menu`，问不到才退到它。
 - `session send` 用于派评审的第二步：先起空会话、核验上游返回的会话号，再投递 brief。
   加它不放开 `session` 底下别的命令，二级匹配照旧生效。n038 起它也是决策队列回答的投递口。
-- **n039 起 `SendMessage` 与 `DeliverAnswer` 必须带一张 `lease.Permit`**，在执行 `session send` 之前核对：
-  owner 接管着、等确认交还、租约过期、持有者未知，都投不进去。许可只能由 `internal/lease` 签发，
+- **n039 起 `SendMessage` 与 `DeliverAnswer` 必须带一张 `lease.Permit`**，在执行 `session send` 之前核对并登记「投递进行中」：
+  写入权记账登记为 owner 接管着、等确认交还、租约过期、持有者未知时不投。许可只能由 `internal/lease` 签发，
   `TestEveryWriteIntoASessionNeedsAPermit` 核对包内往会话写字的上游调用只有 `SendMessage` 一处且先核许可。
+  边界：记账只知道经 Work Deck 的接管；不经 Work Deck 的接入由 arbiter 在投递前用 `AttachedClients`（tmux `list-clients`）查，
+  查询与送达之间有人进来仍然看不见。`launch -m` 的首条消息随新会话一起创建，不经许可（会话此前不存在），
+  但记账停用时 arbiter 不起会话。
 - **实测（n039）**：对 shell 会话，上游 `session send` 判「已提交」看正文是否还在输入区；shell 的
   `xxx: command not found` 回显会干扰这个判断，某些 ASCII 单词会被报成「reached the pane but submission was never
   confirmed」（issue #1793）而以退出码 1 失败。派评审时首条 brief 被这样误报，派工器会按「没送进去」拒绝并留下半成品会话。
@@ -264,7 +267,9 @@ tmux -L s has-session -t '=target-suffix'  → exit 0
 **为什么还要比身份**：名字会撞，也会被前缀蒙混。`AGENTDECK_INSTANCE_ID` 是上游建会话时写进会话环境的
 （第 1 节 `launch` 那行），和 session id 一对一。
 
-`has-session` 与 `show-environment` 只查询。曾各跑三次实测，`session_activity` 不变（前后都取到了值，不是空对空）。
+`has-session` 与 `show-environment` 只查询。
+
+n039 另加 `list-clients -t =<session> -F #{client_tty}`（`clients.go` 的 `AttachedClients`）：数一个会话连着几个 tmux 客户端，只查询，用来发现不经 Work Deck 的接管。曾各跑三次实测，`session_activity` 不变（前后都取到了值，不是空对空）。
 
 ### 嵌套
 
