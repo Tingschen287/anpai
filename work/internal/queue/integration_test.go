@@ -100,11 +100,14 @@ func treeDigest(t *testing.T, dir string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// notify-daemon 没在跑时必须告警；心跳陈旧也得告警；心跳新鲜时还要看进程表。
-// 上游 writer-status 不论结果退出码都是 0，只能看 running 字段。
+// notify-daemon 没在跑时必须告警。三种心跳都用真实二进制跑：
+//   - 没有心跳、心跳 10 分钟前：上游答 not running，告警。
+//   - 心跳 40 秒前：上游仍答 running（90 秒窗口内），Work Deck 按自己的 15 秒门槛告警——daemon 刚退出就是这样。
+//   - 心跳新鲜：看进程表。本测试不启动 daemon，本机通常没有 daemon 进程，必须告警。
+//     本机恰好有 daemon 时，这一步模拟不出「本目录的 daemon 已退出」（进程表分不出数据目录），
+//     不做断言，只记一笔——那正是 test-report 写明的剩余窗口。
 //
-// 本测试不启动 daemon。心跳是测试手写的，本机进程表里通常没有 daemon——
-// 这正是「心跳新鲜但进程已退出」那种情形，必须告警。本机恰好有 daemon 在跑时，按实况断言。
+// 上游 writer-status 不论结果退出码都是 0，只能看 running 字段。
 func TestIntegrationWriterStatusDrivesTheAlert(t *testing.T) {
 	bin := upstreamBin(t)
 	data := fixtureDataHome(t)
@@ -126,23 +129,30 @@ func TestIntegrationWriterStatusDrivesTheAlert(t *testing.T) {
 		t.Error("daemon 不在时，夹具里已有的记录照样该读出来")
 	}
 
+	writeHeartbeat(t, data, time.Now().Add(-10*time.Minute))
+	in, _ = Poll(ctx, c, time.Now())
+	if in.Writer.Running || in.Alert() == "" || in.Writer.AgeSeconds < 500 {
+		t.Fatalf("心跳陈旧时必须告警：%+v alert=%q", in.Writer, in.Alert())
+	}
+
+	writeHeartbeat(t, data, time.Now().Add(-40*time.Second))
+	in, _ = Poll(ctx, c, time.Now())
+	if !in.Writer.Running {
+		t.Fatalf("心跳 40 秒前，上游应当仍答 running（这正是要补的窗口）：%+v", in.Writer)
+	}
+	if !strings.Contains(in.Alert(), "秒没更新") {
+		t.Fatalf("心跳过了 15 秒门槛必须告警：%q", in.Alert())
+	}
+
 	writeHeartbeat(t, data, time.Now())
 	in, _ = Poll(ctx, c, time.Now())
 	if !in.Writer.Running {
 		t.Fatalf("心跳新鲜时 writer-status 应当答 running：%+v", in.Writer)
 	}
 	if hostDaemon {
-		if in.Alert() != "" {
-			t.Fatalf("心跳新鲜且进程在时不该告警：%q", in.Alert())
-		}
+		t.Log("本机有 notify-daemon 进程：进程表分不出数据目录，这一步不做断言")
 	} else if !strings.Contains(in.Alert(), "进程表里找不到") {
-		t.Fatalf("心跳新鲜但进程不在，必须告警：%q", in.Alert())
-	}
-
-	writeHeartbeat(t, data, time.Now().Add(-10*time.Minute))
-	in, _ = Poll(ctx, c, time.Now())
-	if in.Writer.Running || in.Alert() == "" || in.Writer.AgeSeconds < 500 {
-		t.Fatalf("心跳陈旧时必须告警：%+v alert=%q", in.Writer, in.Alert())
+		t.Fatalf("心跳新鲜但本机没有 daemon 进程，必须告警：%q", in.Alert())
 	}
 }
 

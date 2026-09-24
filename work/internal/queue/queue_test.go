@@ -385,7 +385,9 @@ func TestPollChecksWriterFirstAndAlertsLoudly(t *testing.T) {
 		"自检失败":       {stErr: errors.New("exit 1")},
 		"读取失败":       {st: agentdeck.WriterStatus{Running: true}, recErr: errors.New("exit 1")},
 		"心跳新鲜但进程已退出": {st: agentdeck.WriterStatus{Running: true}, procDown: true},
-		"查不了进程表":     {st: agentdeck.WriterStatus{Running: true}, procErr: errors.New("permission denied")},
+		// 上游仍答 running（90 秒窗口内），但心跳已 30 秒没更新：daemon 多半刚退出。
+		"心跳过了 15 秒门槛": {st: agentdeck.WriterStatus{Running: true, LastHeartbeat: t0.Add(-30 * time.Second)}},
+		"查不了进程表":      {st: agentdeck.WriterStatus{Running: true}, procErr: errors.New("permission denied")},
 	}
 	for name, up := range cases {
 		in, _ := Poll(context.Background(), up, t0)
@@ -482,5 +484,54 @@ func TestItemsMatchTheSchema(t *testing.T) {
 		if !reflect.DeepEqual(pair[0], pair[1]) {
 			t.Errorf("%s 枚举对不上：schema %v，代码 %v", name, pair[0], pair[1])
 		}
+	}
+}
+
+// 投递中断后，owner 预览确认，再下结论：没收到就能重新回答并投递一次；收到了就标为已回答。
+func TestInterruptedDeliveryCanBeSettledAfterCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	s, _ := Open(path)
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0), waiting("c2", "h2", t0)}, t0), t0)
+	items := s.Items()
+	lost, got := items[0].ID, items[1].ID
+	s.MarkInFlight(lost, "continue", t0)
+	s.MarkInFlight(got, "continue", t0)
+	s2, _ := Open(path) // 崩溃后重开
+
+	it, err := s2.ResolveInFlight(lost, false, t0)
+	if err != nil || it.Status != StatusOpen || it.Answer != nil {
+		t.Fatalf("确认没收到后应当回到待拍板、清掉标记：%+v %v", it, err)
+	}
+	d := &fakeDeliverer{}
+	if it, err := Respond(context.Background(), s2, d, lost, "continue", t0); err != nil || !it.Answer.Delivered {
+		t.Fatalf("清掉标记后应当能重新投递：%+v %v", it, err)
+	}
+	if len(d.calls) != 1 {
+		t.Errorf("重新投递应当恰好一次，实际 %d", len(d.calls))
+	}
+
+	it, err = s2.ResolveInFlight(got, true, t0)
+	if err != nil || it.Status != StatusAnswered || !it.Answer.Delivered || it.Answer.InFlight {
+		t.Fatalf("确认收到后应当已回答：%+v %v", it, err)
+	}
+	if _, err := s2.ResolveInFlight(got, true, t0); err == nil {
+		t.Error("没有中断投递的条目不该再结案")
+	}
+}
+
+// 落盘失败时内存退回原样：不能留下一个实际没发的在途标记，等下一次落盘带上去。
+func TestFailedFlushLeavesNoPhantomInFlight(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "queue.json")
+	s, _ := Open(path)
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0)}, t0), t0)
+	id := s.Items()[0].ID
+	os.Chmod(dir, 0o500) // 目录不可写：临时文件建不出来
+	defer os.Chmod(dir, 0o700)
+	if err := s.MarkInFlight(id, "continue", t0); err == nil {
+		t.Skip("当前环境下目录只读没能挡住写入（可能以 root 运行），跳过")
+	}
+	if it, _ := s.Get(id); it.Answer != nil {
+		t.Errorf("落盘失败后内存里不该留下在途标记：%+v", it.Answer)
 	}
 }

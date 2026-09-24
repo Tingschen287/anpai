@@ -96,7 +96,12 @@ func (m Model) pollQueue() tea.Cmd {
 
 // mergeGraph 把当前快照里的 Graph 门并进队列。
 func (m Model) mergeGraph() string {
-	if m.qw.store == nil || len(m.snap.Nodes) == 0 {
+	if m.qw.store == nil {
+		return ""
+	}
+	// 零节点又带着取数问题，是没取到，不是 Graph 真的空了：不合并，免得把门误标成「已不等」。
+	// 零节点且没有问题，是合法的空 Graph：照常合并，旧门转为 resolved。
+	if len(m.snap.Nodes) == 0 && len(m.snap.Problems) > 0 {
 		return ""
 	}
 	now := time.Now()
@@ -158,6 +163,27 @@ func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i", "esc", "q":
 		m.qv.show = false
 		return m, nil
+	case "R", "K":
+		// 给一次中断的投递下结论。两个键都不发消息：R 只清标记，要再发得重新选选项并按 y。
+		if m.qv.cursor >= len(items) {
+			return m, nil
+		}
+		it := items[m.qv.cursor]
+		if it.Answer == nil || !it.Answer.InFlight {
+			m.notice, m.noticeOK = "这一条没有中断的投递，R/K 只用于结案中断的投递", false
+			return m, nil
+		}
+		received := msg.String() == "K"
+		if _, err := m.qw.store.ResolveInFlight(it.ID, received, time.Now()); err != nil {
+			m.notice, m.noticeOK = "没记上："+err.Error(), false
+			return m, nil
+		}
+		if received {
+			m.notice, m.noticeOK = "已记为对方收到，这一条标为已回答", true
+		} else {
+			m.notice, m.noticeOK = "已清掉中断标记，这一条回到待拍板；要再发，重新按数字选选项并按 y", true
+		}
+		return m, nil
 	case "up", "k":
 		if m.qv.cursor > 0 {
 			m.qv.cursor--
@@ -185,7 +211,7 @@ func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if it.Answer != nil && it.Answer.InFlight {
-			m.notice, m.noticeOK = "上次投递在途中中断，结果未知；为免对方收到两遍不再自动重投，先按 Esc 回主界面用 p 预览那个会话", false
+			m.notice, m.noticeOK = "上次投递在途中中断，结果未知；为免对方收到两遍不自动重投。先回主界面用 p 预览那个会话，再按 K（已收到）或 R（没收到，可重答）", false
 			return m, nil
 		}
 		if it.Status == queue.StatusResolved {
@@ -334,7 +360,7 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 		}
 		if a := it.Answer; a != nil {
 			if a.InFlight {
-				w("%s", styleAlert.Render("  上次投递在途中中断，结果未知：不自动重投，先预览那个会话确认"))
+				w("%s", styleAlert.Render("  上次投递在途中中断，结果未知：不自动重投。预览那个会话后按 K（已收到）或 R（没收到，清标记可重答）"))
 			} else if a.DeliveryError != "" {
 				w("%s", styleAlert.Render("  上次回答投递失败："+a.DeliveryError+"（可以重选）"))
 			} else if a.Note != "" {
@@ -342,7 +368,7 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 			}
 		}
 	}
-	w("%s", styleDim.Render("↑↓ 选　数字 选选项（再按 y 确认）　r 立即重取　i/Esc 返回"))
+	w("%s", styleDim.Render("↑↓ 选　数字 选选项（再按 y 确认）　R/K 结案中断的投递　r 立即重取　i/Esc 返回"))
 }
 
 func statusLabel(s string) string {

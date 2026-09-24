@@ -335,8 +335,12 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
   （`internal/session/taskworker.go`）。daemon 不在时 export 里没有任何翻转，最多剩几条完成记录，
   和「没有待决事项」分不开，所以每次读之前先问 `writer-status`，并查进程表（心跳 90 秒内都算在跑）。
 - **writer-status 在 daemon 刚退出的 90 秒里仍答 running**（只看心跳，`internal/session/notify_heartbeat.go:31`）。
-  所以 adapter 另读 `/proc/*/cmdline` 找「程序名含 agent-deck、参数有 notify-daemon」的进程（`NotifyDaemonRunning`），
-  心跳新鲜且进程在才算可信。这不是上游命令调用，只读进程表。
+  daemon 正常每 1–3 秒一轮、每轮开头写心跳（`internal/session/transition_daemon.go:20-22`、`:168-171`），
+  所以 Work Deck 用自己的 15 秒门槛（`queue.HeartbeatFreshWithin`）判心跳新鲜，超过就告警。
+  另读 `/proc/*/cmdline` 找「程序名含 agent-deck、参数有 notify-daemon」的进程（`NotifyDaemonRunning`），
+  只作必要条件：本机一个都没有时一定告警。它分不出进程写的是哪个数据目录——要分得读别的进程的环境变量，
+  那里可能有凭据，不读——所以不能单独当作在跑的证据。剩余窗口：本目录的 daemon 退出后最多 15 秒内，
+  若本机另有 daemon 进程在跑，队列可能仍被当作可信。这不是上游命令调用，只读进程表。
 - **export 是全机的，不分 profile。** Work Deck 只收本客户端 profile 的记录：别的 profile 的会话，`session send`
   在当前 profile 里找不到它，回答投递不过去。没收进来的条数在界面上说明。
 - **父 inbox 会被 conductor 的 drain 清掉**，清掉后那些翻转就从 export 里消失；完成账本从不删除，`finished` 会一直在。

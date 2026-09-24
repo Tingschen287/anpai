@@ -169,6 +169,7 @@ func (s *Store) Record(id string, ans Answer) (Item, error) {
 	if _, ok := it.OptionByKey(ans.Option); !ok {
 		return Item{}, fmt.Errorf("条目 %s 没有选项 %q", id, ans.Option)
 	}
+	prevAnswer, prevStatus := it.Answer, it.Status
 	a := ans
 	a.InFlight = false
 	it.Answer = &a
@@ -178,6 +179,8 @@ func (s *Store) Record(id string, ans Answer) (Item, error) {
 		it.Status = StatusAnswered
 	}
 	if err := s.flushLocked(); err != nil {
+		// 没落盘就不算：内存退回原样，免得下一次别的落盘把它带上去。
+		it.Answer, it.Status = prevAnswer, prevStatus
 		return Item{}, err
 	}
 	return *it, nil
@@ -191,8 +194,46 @@ func (s *Store) MarkInFlight(id, option string, now time.Time) error {
 	if !ok {
 		return fmt.Errorf("队列里没有条目 %s", id)
 	}
+	prev := it.Answer
 	it.Answer = &Answer{Option: option, AnsweredAt: now, InFlight: true}
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		// 标记没落盘：内存退回原样，否则下一次成功的 Merge 会把一个实际没发的在途标记写上去。
+		it.Answer = prev
+		return err
+	}
+	return nil
+}
+
+// ResolveInFlight 是 owner 预览过会话之后，对一次中断的投递下结论。
+//
+// received 为真：对方确实收到了，条目标为已回答。为假：没收到，清掉标记，条目回到待拍板，
+// owner 可以照常再选一次选项投递。两种都不发任何消息——要不要再发，由 owner 下一步明确选。
+func (s *Store) ResolveInFlight(id string, received bool, now time.Time) (Item, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[id]
+	if !ok {
+		return Item{}, fmt.Errorf("队列里没有条目 %s", id)
+	}
+	if it.Answer == nil || !it.Answer.InFlight {
+		return Item{}, fmt.Errorf("条目 %s 没有中断的投递", id)
+	}
+	prevAnswer, prevStatus := it.Answer, it.Status
+	if received {
+		a := *it.Answer
+		a.InFlight, a.Delivered = false, true
+		a.Note = "投递中断后，owner 预览确认会话已收到"
+		it.Answer = &a
+		it.Status = StatusAnswered
+	} else {
+		it.Answer = nil
+		it.Status = StatusOpen
+	}
+	if err := s.flushLocked(); err != nil {
+		it.Answer, it.Status = prevAnswer, prevStatus
+		return Item{}, err
+	}
+	return *it, nil
 }
 
 // Get 取一个条目。

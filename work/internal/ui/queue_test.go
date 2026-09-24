@@ -218,3 +218,66 @@ func TestForeignRecordsAreCountedNotQueued(t *testing.T) {
 		t.Error("别的 profile 的记录不该进队列")
 	}
 }
+
+// 中断的投递：界面上 R 清标记后能重答并投递一次，K 记为已收到；两个键本身都不发消息。
+func TestInFlightItemCanBeSettledFromTheQueueView(t *testing.T) {
+	rec := agentdeck.InboxRecord{ChildSessionID: "c1", Profile: "_wd", FromStatus: "running", ToStatus: "waiting", LastOutputHash: "h"}
+	send := &fakeSend{}
+	m := polled(t, queueModel(t, &fakeInbox{st: agentdeck.WriterStatus{Running: true}, recs: []agentdeck.InboxRecord{rec}}, send))
+	id := m.qw.store.Items()[0].ID
+	m.qw.store.MarkInFlight(id, "continue", time.Now()) // 模拟上次投递途中崩溃
+	m, _ = press(m, 'i')
+	if out := m.View(); !strings.Contains(out, "按 K（已收到）或 R") {
+		t.Fatalf("中断的条目要告诉人怎么结案：\n%s", out)
+	}
+	m, cmd := press(m, '1')
+	if cmd != nil || m.qv.pendingID != "" {
+		t.Fatal("中断的条目不该直接进入确认")
+	}
+	m, cmd = press(m, 'R')
+	if cmd != nil || len(send.msgs) != 0 {
+		t.Fatal("R 只清标记，不该投递")
+	}
+	m, _ = press(m, '1')
+	m, cmd = press(m, 'y')
+	m = runCmd(t, m, cmd)
+	if len(send.msgs) != 1 {
+		t.Fatalf("清标记后重新选并确认，应当投递一次，实际 %d", len(send.msgs))
+	}
+
+	// 另一条：K 记为已收到，不发消息。
+	store := m.qw.store
+	rec2 := rec
+	rec2.ChildSessionID, rec2.LastOutputHash = "c2", "h2"
+	store.Merge(queue.SourceSession, queue.FromInbox([]agentdeck.InboxRecord{rec2}, time.Now()), time.Now())
+	var id2 string
+	for i, it := range store.Items() {
+		if it.Source.SessionID == "c2" {
+			id2, m.qv.cursor = it.ID, i
+		}
+	}
+	store.MarkInFlight(id2, "continue", time.Now())
+	m, _ = press(m, 'K')
+	if it, _ := store.Get(id2); it.Status != queue.StatusAnswered || len(send.msgs) != 1 {
+		t.Errorf("K 应当记为已回答且不投递：status=%s sends=%d", it.Status, len(send.msgs))
+	}
+}
+
+// Graph 合法地变成零节点时，旧门转为已不等；零节点但带着取数问题时不动。
+func TestEmptyGraphResolvesOldGatesButFailedFetchDoesNot(t *testing.T) {
+	m := polled(t, queueModel(t, &fakeInbox{st: agentdeck.WriterStatus{Running: true}}, nil))
+	gate := projectctl.Node{ID: "g1", Kind: "human_gate", Risk: "high",
+		State: projectctl.Known(projectctl.StateReady), Attempt: projectctl.Unknown[int]("没开过工")}
+	next, _ := m.Update(snapshotMsg(projectctl.Snapshot{ProjectRoot: "/tmp/proj", Nodes: []projectctl.Node{gate}}))
+	m = next.(Model)
+	next, _ = m.Update(snapshotMsg(projectctl.Snapshot{ProjectRoot: "/tmp/proj", Problems: []string{"brief 失败"}}))
+	m = next.(Model)
+	if m.queueOpen() != 1 {
+		t.Fatalf("取数失败的空快照不该让门离开队列，待拍板 %d", m.queueOpen())
+	}
+	next, _ = m.Update(snapshotMsg(projectctl.Snapshot{ProjectRoot: "/tmp/proj"}))
+	m = next.(Model)
+	if m.queueOpen() != 0 {
+		t.Errorf("合法的空 Graph 应当让旧门转为已不等，待拍板 %d", m.queueOpen())
+	}
+}

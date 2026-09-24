@@ -24,6 +24,15 @@ type Deliverer interface {
 	DeliverAnswer(ctx context.Context, rec agentdeck.InboxRecord, message string) error
 }
 
+// HeartbeatFreshWithin 是 Work Deck 自己的心跳新鲜度门槛。
+//
+// 上游 writer-status 90 秒内都答 running（internal/session/notify_heartbeat.go:31），
+// 那是给「daemon 卡在一次探测里」留的余量。但 daemon 正常每 1–3 秒一轮、每轮开头写心跳
+// （internal/session/transition_daemon.go:20-22、:168-171），90 秒的窗口里它可能早就退出了。
+// 这里收紧到 15 秒：超过就告警。误判只会偏向多告警（例如一轮探测特别慢），不会偏向说空。
+// 剩下最多 15 秒的窗口无法消除，写在 test-report 的已知限制里。
+const HeartbeatFreshWithin = 15 * time.Second
+
 // Intake 是一轮取数的体检结果。
 //
 // 它存在的理由：inbox export 返回空数组有三种可能——真没有、notify-daemon 没在记录、
@@ -34,7 +43,11 @@ type Intake struct {
 	Configured bool
 	Writer     agentdeck.WriterStatus
 	WriterErr  string
+	// HeartbeatAge 是取数时心跳已经多久没更新；没有心跳时为 0。
+	HeartbeatAge time.Duration
 	// ProcessUp 是进程表里有没有 notify-daemon；ProcessErr 是查进程表本身失败。
+	// 它只是必要条件：本机一个 daemon 都没有时一定告警。它分不出进程写的是哪个数据目录
+	// （要分就得读别的进程的环境变量，那里可能有凭据，不读），所以不能单独当作「在跑」的证据。
 	ProcessUp  bool
 	ProcessErr string
 	ExportErr  string
@@ -59,6 +72,11 @@ func Poll(ctx context.Context, up Upstream, now time.Time) (Intake, []agentdeck.
 		in.WriterErr = err.Error()
 	} else {
 		in.Writer = st
+		if !st.LastHeartbeat.IsZero() {
+			if age := now.Sub(st.LastHeartbeat); age > 0 {
+				in.HeartbeatAge = age
+			}
+		}
 	}
 	if running, err := up.NotifyDaemonRunning(ctx); err != nil {
 		in.ProcessErr = err.Error()
@@ -97,8 +115,11 @@ func (in Intake) Alert() string {
 			msg += "。上游说明：" + in.Writer.Detail
 		}
 		return msg
+	case in.HeartbeatAge > HeartbeatFreshWithin:
+		return fmt.Sprintf("notify-daemon 的心跳已经 %d 秒没更新（它正常 1–3 秒一次）：可能刚退出或卡住，运行时待决事项可能缺失，空不代表没有",
+			int(in.HeartbeatAge.Seconds()))
 	case !in.ProcessUp:
-		return "notify-daemon 的心跳还在 90 秒窗口内，但进程表里找不到它：它可能刚退出，运行时待决事项可能缺失，空不代表没有"
+		return "notify-daemon 的心跳还新，但本机进程表里找不到它：它可能刚退出，运行时待决事项可能缺失，空不代表没有"
 	case in.ExportErr != "":
 		return "读不到 inbox export（" + in.ExportErr + "）：运行时待决事项取不到，不是没有"
 	}
@@ -110,7 +131,8 @@ func (in Intake) Healthy() string {
 	if in.Alert() != "" {
 		return ""
 	}
-	return fmt.Sprintf("notify-daemon 在跑（进程在，心跳 %d 秒前）", in.Writer.AgeSeconds)
+	return fmt.Sprintf("notify-daemon 在跑（心跳 %d 秒前，门槛 %d 秒；本机有 daemon 进程）",
+		int(in.HeartbeatAge.Seconds()), int(HeartbeatFreshWithin.Seconds()))
 }
 
 // ForeignNote 说明有多少记录没收进队列。没有就返回空串。
@@ -140,7 +162,7 @@ func Respond(ctx context.Context, s *Store, d Deliverer, id, option string, now 
 		return it, fmt.Errorf("这一条已经回答过了，不再投递")
 	}
 	if it.Answer != nil && it.Answer.InFlight {
-		return it, fmt.Errorf("上次投递在途中中断，结果未知；为免对方收到两遍，不自动重投。请先按 p 预览那个会话确认")
+		return it, fmt.Errorf("上次投递在途中中断，结果未知；为免对方收到两遍，不自动重投。先预览那个会话，再在队列里按 K（已收到）或 R（没收到，可重答）")
 	}
 	ans := Answer{Option: option, AnsweredAt: now}
 	switch {
