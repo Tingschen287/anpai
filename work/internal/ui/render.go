@@ -51,6 +51,9 @@ type Screen struct {
 	Pick       int
 	// 这次挑模型是为了派评审。
 	PickingReviewer bool
+	// AskingReason 为真：挑中的不是推荐，正在写理由；Reason 是已输入的内容。
+	AskingReason bool
+	Reason       string
 	// 上一次动作的结果，成败都显示。
 	Notice   string
 	NoticeOK bool
@@ -66,11 +69,11 @@ type Screen struct {
 	// 按下 a/T 那一刻的 Notice 只停一帧——交出终端时 bubbletea 立刻退出全屏界面。
 	EnterHint string
 	// 决策队列：QueueOn 表示接了队列；Queue.Show 为真时整屏换成队列视图。
-	QueueOn   bool
+	QueueOn bool
 	// LeaseLines 是写入权的常驻提示：记账打不开、等确认交还的会话。
 	LeaseLines []string
-	QueueOpen int
-	Queue     QueueScreen
+	QueueOpen  int
+	Queue      QueueScreen
 }
 
 // Render 把快照画成一屏。width 是终端宽度。
@@ -252,7 +255,18 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 			w("  %s", styleDim.Render("能力要求："+capsRequirement(r)))
 			w("  %s", styleDim.Render("额度依据："+r.QuotaBasis))
 		}
-		w("  %s", styleDim.Render("↑↓ 选，回车派工，Esc 取消"))
+		if sc.AskingReason && sc.Pick >= 0 && sc.Pick < len(sc.Candidates) {
+			id := sc.Candidates[sc.Pick].ID
+			ask := "这次没有推荐，写一句为什么选 " + id + "（会记进路由审计）："
+			if r := sc.Routing; r != nil && r.Recommended != "" {
+				ask = "你没选推荐的 " + r.Recommended + "，写一句为什么改选 " + id + "（会记进路由审计）："
+			}
+			w("  %s", styleUnknown.Render(ask))
+			w("  > %s▏", sc.Reason)
+			w("  %s", styleDim.Render("回车派出，Esc 回去重挑"))
+		} else {
+			w("  %s", styleDim.Render("↑↓ 选，回车派工，Esc 取消"))
+		}
 		w("")
 	}
 

@@ -59,6 +59,9 @@ type Model struct {
 	pick       int
 	// 这次挑模型是为了派评审，不是派工。
 	pickingReviewer bool
+	// askingReason 为真：挑中的不是推荐（或这次没有推荐），正在等你写理由。reason 是已输入的内容。
+	askingReason bool
+	reason       string
 	// 上一次动作的结果，直接显示给人看，成功失败都显示。
 	notice   string
 	noticeOK bool
@@ -316,6 +319,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch m.mode {
 	case ModePickModel:
+		if m.askingReason {
+			return m.onReasonKey(msg)
+		}
 		switch msg.String() {
 		case "esc", "q":
 			m.mode = ModeBrowse
@@ -334,6 +340,10 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
+			if m.pick >= 0 && m.pick < len(m.candidates) && m.needsReason(m.candidates[m.pick].ID) {
+				m.askingReason, m.reason = true, ""
+				return m, nil
+			}
 			return m.confirmDispatch()
 		}
 		return m, nil
@@ -689,6 +699,40 @@ func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// needsReason：挑中的不是推荐、或这次没有推荐时，要你写一句理由才派。路由没算出来也要理由。
+func (m Model) needsReason(model string) bool {
+	return m.routing == nil || m.routing.NeedsReason(model)
+}
+
+// onReasonKey 是写理由那一步：打字、退格、回车派、Esc 回去重挑。
+func (m Model) onReasonKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.askingReason, m.reason = false, ""
+		return m, nil
+	case tea.KeyEnter:
+		if strings.TrimSpace(m.reason) == "" {
+			m.notice, m.noticeOK = "理由不能为空：写一句为什么选它，或按 Esc 回去重挑", false
+			return m, nil
+		}
+		return m.confirmDispatch()
+	case tea.KeyBackspace:
+		if r := []rune(m.reason); len(r) > 0 {
+			m.reason = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.reason += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.reason += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
 // confirmDispatch 用挑中的模型真的派一次工。
 func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
@@ -697,6 +741,9 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	chosen := m.candidates[m.pick]
+	// 选择者就是在界面上按回车的 owner；理由是他刚写的（采纳推荐时为空）。
+	chosenBy, reason := "owner", strings.TrimSpace(m.reason)
+	m.askingReason, m.reason = false, ""
 	attempt, hasAttempt := node.Attempt.Get()
 	if !hasAttempt {
 		// ready 节点还没开工，这次派的就是第一次 attempt。
@@ -717,6 +764,8 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			// brief 是评审者开工时看到的第一段话。没有它，派出去的就是个空会话。
 			Message:      reviewBrief(node, attempt),
 			DispatchedBy: "work-deck",
+			ChosenBy:     chosenBy,
+			ChoiceReason: reason,
 		}
 		d := m.dispatcher
 		m.pickingReviewer = false
@@ -741,6 +790,8 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		ProjectPath:   m.snap.ProjectRoot,
 		Title:         node.ID,
 		DispatchedBy:  "work-deck",
+		ChosenBy:      chosenBy,
+		ChoiceReason:  reason,
 	}
 	d := m.dispatcher
 	return m, func() tea.Msg {
@@ -765,6 +816,8 @@ func (m Model) View() string {
 		Cursor:          m.cursor,
 		Picking:         m.mode == ModePickModel,
 		PickingReviewer: m.pickingReviewer,
+		AskingReason:    m.askingReason,
+		Reason:          m.reason,
 		Candidates:      m.candidates,
 		Routing:         m.routing,
 		Pick:            m.pick,

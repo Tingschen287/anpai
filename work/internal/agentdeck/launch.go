@@ -24,8 +24,8 @@ type LaunchRequest struct {
 	// 前者必须拒绝派工。只有调用方明说「这工具没有模型」时才能置位，
 	// 而且一旦置位就不许再给 Model，自相矛盾的请求同样拒绝。
 	ModelNotApplicable bool
-	// 开工时发的第一条消息，可以为空。
-	Message string
+	// 没有「首条消息」字段（n039 起）：上游 launch -m 会在 Work Deck 登记写入权之前就把消息送进会话，
+	// 登记失败时消息已经发出。任务文本一律等登记成功后，经 arbiter 的受仲裁投递口（SendMessage）送。
 	// 不等待 agent 就绪。
 	NoWait bool
 }
@@ -85,9 +85,6 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 	}
 	if req.Group != "" {
 		args = append(args, "-g", req.Group)
-	}
-	if req.Message != "" {
-		args = append(args, "-m", req.Message)
 	}
 	if req.NoWait {
 		args = append(args, "--no-wait")

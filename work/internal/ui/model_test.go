@@ -80,7 +80,7 @@ func TestManualRefreshIsIgnoredWhileOneIsInFlight(t *testing.T) {
 
 // fakeDispatcher 记下被请求的派工，并按脚本回应。
 type fakeDispatcher struct {
-	cands []dispatch.Model
+	cands   []dispatch.Model
 	got     []dispatch.Request
 	reviews []dispatch.ReviewRequest
 	err     error
@@ -273,8 +273,7 @@ func TestDispatchHappyPathPassesTheChosenModel(t *testing.T) {
 	// 往下挑一个，回车。
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(Model)
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(Model)
+	m, cmd := enterWithReason(t, m, "测试 挑贵的那个")
 	if cmd == nil {
 		t.Fatal("回车应当真的发起一次派工")
 	}
@@ -294,6 +293,71 @@ func TestDispatchHappyPathPassesTheChosenModel(t *testing.T) {
 	}
 	if fd.got[0].NodeID != "n1" || fd.got[0].Attempt != 1 {
 		t.Errorf("派工请求不对：%+v", fd.got[0])
+	}
+	if fd.got[0].ChosenBy != "owner" || fd.got[0].ChoiceReason != "测试 挑贵的那个" {
+		t.Errorf("选择者与理由没传下去：%q %q", fd.got[0].ChosenBy, fd.got[0].ChoiceReason)
+	}
+}
+
+// enterWithReason 按回车；没采纳推荐时界面要先收理由，就打字再回车。
+func enterWithReason(t *testing.T, m Model, reason string) (Model, tea.Cmd) {
+	t.Helper()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if !m.askingReason {
+		return m, cmd
+	}
+	if cmd != nil {
+		t.Fatal("要写理由时回车不该直接派出")
+	}
+	for _, r := range reason {
+		k := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+		if r == ' ' {
+			k = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		}
+		next, _ = m.Update(k)
+		m = next.(Model)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model), cmd
+}
+
+// 没有推荐时挑一个：先问理由；空理由不派；Esc 回去重挑；屏幕上说清为什么要理由。
+func TestPickingWithoutARecommendationAsksForAReason(t *testing.T) {
+	fd := &fakeDispatcher{cands: []dispatch.Model{{ID: "claude-opus-5", Tool: "claude", Class: dispatch.Frontier}}}
+	m := modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd)
+	m = pressD(m)
+	if m.mode != ModePickModel {
+		t.Fatalf("前提：应当进入挑模型：%q", m.notice)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil || !m.askingReason {
+		t.Fatal("没有推荐时回车应当先问理由，不直接派")
+	}
+	out := RenderScreen(m.snap, 120, Screen{Picking: true, Candidates: m.candidates, Routing: m.routing, AskingReason: m.askingReason, Reason: m.reason})
+	if !strings.Contains(out, "写一句为什么选 claude-opus-5") {
+		t.Errorf("屏幕上没问理由：\n%s", out)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	m = next.(Model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil || !strings.Contains(m.notice, "理由不能为空") {
+		t.Errorf("空白理由不该派出：%q", m.notice)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.askingReason || m.mode != ModePickModel {
+		t.Error("Esc 应当回到挑模型，不是退出")
+	}
+	m, cmd = enterWithReason(t, m, "唯一够档的")
+	if cmd == nil {
+		t.Fatal("写了理由应当派出")
+	}
+	cmd()
+	if len(fd.got) != 1 || fd.got[0].ChoiceReason != "唯一够档的" {
+		t.Errorf("理由没传给派工器：%+v", fd.got)
 	}
 }
 
@@ -519,7 +583,6 @@ func TestPrefixKeyAdviceFitsANarrowTerminal(t *testing.T) {
 	}
 }
 
-
 // 从会话回来要刷新状态，不能停在进去之前那一刻。
 func TestReturningFromSessionRefreshesState(t *testing.T) {
 	fa := &fakeAttacher{}
@@ -666,7 +729,7 @@ func TestSubmittedNodeDispatchesAReviewerNotAnExecutor(t *testing.T) {
 		t.Error("挑模型时没说清是在派评审还是派工")
 	}
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := enterWithReason(t, m, "评审用它")
 	if cmd == nil {
 		t.Fatal("回车应当真的派出评审")
 	}
@@ -692,7 +755,6 @@ func TestSubmittedNodeDispatchesAReviewerNotAnExecutor(t *testing.T) {
 	if r.RequiredClass != dispatch.Frontier {
 		t.Errorf("评审档位是 %s，期望 frontier", r.RequiredClass)
 	}
-	_ = next
 }
 
 // 要求独立评审但不知道执行者是谁，就不能派。

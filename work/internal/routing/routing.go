@@ -107,11 +107,13 @@ type Decision struct {
 	Escalated bool     `json:"escalated_to_owner"`
 	Unknowns  []string `json:"unknowns"`
 	Chosen    string   `json:"chosen"`
-	// ChosenBy 是做出选择的人：Work Deck 里每一次派单都由 owner 在界面上挑定。
+	// ChosenBy 是做出选择的人，由选择入口（例如界面）提供，路由不替它填。
 	ChosenBy string `json:"chosen_by"`
-	// ChoiceReason 说明为什么选了 Chosen：采纳推荐、没有推荐由 owner 挑、或 owner 改选。
+	// ChoiceReason 说明为什么选了 Chosen：采纳推荐、没有推荐由选择者挑、或改选；后两种带上选择者写的理由。
 	// Reason 只解释推荐本身，两者分开。
 	ChoiceReason string `json:"choice_reason"`
+	// OwnerReason 是选择者自己写的理由原文。没采纳推荐（包括这次没有推荐）时必填。
+	OwnerReason string `json:"owner_reason"`
 	// DispatchedBy 是派工记账里的身份（例如 work-deck），不是选择者。
 	DispatchedBy string `json:"dispatched_by"`
 	QuotaBasis   string `json:"quota_basis"`
@@ -204,8 +206,18 @@ func Decide(req Request, cands []Candidate, q QuotaSource, now time.Time) Decisi
 	return d
 }
 
-// Choose 记下 owner 的选择。选的必须是可选候选；否则报错，不派。
-func (d *Decision) Choose(model, by string) error {
+// NeedsReason 说明选 model 时要不要选择者写理由：只有采纳推荐时不用。
+func (d Decision) NeedsReason(model string) bool {
+	return d.Recommended == "" || d.Recommended != model
+}
+
+// Choose 记下选择。选的必须是可选候选；by 必须写明是谁选的；
+// 没采纳推荐（包括这次没有推荐）时 reason 必须写明，否则报错，不派。
+func (d *Decision) Choose(model, by, reason string) error {
+	by, reason = strings.TrimSpace(by), strings.TrimSpace(reason)
+	if by == "" {
+		return fmt.Errorf("没写是谁选的模型，不派")
+	}
 	for _, f := range d.Candidates {
 		if f.Model != model {
 			continue
@@ -213,21 +225,26 @@ func (d *Decision) Choose(model, by string) error {
 		if !f.Selectable {
 			return fmt.Errorf("模型 %s 不可选：%s", model, f.Excluded)
 		}
-		d.Chosen, d.ChosenBy = model, by
+		if d.NeedsReason(model) && reason == "" {
+			if d.Recommended == "" {
+				return fmt.Errorf("这次没有推荐（%s），选 %s 要写明理由，不派", d.Reason, model)
+			}
+			return fmt.Errorf("没采纳推荐的 %s、改选 %s，要写明理由，不派", d.Recommended, model)
+		}
+		d.Chosen, d.ChosenBy, d.OwnerReason = model, by, reason
 		switch {
 		case d.Recommended == model:
 			d.ChoiceReason = by + " 采纳了推荐"
+			if reason != "" {
+				d.ChoiceReason += "；理由：" + reason
+			}
 		case d.Recommended == "":
-			d.ChoiceReason = "没有推荐（" + d.Reason + "）；" + by + " 在可选候选里选定 " + model
-			if len(f.Unknowns) > 0 {
-				d.ChoiceReason += "，它的未知项：" + strings.Join(f.Unknowns, "、")
-			}
+			d.ChoiceReason = "没有推荐（" + d.Reason + "）；" + by + " 在可选候选里选定 " + model + "；理由：" + reason
 		default:
-			d.ChoiceReason = by + " 没有采纳推荐的 " + d.Recommended + "，改选 " + model +
-				"；Work Deck 只记下这是 " + by + " 的决定，界面不收集他的理由"
-			if len(f.Unknowns) > 0 {
-				d.ChoiceReason += "；所选模型的未知项：" + strings.Join(f.Unknowns, "、")
-			}
+			d.ChoiceReason = by + " 没有采纳推荐的 " + d.Recommended + "，改选 " + model + "；理由：" + reason
+		}
+		if d.Recommended != model && len(f.Unknowns) > 0 {
+			d.ChoiceReason += "；所选模型的未知项：" + strings.Join(f.Unknowns, "、")
 		}
 		return nil
 	}

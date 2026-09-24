@@ -172,7 +172,7 @@ func buildDispatcher(projectRoot string, leases *lease.Store, queueItems func() 
 	}, nil
 }
 
-// openLeases 打开写入权记账（配置目录的 leases.json，切换事件在 leases-log.jsonl）。
+// openLeases 打开写入权记账（配置目录的 leases.json；持有者与切换事件同存这一个文件）。
 //
 // 打不开（例如文件损坏）时返回错误：界面常驻告警，派工与队列拿到的记账是 nil，一律不投递。
 func openLeases() (*lease.Store, error) {

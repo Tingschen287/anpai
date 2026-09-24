@@ -15,7 +15,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 
 | 子命令 | 用途 | 用到的参数 |
 |---|---|---|
-| `launch` | 派工：建会话、起会话、可选发首条消息 | `-c`（工具）、`--model`（模型 ID）、`--json`、`-t`（标题）、`-g`（分组）、`-m`（首条消息）、`--no-wait` |
+| `launch` | 派工：建会话、起会话（不带首条消息，见下文 n039） | `-c`（工具）、`--model`（模型 ID）、`--json`、`-t`（标题）、`-g`（分组）、`--no-wait` |
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
@@ -37,8 +37,9 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   写入权记账登记为 owner 接管着、等确认交还、租约过期、持有者未知时不投。许可只能由 `internal/lease` 签发，
   `TestEveryWriteIntoASessionNeedsAPermit` 核对包内往会话写字的上游调用只有 `SendMessage` 一处且先核许可。
   边界：记账只知道经 Work Deck 的接管；不经 Work Deck 的接入由 arbiter 在投递前用 `AttachedClients`（tmux `list-clients`）查，
-  查询与送达之间有人进来仍然看不见。`launch -m` 的首条消息随新会话一起创建，不经许可（会话此前不存在），
-  但记账停用时 arbiter 不起会话。
+  查询与送达之间有人进来仍然看不见（已披露的剩余风险，Graph revision 86）。
+- **n039 起不用 `launch -m`**：它在 Work Deck 登记写入权之前就把消息送进会话，登记失败时消息已经发出。
+  现在一律先起空会话、登记写入权，再经 arbiter 的 `SendMessage` 投递。`LaunchRequest` 没有消息字段，`LaunchFlags` 不含 `-m`。
 - **实测（n039）**：对 shell 会话，上游 `session send` 判「已提交」看正文是否还在输入区；shell 的
   `xxx: command not found` 回显会干扰这个判断，某些 ASCII 单词会被报成「reached the pane but submission was never
   confirmed」（issue #1793）而以退出码 1 失败。派评审时首条 brief 被这样误报，派工器会按「没送进去」拒绝并留下半成品会话。

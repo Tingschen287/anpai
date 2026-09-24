@@ -93,7 +93,7 @@ func TestTakeoverCannotSlipInWhileDelivering(t *testing.T) {
 	}
 }
 
-// 记账停用时不起会话：launch 可能带着首条消息，事后登记必然失败。
+// 记账停用时不起会话：起了也只是一个登记不上、投不进去的空会话。
 func TestLaunchRefusedWhileLedgerIsBroken(t *testing.T) {
 	bin, sent := fakeUpstream(t)
 	c, _ := agentdeck.NewClient(bin, "_arb", "", "")
@@ -102,12 +102,12 @@ func TestLaunchRefusedWhileLedgerIsBroken(t *testing.T) {
 	t.Cleanup(leases.Close)
 	breakLedger(t, leases, dir)
 	d := Deck{Client: c, Leases: leases, Clients: fakeProbe{}}
-	if _, err := d.Launch(context.Background(), agentdeck.LaunchRequest{ProjectPath: "/tmp", Tool: "shell", ModelNotApplicable: true, Message: "首条"}); err == nil {
+	if _, err := d.Launch(context.Background(), agentdeck.LaunchRequest{ProjectPath: "/tmp", Tool: "shell", ModelNotApplicable: true}); err == nil {
 		t.Fatal("记账停用时不该派工")
 	}
-	// 光看返回错误不够：去掉预检的话，launch 会带着首条消息出去、事后登记才失败，照样返回错误。
+	// 光看返回错误不够：去掉预检的话，launch 照样会跑、事后登记才失败，也返回错误。
 	// 要看的是上游的 launch 有没有被调用。
 	if got := sentLines(t, sent+".launch"); len(got) != 0 {
-		t.Errorf("记账停用时上游 launch 不该被调用（首条消息会随它出去）：%v", got)
+		t.Errorf("记账停用时上游 launch 不该被调用：%v", got)
 	}
 }

@@ -14,7 +14,7 @@ func goodReview() ReviewRequest {
 		NodeID: "n099_demo", Attempt: 1, RequiredClass: Frontier,
 		ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
 		ExecutorActor:       "executor-a1",
-		IndependentRequired: true, DispatchedBy: "work-deck",
+		IndependentRequired: true, DispatchedBy: "work-deck", ChosenBy: "owner", ChoiceReason: "测试里指定",
 		Message: "请评审 n099_demo 的 attempt 1",
 	}
 }
@@ -205,11 +205,7 @@ func TestBriefIsDeliveredOnlyAfterTheSessionIsVerified(t *testing.T) {
 		t.Fatalf("正常派评审不该失败：%v", err)
 	}
 
-	// launch 那一步不许带 brief：会话号还没核验过，送出去就撤不回来。
-	last := fake.calls[len(fake.calls)-1]
-	if last.Message != "" {
-		t.Errorf("brief 随 launch 一起出去了：%q", last.Message)
-	}
+	// launch 那一步带不了 brief：LaunchRequest 没有消息字段（n039），编译期就挡住了。
 	// 核验之后必须真的送达，而且送到评审那个会话。
 	if len(fake.sent) != 1 {
 		t.Fatalf("brief 应当恰好投递一次，实际 %d 次", len(fake.sent))

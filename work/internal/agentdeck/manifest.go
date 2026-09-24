@@ -33,7 +33,7 @@ const UpstreamCommit = "01c011b"
 var CLIJSONFields = []string{"id", "title", "tool", "status", "path", "group", "tmux_session", "profile", "archived"}
 
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
-var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "-m", "--no-wait"}
+var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait"}
 
 // WebFlags 是集成测试起 headless 服务时用的参数（integration_test.go）。
 // 发布代码不启动 web：Work Deck 连配置里 upstream_addr 指向的现成服务。

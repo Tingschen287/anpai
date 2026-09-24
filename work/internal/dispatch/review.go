@@ -30,6 +30,9 @@ type ReviewRequest struct {
 	Group        string
 	Message      string
 	DispatchedBy string
+	// ChosenBy 是挑模型的人，ChoiceReason 是他写的理由；没采纳推荐时理由必填（见 routing.Choose）。
+	ChosenBy     string
+	ChoiceReason string
 }
 
 // ReviewerKey 是评审绑定在存储里的键。
@@ -127,7 +130,7 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	}
 
 	// 起会话之前先算路由并写审计记录：说不清为什么派给这个模型，就不派。
-	if err := d.routeAndRecord(req.NodeID, req.Attempt, "reviewer", req.RequiredClass, req.ModelID, req.DispatchedBy); err != nil {
+	if err := d.routeAndRecord(req.NodeID, req.Attempt, "reviewer", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason); err != nil {
 		return refuse(err)
 	}
 

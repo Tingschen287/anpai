@@ -89,7 +89,7 @@ func TestRoutingNeverLowersTheRouteClass(t *testing.T) {
 	if f.Selectable || f.MeetsRouteClass || !strings.Contains(f.Excluded, "不降档") {
 		t.Fatalf("低档候选必须被排除：%+v", f)
 	}
-	if err := d.Choose("cheap", "owner"); err == nil {
+	if err := d.Choose("cheap", "owner", "就要便宜的"); err == nil {
 		t.Error("owner 选低档也必须被拒")
 	}
 }
@@ -155,13 +155,15 @@ func TestEveryDecisionCitesN026(t *testing.T) {
 func TestAppendWritesOneLineOrFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routing.jsonl")
 	d := Decide(Request{NodeID: "n1", RequiredClass: "frontier"}, []Candidate{{ID: "a", Tool: "t", Class: "frontier"}}, nil, t0)
-	d.Choose("a", "owner")
+	if err := d.Choose("a", "owner", "只有它"); err != nil {
+		t.Fatal(err)
+	}
 	if err := Append(path, d); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
 	var back Decision
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &back); err != nil || back.Chosen != "a" || back.ChosenBy != "owner" {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &back); err != nil || back.Chosen != "a" || back.ChosenBy != "owner" || back.OwnerReason != "只有它" {
 		t.Errorf("读回的记录不对：%v %+v", err, back)
 	}
 	if err := Append("", d); err == nil {
@@ -195,22 +197,58 @@ func TestChoiceReasonIsRecordedSeparatelyFromTheRecommendation(t *testing.T) {
 		t.Fatalf("前提：应当推荐 a，实际 %q", d.Recommended)
 	}
 	took := d
-	took.Choose("a", "owner")
+	if err := took.Choose("a", "owner", ""); err != nil {
+		t.Fatalf("采纳推荐不用写理由：%v", err)
+	}
 	over := d
-	over.Choose("b", "owner")
+	if err := over.Choose("b", "owner", "a 上周在这类节点上漏过边界"); err != nil {
+		t.Fatal(err)
+	}
 	none := Decide(Request{RequiredClass: "frontier"}, cands, nil, t0)
-	none.Choose("b", "owner")
+	if err := none.Choose("b", "owner", "b 的 resume 我手工确认过"); err != nil {
+		t.Fatal(err)
+	}
 	for name, c := range map[string]struct {
 		d    Decision
 		want string
 	}{
-		"采纳": {took, "采纳了推荐"}, "改选": {over, "没有采纳推荐的 a，改选 b"}, "无推荐": {none, "没有推荐"},
+		"采纳":  {took, "采纳了推荐"},
+		"改选":  {over, "没有采纳推荐的 a，改选 b；理由：a 上周在这类节点上漏过边界"},
+		"无推荐": {none, "没有推荐"},
 	} {
 		if !strings.Contains(c.d.ChoiceReason, c.want) || c.d.ChosenBy != "owner" {
 			t.Errorf("%s：选择理由 %q、选择者 %q", name, c.d.ChoiceReason, c.d.ChosenBy)
 		}
 	}
+	if over.OwnerReason != "a 上周在这类节点上漏过边界" || !strings.Contains(none.ChoiceReason, "b 的 resume 我手工确认过") {
+		t.Errorf("理由原文要记进审计：%q / %q", over.OwnerReason, none.ChoiceReason)
+	}
 	if strings.Contains(over.Reason, "改选") {
 		t.Error("Reason 只解释推荐，不该混进选择理由")
+	}
+}
+
+// 没采纳推荐（包括这次没有推荐）时必须写理由；空白不算。选择者也必须写明，路由不替它填。
+func TestOverrideWithoutAReasonIsRefused(t *testing.T) {
+	cands := []Candidate{{ID: "a", Tool: "t", Class: "frontier"}, {ID: "b", Tool: "t", Class: "frontier"}}
+	d := Decide(Request{RequiredClass: "frontier"}, cands, fixedQuota{"a": avail()}, t0)
+	for _, reason := range []string{"", "   "} {
+		dd := d
+		if err := dd.Choose("b", "owner", reason); err == nil || !strings.Contains(err.Error(), "写明理由") {
+			t.Errorf("改选不写理由（%q）必须被拒：%v", reason, err)
+		}
+		if dd.Chosen != "" {
+			t.Errorf("被拒时不该记下选择：%+v", dd.Chosen)
+		}
+	}
+	none := Decide(Request{RequiredClass: "frontier"}, cands, nil, t0)
+	if err := none.Choose("a", "owner", ""); err == nil {
+		t.Error("没有推荐时选任何一个都要写理由")
+	}
+	if err := d.Choose("a", "", ""); err == nil {
+		t.Error("没写选择者必须被拒")
+	}
+	if d.NeedsReason("a") || !d.NeedsReason("b") || !none.NeedsReason("a") {
+		t.Error("NeedsReason 与 Choose 的规矩对不上")
 	}
 }

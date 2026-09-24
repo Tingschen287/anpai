@@ -105,7 +105,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	b, err := d.Dispatch(context.Background(), Request{
 		NodeID: "e2e_node", Attempt: 1, RequiredClass: Economy,
 		ModelID: "shell", ProjectPath: project, Title: "n036e2e",
-		DispatchedBy: "integration-test",
+		DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
 	})
 	if err != nil {
 		t.Fatalf("真实派工失败：%v", err)

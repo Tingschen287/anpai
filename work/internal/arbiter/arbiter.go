@@ -28,15 +28,17 @@ type Deck struct {
 	Clients ClientProbe
 }
 
-// Launch 起一个新会话，成功后登记 Work Deck 写入权。
+// Launch 起一个空会话，成功后登记 Work Deck 写入权。
+//
+// LaunchRequest 没有首条消息字段：launch 不往会话里写任何字。任务文本要等这里登记成功之后，
+// 由调用方经 SendMessage 投递，所以登记失败时什么都没送出去。
 //
 // 登记失败时会话已经起来了，但没有写入权：之后对它的自动投递一律被拒，返回的错误说明原因。
 func (d Deck) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
 	if d.Leases == nil {
 		return agentdeck.LaunchResult{}, fmt.Errorf("没有写入权记账，不派工")
 	}
-	// launch 可能带着首条消息（-m）一起出去。会话在此之前不存在，不会有人接管它；
-	// 但记账停用时事后登记必然失败，所以先查，停用就不起会话、不发消息。
+	// 记账已停用时事后登记必然失败，起了也只是一个投不进去的空会话：先查，停用就不起。
 	if err := d.Leases.Broken(); err != nil {
 		return agentdeck.LaunchResult{}, fmt.Errorf("写入权记账已停用（%v），不派工", err)
 	}

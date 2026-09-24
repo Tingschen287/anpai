@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
@@ -91,7 +90,7 @@ func TestUIReviewDispatchReachesRealDispatcher(t *testing.T) {
 	if m.mode != ModePickModel {
 		t.Fatalf("按 d 应当进入挑模型，实际提示：%q", m.notice)
 	}
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := enterWithReason(t, m, "评审用它")
 	if cmd == nil {
 		t.Fatal("回车应当真的派出评审")
 	}
@@ -120,10 +119,7 @@ func TestUIReviewDispatchReachesRealDispatcher(t *testing.T) {
 			t.Errorf("brief 里没提到 %q：\n%s", want, lau.sent[0][1])
 		}
 	}
-	// launch 那一步不能带 brief——会话号还没核验过。
-	if lau.calls[0].Message != "" {
-		t.Errorf("brief 随 launch 一起出去了：%q", lau.calls[0].Message)
-	}
+	// launch 那一步带不了 brief：LaunchRequest 没有消息字段（n039），编译期就挡住了。
 
 	// 评审绑定要落在评审那个键上，且不是执行者的会话。
 	rb, ok := d.Store.Get(dispatch.ReviewerKey("n1"), 2)
@@ -174,7 +170,7 @@ func TestRealDispatcherIgnoresCallerSuppliedReviewerIdentity(t *testing.T) {
 		_, err := d.DispatchReviewer(context.Background(), dispatch.ReviewRequest{
 			NodeID: "n1", Attempt: 2, RequiredClass: dispatch.Frontier,
 			ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
-			ExecutorActor: actor, IndependentRequired: true, DispatchedBy: "work-deck",
+			ExecutorActor: actor, IndependentRequired: true, DispatchedBy: "work-deck", ChosenBy: "owner", ChoiceReason: "测试里指定",
 			Message: "请评审 n1 的 attempt 2",
 		})
 		if err == nil {

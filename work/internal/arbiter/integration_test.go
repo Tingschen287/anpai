@@ -100,8 +100,9 @@ func TestIntegrationOwnerTakeoverBlocksRealDelivery(t *testing.T) {
 		t.Skip("起不了外部 tmux 客户端（没有 script？）：", err)
 	}
 	t.Cleanup(func() { _ = client.Process.Kill(); _ = client.Wait() })
+	// 按截止时间等，不按次数：全量并行跑时机器忙，每次探测本身就要几秒（attempt 3 全量跑时 40 次 × 250ms 不够）。
 	attached := false
-	for i := 0; i < 40; i++ {
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); {
 		if n, err := c.AttachedClients(ctx, res.SessionID); err == nil && n > 0 {
 			attached = true
 			break

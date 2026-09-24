@@ -758,7 +758,7 @@ var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.S
 // 本包实际用到的布尔 flag 是 launch.go 的 `--no-wait`（agent-deck 的），
 // tmux 那边有 `-u` 这类全局布尔选项，它们都**不能**进这张表。
 var valueFlags = map[string]bool{
-	"-L": true, "-t": true, "-c": true, "-g": true, "-m": true,
+	"-L": true, "-t": true, "-c": true, "-g": true,
 	"--model": true, "--listen": true, "--token": true,
 	"--message-file": true, // 评审指出的遗漏，见 send.go
 }

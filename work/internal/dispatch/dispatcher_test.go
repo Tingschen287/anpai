@@ -83,7 +83,7 @@ func goodRequest() Request {
 	return Request{
 		NodeID: "n099_demo", Attempt: 1, RequiredClass: Frontier,
 		ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
-		Title: "demo", Group: "g", DispatchedBy: "tester",
+		Title: "demo", Group: "g", DispatchedBy: "tester", ChosenBy: "owner", ChoiceReason: "测试里指定",
 	}
 }
 
@@ -301,7 +301,7 @@ func TestEveryDispatchLeavesARoutingRecord(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.NodeID != "n099_demo" || rec.Chosen != "claude-opus-5" || rec.ChosenBy != "owner" || rec.ChoiceReason == "" ||
+	if rec.NodeID != "n099_demo" || rec.Chosen != "claude-opus-5" || rec.ChosenBy != "owner" || rec.ChoiceReason == "" || rec.OwnerReason != "测试里指定" ||
 		len(rec.Candidates) == 0 || rec.QuotaBasis == "" {
 		t.Errorf("记录缺字段：%+v", rec)
 	}

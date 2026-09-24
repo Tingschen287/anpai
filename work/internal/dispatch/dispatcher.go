@@ -30,6 +30,9 @@ type Request struct {
 	Message     string
 	// 谁派的工，记进账。
 	DispatchedBy string
+	// ChosenBy 是挑模型的人，ChoiceReason 是他写的理由；没采纳推荐时理由必填（见 routing.Choose）。
+	ChosenBy     string
+	ChoiceReason string
 }
 
 // Outcome 是一次派工尝试的结果，无论成没成都记一条。
@@ -144,7 +147,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 			req.NodeID, req.Attempt, existing.SessionID))
 	}
 
-	if err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy); err != nil {
+	if err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason); err != nil {
 		return refuse(err)
 	}
 
@@ -154,11 +157,21 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		Group:       req.Group,
 		Tool:        ToolOf(model),
 		Model:       model.ID,
-		Message:     req.Message,
 		NoWait:      true,
 	})
 	if err != nil {
 		return refuse(fmt.Errorf("upstream agent-deck 启动会话失败：%w", err))
+	}
+
+	// 任务文本不随 launch 出去（LaunchRequest 没有这个字段）：launch 返回说明写入权已经登记，
+	// 这时才经受仲裁的投递口送。送不进去就不落绑定，和派评审同一个规矩。
+	if req.Message != "" {
+		if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); err != nil {
+			return refuse(fmt.Errorf(
+				"会话 %s 已经起来了，但任务文本没送进去：%w。"+
+					"这是个半成品会话，Work Deck 不会去停它，也不记这次派工——请手工确认该会话的去向，再重派",
+				res.SessionID, err))
+		}
 	}
 
 	b := binding.Binding{
@@ -234,14 +247,14 @@ func (d *Dispatcher) Route(nodeID string, attempt int, purpose string, required 
 
 // routeAndRecord 在真正起会话之前算路由、核 owner 选的模型是否可选、写审计记录。
 // 任何一步不成就返回错误，调用方据此拒绝派单：说不清为什么派给它，就不派。
-func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, required RouteClass, modelID, by string) error {
+func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, required RouteClass, modelID, by, chosenBy, reason string) error {
 	if d.RoutingLog == "" {
 		return fmt.Errorf("没有配置路由审计记录，不派单")
 	}
 	dec := d.Route(nodeID, attempt, purpose, required)
-	// 选择者是 owner：Work Deck 的每一次派单都由他在界面上挑定模型。by 是派工记账身份，另记。
+	// 选择者由选择入口提供（界面填 owner），by 是派工记账身份，两者分开记。
 	dec.DispatchedBy = by
-	if err := dec.Choose(modelID, "owner"); err != nil {
+	if err := dec.Choose(modelID, chosenBy, reason); err != nil {
 		return fmt.Errorf("路由拒绝：%w", err)
 	}
 	if err := routing.Append(d.RoutingLog, dec); err != nil {
