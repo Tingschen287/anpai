@@ -110,6 +110,8 @@ type Source struct {
 	// 会话条目：发起会话与它所在的 profile。
 	SessionID string `json:"session_id,omitempty"`
 	Profile   string `json:"profile,omitempty"`
+	// DoneStatus 是完成回报里的 ok/fail（小写），只有 session_finished 条目有。n039 的额度观测用它。
+	DoneStatus string `json:"done_status,omitempty"`
 	// 会话条目在最近一次 export 里是否还在。conductor drain 或上游清扫后，记录会消失；
 	// 条目保留（owner 可能还没看到），但要标出来。
 	Present bool `json:"present"`

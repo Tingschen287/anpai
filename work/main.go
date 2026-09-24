@@ -24,11 +24,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/arbiter"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/config"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 	"github.com/Tingschen287/terminal-deck/work/internal/queue"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 	"github.com/Tingschen287/terminal-deck/work/internal/ui"
 )
 
@@ -64,7 +67,17 @@ func main() {
 	}
 
 	// 派工能力是可选的：没配好就只看不派，按 d 时界面会说清楚缺什么。
-	dispatcher, dispatchErr := buildDispatcher(root)
+	// 写入权记账只开一份：派工、决策队列、进入会话共用同一个实例，内存与磁盘才一致。
+	leases, leasesErr := openLeases()
+	// 额度观测要看决策队列；队列在下面才打开，这里给派工器一个现取的口子。
+	var qstore *queue.Store
+	queueItems := func() []queue.Item {
+		if qstore == nil {
+			return nil
+		}
+		return qstore.Items()
+	}
+	dispatcher, dispatchErr := buildDispatcher(root, leases, queueItems)
 
 	if *once != "" {
 		width := 100
@@ -85,6 +98,11 @@ func main() {
 	}
 
 	model := ui.New(reader)
+	if leasesErr != nil {
+		model = model.WithLeasesError(leasesErr)
+	} else {
+		model = model.WithLeases(leases)
+	}
 	if dispatcher != nil {
 		model = model.WithDispatcher(dispatcher)
 	} else if dispatchErr != nil {
@@ -99,8 +117,9 @@ func main() {
 	// 决策队列：Graph 的门总能接上；上游没配好时照样开，界面会明说运行时来源取不到。
 	// 队列文件打不开时不静默退掉：界面常驻告警。
 	if store, up, err := buildQueue(); err == nil {
+		qstore = store
 		if up != nil {
-			model = model.WithQueue(store, up, up, pc)
+			model = model.WithQueue(store, up, arbiter.Deliverer{Client: up, Leases: leases}, pc)
 		} else {
 			model = model.WithQueue(store, nil, nil, pc)
 		}
@@ -116,7 +135,7 @@ func main() {
 //
 // 配置缺失不是错误，只是没有派工：Work Deck 照样能看。但配置写错了要说出来，
 // 不能让人按了 d 之后对着一句没头没脑的提示发呆。
-func buildDispatcher(projectRoot string) (ui.Dispatcher, error) {
+func buildDispatcher(projectRoot string, leases *lease.Store, queueItems func() []queue.Item) (ui.Dispatcher, error) {
 	path, err := config.DefaultPath()
 	if err != nil {
 		return nil, err
@@ -138,12 +157,30 @@ func buildDispatcher(projectRoot string) (ui.Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
+	modelOf := func(sessionID string) (string, bool) {
+		b, ok := store.BySession(sessionID)
+		return b.Model, ok
+	}
 	return &dispatch.Dispatcher{
-		Deck:    client,
-		Store:   store,
-		Table:   table,
-		LogPath: filepath.Join(filepath.Dir(path), "dispatch-log.jsonl"),
+		Deck:       arbiter.Deck{Client: client, Leases: leases},
+		Store:      store,
+		Table:      table,
+		LogPath:    filepath.Join(filepath.Dir(path), "dispatch-log.jsonl"),
+		NodeCaps:   cfg.NodeCapabilities,
+		Quota:      routing.Live{Items: queueItems, ModelOf: modelOf},
+		RoutingLog: filepath.Join(filepath.Dir(path), "routing-decisions.jsonl"),
 	}, nil
+}
+
+// openLeases 打开写入权记账（配置目录的 leases.json，切换事件在 leases-log.jsonl）。
+//
+// 打不开（例如文件损坏）时返回错误：界面常驻告警，派工与队列拿到的记账是 nil，一律不投递。
+func openLeases() (*lease.Store, error) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	return lease.Open(filepath.Join(filepath.Dir(path), "leases.json"))
 }
 
 // buildAttacher 装配「进入会话」与「预览」能力，外加绑定表。

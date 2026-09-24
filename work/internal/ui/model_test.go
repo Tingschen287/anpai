@@ -16,6 +16,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 )
 
 // 心跳不许压着取数堆。
@@ -93,6 +94,16 @@ func (f *fakeDispatcher) Candidates(required dispatch.RouteClass) []dispatch.Mod
 		}
 	}
 	return out
+}
+
+// Route 用真实的路由判断，候选取自 cands；没有额度来源，额度一律 unknown。
+func (f *fakeDispatcher) Route(nodeID string, attempt int, purpose string, required dispatch.RouteClass) routing.Decision {
+	var cs []routing.Candidate
+	for _, m := range f.cands {
+		cs = append(cs, routing.Candidate{ID: m.ID, Tool: m.Tool, Class: string(m.Class), Caps: m.Caps})
+	}
+	return routing.Decide(routing.Request{NodeID: nodeID, Attempt: attempt, Purpose: purpose,
+		RequiredClass: string(required), RequiredCapsSource: "测试：没有能力要求"}, cs, nil, time.Now())
 }
 
 func (f *fakeDispatcher) DispatchReviewer(ctx context.Context, req dispatch.ReviewRequest) (binding.Binding, error) {

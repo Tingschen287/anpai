@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 )
 
 // fakeLauncher 记下被请求的内容，并按脚本返回。
@@ -72,7 +73,9 @@ func newDispatcher(t *testing.T, launcher Launcher) (*Dispatcher, string) {
 	logPath := filepath.Join(dir, "dispatch-log.jsonl")
 	return &Dispatcher{
 		Deck: launcher, Store: store, Table: table(t), LogPath: logPath,
-		Now: func() time.Time { return time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC) },
+		// n039：每次派单前写路由审计记录，没有路径就不派。
+		RoutingLog: filepath.Join(dir, "routing-decisions.jsonl"),
+		Now:        func() time.Time { return time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC) },
 	}, logPath
 }
 
@@ -279,6 +282,51 @@ func TestCandidatesPreferTheCheapestThatQualifies(t *testing.T) {
 	for _, m := range got {
 		if m.Class == Economy {
 			t.Errorf("economy 的 %s 不该出现在 balanced 的候选里", m.ID)
+		}
+	}
+}
+
+// 每次派单都留一条路由审计记录；写不进去就不派，上游一次都不调。
+func TestEveryDispatchLeavesARoutingRecord(t *testing.T) {
+	l := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "s-1", Success: true}}
+	d, _ := newDispatcher(t, l)
+	if _, err := d.Dispatch(context.Background(), goodRequest()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(d.RoutingLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec routing.Decision
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.NodeID != "n099_demo" || rec.Chosen != "claude-opus-5" || len(rec.Candidates) == 0 || rec.QuotaBasis == "" {
+		t.Errorf("记录缺字段：%+v", rec)
+	}
+
+	l2 := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "s-2", Success: true}}
+	d2, _ := newDispatcher(t, l2)
+	d2.RoutingLog = filepath.Join(t.TempDir(), "no-such-dir", "sub", "\x00bad")
+	req := goodRequest()
+	if _, err := d2.Dispatch(context.Background(), req); err == nil {
+		t.Fatal("审计记录写不进去时必须拒绝派单")
+	}
+	if len(l2.calls) != 0 {
+		t.Errorf("拒绝时不该调上游，实际调了 %d 次", len(l2.calls))
+	}
+}
+
+// routing 包的档位高低与本包一致。
+func TestRoutingRanksMatchDispatch(t *testing.T) {
+	classes := []RouteClass{Economy, Balanced, Frontier, Human}
+	for _, a := range classes {
+		for _, b := range classes {
+			d := routing.Decide(routing.Request{RequiredClass: string(b)},
+				[]routing.Candidate{{ID: "m", Tool: "t", Class: string(a)}}, nil, time.Now())
+			if d.Candidates[0].MeetsRouteClass != a.Meets(b) {
+				t.Errorf("%s 能否满足 %s：routing 说 %v，dispatch 说 %v", a, b, d.Candidates[0].MeetsRouteClass, a.Meets(b))
+			}
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 )
 
 // refreshInterval 是自动刷新的间隔。
@@ -84,6 +85,14 @@ type Model struct {
 	// 决策队列。qw.store 为 nil 表示没接队列。
 	qw queueWiring
 	qv queueView
+
+	// 写入权记账（n039）：进入前登记接管，回来后挂介入摘要，按 H + y 确认交还。
+	// routing 是这一次挑模型时路由算出的因子（n039）。
+	routing *routing.Decision
+
+	lw        leaseWiring
+	attachCtx *attachContext
+	armed     armedHandback
 }
 
 // Dispatcher 是界面用到的那一点点派工能力。
@@ -94,6 +103,8 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error)
 	DispatchReviewer(ctx context.Context, req dispatch.ReviewRequest) (binding.Binding, error)
 	Candidates(required dispatch.RouteClass) []dispatch.Model
+	// Route 算出这次派单的全部因子与推荐（n039），供挑模型时摆给 owner 看。
+	Route(nodeID string, attempt int, purpose string, required dispatch.RouteClass) routing.Decision
 }
 
 // Attacher 是界面用到的「进入会话」与「瞄一眼」两件事。
@@ -197,6 +208,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice += "。进入时的说明：" + m.enterNote
 			m.enterNote = ""
 		}
+		var hbNote string
+		m, hbNote = m.afterAttach(msg.sessionID, msg.err)
+		if hbNote != "" {
+			m.notice += "。" + hbNote
+		}
 		if !m.inflight {
 			m.inflight = true
 			return m, m.fetch()
@@ -286,6 +302,12 @@ type dispatchDoneMsg struct {
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.armed.sessionID != "" && m.mode == ModeBrowse {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m.onArmedKey(msg.String()), nil
+	}
 	if m.qv.show && m.queueOn() && m.mode == ModeBrowse {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -350,6 +372,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginDirectAttach()
 	case "p":
 		return m.beginPreview()
+	case "H":
+		return m.beginHandback(), nil
 	case "i":
 		if !m.queueOn() {
 			m.notice, m.noticeOK = "没有接决策队列（配置目录不可用，见启动时的提示）", false
@@ -454,6 +478,7 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 	m.notice = m.attacher.NestingAdvice()
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
+	m = m.beforeAttach(sessionID, "upstream")
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}
 	})
@@ -507,6 +532,7 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 	}
 	m.notice += m.attacher.NestingAdvice()
 	m.noticeOK = true
+	m = m.beforeAttach(sessionID, "tmux")
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}
 	})
@@ -633,6 +659,20 @@ func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 		m.noticeOK = false
 		return m, nil
 	}
+	// 路由因子：只留可选的候选，推荐的排第一；一个可选的都没有就不进挑选。
+	purpose := "executor"
+	if reviewing {
+		purpose = "reviewer"
+	}
+	att, _ := node.Attempt.Get()
+	dec := m.dispatcher.Route(node.ID, att, purpose, dispatch.RouteClass(required))
+	cands = selectableFirst(cands, dec)
+	if len(cands) == 0 {
+		m.notice = "所有候选都被排除，不派：" + dec.Reason + excludedSummary(dec)
+		m.noticeOK = false
+		return m, nil
+	}
+	m.routing = &dec
 	m.candidates = cands
 	m.pick = 0
 	m.pickingReviewer = reviewing
@@ -718,6 +758,7 @@ func (m Model) View() string {
 		Picking:         m.mode == ModePickModel,
 		PickingReviewer: m.pickingReviewer,
 		Candidates: m.candidates,
+		Routing:    m.routing,
 		Pick:       m.pick,
 		Notice:      m.notice,
 		NoticeOK:    m.noticeOK,
@@ -728,6 +769,7 @@ func (m Model) View() string {
 		ShowAll:     m.showAll,
 		EnterHint:   m.enterHint(),
 		QueueOn:     m.queueOn(),
+		LeaseLines:  m.leaseLines(),
 		QueueOpen:   m.queueOpen(),
 		Queue:       m.queueScreen(),
 	})

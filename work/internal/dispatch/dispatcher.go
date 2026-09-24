@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,6 +70,15 @@ type Dispatcher struct {
 	Table *RouteTable
 	// 派工流水的落盘路径，每次一行 JSON。
 	LogPath string
+
+	// 能力路由（n039）。每次派单前按这些算出全部因子，写进 RoutingLog；写不进去就不派。
+	//
+	// NodeCaps 是节点 → 所需能力，来自配置；没声明的节点没有能力要求，记录里照实写。
+	NodeCaps map[string][]string
+	// Quota 是 Work Deck 自己的额度观测；为 nil 时每个候选的额度都是 unknown。
+	Quota routing.QuotaSource
+	// RoutingLog 是路由审计记录的落盘路径，每次一行 JSON。必填。
+	RoutingLog string
 	// 取当前时间，测试里可以换掉。
 	Now func() time.Time
 
@@ -131,6 +142,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	if existing, ok := d.Store.Get(req.NodeID, req.Attempt); ok {
 		return refuse(fmt.Errorf("%s 的 attempt %d 已经绑在会话 %s 上，不重复派工",
 			req.NodeID, req.Attempt, existing.SessionID))
+	}
+
+	if err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy); err != nil {
+		return refuse(err)
 	}
 
 	res, err := d.Deck.Launch(ctx, agentdeck.LaunchRequest{
@@ -199,4 +214,39 @@ func (d *Dispatcher) appendLog(o Outcome) error {
 // 界面拿它给人挑。排序把刚好够用的放前面，免得一上来就用最贵的。
 func (d *Dispatcher) Candidates(required RouteClass) []Model {
 	return d.Table.CandidatesFor(required)
+}
+
+// Route 算出一次派单的全部因子与推荐，不落盘。界面用它把因子摆给 owner 看。
+func (d *Dispatcher) Route(nodeID string, attempt int, purpose string, required RouteClass) routing.Decision {
+	caps, source := d.NodeCaps[nodeID], "配置 node_capabilities 为该节点声明的能力要求"
+	if _, ok := d.NodeCaps[nodeID]; !ok {
+		source = "配置 node_capabilities 没有为该节点声明能力要求：本次不按能力筛选"
+	}
+	var cands []routing.Candidate
+	for _, m := range d.Table.All() {
+		cands = append(cands, routing.Candidate{ID: m.ID, Tool: m.Tool, Class: string(m.Class), Caps: m.Caps})
+	}
+	return routing.Decide(routing.Request{
+		NodeID: nodeID, Attempt: attempt, Purpose: purpose, RequiredClass: string(required),
+		RequiredCaps: caps, RequiredCapsSource: source,
+	}, cands, d.Quota, d.now())
+}
+
+// routeAndRecord 在真正起会话之前算路由、核 owner 选的模型是否可选、写审计记录。
+// 任何一步不成就返回错误，调用方据此拒绝派单：说不清为什么派给它，就不派。
+func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, required RouteClass, modelID, by string) error {
+	if d.RoutingLog == "" {
+		return fmt.Errorf("没有配置路由审计记录，不派单")
+	}
+	dec := d.Route(nodeID, attempt, purpose, required)
+	if by == "" {
+		by = "owner"
+	}
+	if err := dec.Choose(modelID, by); err != nil {
+		return fmt.Errorf("路由拒绝：%w", err)
+	}
+	if err := routing.Append(d.RoutingLog, dec); err != nil {
+		return fmt.Errorf("路由审计记录写不进去，不派单：%w", err)
+	}
+	return nil
 }

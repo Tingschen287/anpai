@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 )
 
 var (
@@ -43,6 +44,8 @@ type Screen struct {
 	Cursor int
 	// 是不是正在挑模型。
 	Picking bool
+	// Routing 是挑模型时路由算出的因子（n039），为 nil 时不画。
+	Routing *routing.Decision
 	// 可选的模型与当前挑中的那个。
 	Candidates []dispatch.Model
 	Pick       int
@@ -64,6 +67,8 @@ type Screen struct {
 	EnterHint string
 	// 决策队列：QueueOn 表示接了队列；Queue.Show 为真时整屏换成队列视图。
 	QueueOn   bool
+	// LeaseLines 是写入权的常驻提示：记账打不开、等确认交还的会话。
+	LeaseLines []string
 	QueueOpen int
 	Queue     QueueScreen
 }
@@ -224,6 +229,13 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 		if len(sc.Candidates) == 0 {
 			w("  %s", styleAlert.Render("档位表里没有满足这个节点的模型"))
 		}
+		if r := sc.Routing; r != nil {
+			if r.Recommended != "" {
+				w("  %s", styleOK.Render("推荐 "+r.Recommended+"："+r.Reason))
+			} else {
+				w("  %s", styleUnknown.Render("不自动推荐，交给你挑："+r.Reason))
+			}
+		}
 		for i, c := range sc.Candidates {
 			mark := "  "
 			line := fmt.Sprintf("%-28s %-10s %s", c.ID, c.Class, c.Tool)
@@ -232,6 +244,13 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 				line = styleTitle.Render(line)
 			}
 			w("%s%s", mark, line)
+			if f, ok := factorOf(sc.Routing, c.ID); ok {
+				w("      %s", styleDim.Render(factorLine(f)))
+			}
+		}
+		if r := sc.Routing; r != nil {
+			w("  %s", styleDim.Render("能力要求："+capsRequirement(r)))
+			w("  %s", styleDim.Render("额度依据："+r.QuotaBasis))
 		}
 		w("  %s", styleDim.Render("↑↓ 选，回车派工，Esc 取消"))
 		w("")
@@ -283,6 +302,9 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 		w("%s", styleAlert.Render("问题："+p))
 	}
 	// 决策队列的告警常驻主界面：notify-daemon 不在时绝不能只显示一个空队列。
+	for _, ln := range sc.LeaseLines {
+		w("%s", styleAlert.Render(ln))
+	}
 	if sc.QueueOn {
 		renderQueueSummary(sc.Queue, sc.QueueOpen, w)
 	}
@@ -291,7 +313,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, ln := range wrapText(sc.EnterHint, width) {
 		w("%s", styleDim.Render(ln))
 	}
-	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　r 刷新　q 退出"))
+	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　H 交还　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
 	w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
 	return b.String()

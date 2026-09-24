@@ -68,6 +68,7 @@
         "state": {"type": "string"},
         "session_id": {"type": "string"},
         "profile": {"type": "string"},
+        "done_status": {"type": "string", "description": "完成回报的 ok/fail，只有 session_finished 条目有"},
         "present": {"type": "boolean"}
       }
     },

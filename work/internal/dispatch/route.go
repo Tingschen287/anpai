@@ -47,6 +47,8 @@ type Model struct {
 	Tool string
 	// 这个模型算哪一档。
 	Class RouteClass
+	// Caps 是配置里显式声明的能力位（yes/no），没写的就是 unknown。绝不从 Tool 推断。
+	Caps map[string]string
 }
 
 // RouteTable 是档位表：哪个模型算哪一档。
@@ -88,6 +90,19 @@ func (t *RouteTable) Lookup(id string) (Model, error) {
 		return Model{}, fmt.Errorf("档位表里没有模型 %q：模型未知时拒绝派工，不猜默认值", id)
 	}
 	return m, nil
+}
+
+// All 列出档位表里的全部模型，按 ID 排序。路由要看全部候选，才记得下「谁因为什么被排除」。
+func (t *RouteTable) All() []Model {
+	if t == nil {
+		return nil
+	}
+	out := make([]Model, 0, len(t.models))
+	for _, m := range t.models {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // CandidatesFor 列出能满足某个档位要求的模型，按档位从低到高排，

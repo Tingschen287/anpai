@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
 // InboxRecord 是 `inbox export --json` 的一条记录。
@@ -129,12 +131,12 @@ func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
 // session send 只在当前 profile 里解析会话号（上游 session_cmd.go:2760-2767），
 // 而本包的 profile 是配置里显式写死的，不会为一条记录临时换 profile。
 // 记录属于别的 profile 时直接拒绝，说清原因。
-func (c *Client) DeliverAnswer(ctx context.Context, rec InboxRecord, message string) error {
+func (c *Client) DeliverAnswer(ctx context.Context, p lease.Permit, rec InboxRecord, message string) error {
 	if rec.Profile != "" && rec.Profile != c.Profile {
 		return fmt.Errorf("会话 %s 属于 profile %q，Work Deck 只向自己的 profile %q 投递，不代投",
 			rec.ChildSessionID, rec.Profile, c.Profile)
 	}
-	return c.SendMessage(ctx, rec.ChildSessionID, message)
+	return c.SendMessage(ctx, p, rec.ChildSessionID, message)
 }
 
 // procRoot 是进程表的位置，测试里换成假目录。

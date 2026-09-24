@@ -33,6 +33,12 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   按 T 直连时先问 `/api/menu`，问不到才退到它。
 - `session send` 用于派评审的第二步：先起空会话、核验上游返回的会话号，再投递 brief。
   加它不放开 `session` 底下别的命令，二级匹配照旧生效。n038 起它也是决策队列回答的投递口。
+- **n039 起 `SendMessage` 与 `DeliverAnswer` 必须带一张 `lease.Permit`**，在执行 `session send` 之前核对：
+  owner 接管着、等确认交还、租约过期、持有者未知，都投不进去。许可只能由 `internal/lease` 签发，
+  `TestEveryWriteIntoASessionNeedsAPermit` 核对包内往会话写字的上游调用只有 `SendMessage` 一处且先核许可。
+- **实测（n039）**：对 shell 会话，上游 `session send` 判「已提交」看正文是否还在输入区；shell 的
+  `xxx: command not found` 回显会干扰这个判断，某些 ASCII 单词会被报成「reached the pane but submission was never
+  confirmed」（issue #1793）而以退出码 1 失败。派评审时首条 brief 被这样误报，派工器会按「没送进去」拒绝并留下半成品会话。
 - `inbox` 只放 `export` 与 `writer-status` 两条非消费式读取。`inbox drain`（conductor 的消费口，读完即删）
   与裸 `inbox <id>`（读完即截断）都拒绝，`TestInboxOnlyAllowsNonConsumingReads` 逐条确认。
   上游对 export 的承诺原文：「NON-DESTRUCTIVE ... two conductors draining the same host both get the records」

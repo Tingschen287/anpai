@@ -11,7 +11,9 @@ import (
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/arbiter"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
 // 端到端：档位表 → 派工器 → adapter → 真实的 upstream agent-deck。
@@ -66,7 +68,12 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Dispatcher{Deck: shellLauncher{client}, Store: store, Table: tbl, LogPath: logPath}
+	leases, err := lease.Open(filepath.Join(t.TempDir(), "leases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{Deck: shellLauncher{arbiter.Deck{Client: client, Leases: leases}}, Store: store, Table: tbl, LogPath: logPath,
+		RoutingLog: filepath.Join(t.TempDir(), "routing-decisions.jsonl")}
 
 	project := t.TempDir()
 	if err := os.WriteFile(filepath.Join(project, "README.md"), []byte("# 夹具项目\n"), 0o644); err != nil {
@@ -157,11 +164,12 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 //
 // 派工器坚持要模型，adapter 允许显式声明「这工具没有模型」，两者在这里对接：
 // 模型 ID 仍然记进绑定与流水，只是不往上游传 --model。
-type shellLauncher struct{ c *agentdeck.Client }
+//
+// 投递与起会话都经 arbiter.Deck：新会话登记写入权，投递用「自动」许可，与发布代码同一条路。
+type shellLauncher struct{ d arbiter.Deck }
 
-// SendMessage 直接走真实 adapter，不加工。
 func (s shellLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
-	return s.c.SendMessage(ctx, sessionID, message)
+	return s.d.SendMessage(ctx, sessionID, message)
 }
 
 func (s shellLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
@@ -169,5 +177,5 @@ func (s shellLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) 
 		req.Model = ""
 		req.ModelNotApplicable = true
 	}
-	return s.c.Launch(ctx, req)
+	return s.d.Launch(ctx, req)
 }

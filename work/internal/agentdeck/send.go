@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
 // SendMessage 把一段文本送进一个已经在跑的会话。
@@ -15,9 +17,15 @@ import (
 //
 // 文本走标准输入，不进 argv。上游自己提供了 `--message-file -`，
 // 一大段 brief 不必经过 shell 引号，也不会被当成参数解释。
-func (c *Client) SendMessage(ctx context.Context, sessionID, message string) error {
+//
+// 必须带一张 lease.Permit（n039）：许可只有写入权记账能签发，并在这里、投递之前再核一次。
+// owner 接管着、等确认交还、租约过期、持有者未知，都投不进去。本包内没有别的往会话里写字的路。
+func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, message string) error {
 	if sessionID == "" {
 		return fmt.Errorf("没有会话号，无法投递消息")
+	}
+	if err := p.Allows(sessionID); err != nil {
+		return fmt.Errorf("不投递：%w", err)
 	}
 	if message == "" {
 		return fmt.Errorf("消息是空的，不投递：说不清要对方做什么，就别派这一趟")

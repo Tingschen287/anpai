@@ -117,3 +117,35 @@ func TestTokenNeverComesFromTheConfigFile(t *testing.T) {
 		t.Error("环境变量没设时 token 应当为空")
 	}
 }
+
+// 能力位声明与节点能力要求都要校验：认不出的名字、yes/no 以外的值都报错（n039）。
+func TestCapabilityConfigIsValidated(t *testing.T) {
+	base := func() Config {
+		return Config{UpstreamBinary: "/x", Profile: "_p", Models: []ModelEntry{{ID: "m", Tool: "t", Class: "frontier"}}}
+	}
+	c := base()
+	c.Models[0].Capabilities = map[string]string{"resume": "yes"}
+	c.NodeCapabilities = map[string][]string{"n1": {"resume"}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法配置被拒：%v", err)
+	}
+	c = base()
+	c.Models[0].Capabilities = map[string]string{"resume": "maybe"}
+	if err := c.Validate(); err == nil {
+		t.Error("能力值只能是 yes/no")
+	}
+	c = base()
+	c.NodeCapabilities = map[string][]string{"n1": {"telepathy"}}
+	if err := c.Validate(); err == nil {
+		t.Error("不认识的能力要求应当报错")
+	}
+	c = base()
+	c.Models[0].Capabilities = map[string]string{"mcp": "no"}
+	table, err := c.RouteTable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := table.Lookup("m"); m.Caps["mcp"] != "no" {
+		t.Error("能力声明要带进档位表")
+	}
+}

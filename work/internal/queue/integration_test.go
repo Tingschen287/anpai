@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/arbiter"
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
 // 这组测试用真实的 upstream agent-deck 二进制跑夹具。没设 WORKDECK_AGENTDECK_BIN 就跳过。
@@ -254,7 +256,13 @@ func TestIntegrationAnswerReachesTheOriginatingSession(t *testing.T) {
 	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{rec}, now), now)
 	id := s.Items()[0].ID
 
-	it, err := Respond(ctx, s, c, id, "continue", now)
+	leases, err := lease.Open(filepath.Join(t.TempDir(), "leases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 与发布代码同一条路：owner 的回答用「手动」许可，经 arbiter 投递。
+	del := arbiter.Deliverer{Client: c, Leases: leases}
+	it, err := Respond(ctx, s, del, id, "continue", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +284,7 @@ func TestIntegrationAnswerReachesTheOriginatingSession(t *testing.T) {
 	// 别的 profile 的会话不代投。
 	other := rec
 	other.Profile = "_someone_else"
-	if err := c.DeliverAnswer(ctx, other, "继续"); err == nil {
+	if err := del.DeliverAnswer(ctx, other, "继续"); err == nil {
 		t.Error("别的 profile 的会话应当拒绝投递")
 	}
 }

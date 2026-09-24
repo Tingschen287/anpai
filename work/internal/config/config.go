@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
+	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 )
 
 // Config 是 Work Deck 派工要用到的全部设置。
@@ -25,6 +26,8 @@ type Config struct {
 	Models []ModelEntry `json:"models"`
 	// 派工时传给上游的分组名。
 	Group string `json:"group"`
+	// NodeCapabilities 是节点 → 派单所需的能力位（n039）。没写的节点没有能力要求。
+	NodeCapabilities map[string][]string `json:"node_capabilities"`
 }
 
 // ModelEntry 是档位表里的一行。
@@ -32,6 +35,9 @@ type ModelEntry struct {
 	ID    string `json:"id"`
 	Tool  string `json:"tool"`
 	Class string `json:"route_class"`
+	// Capabilities 是显式声明的能力位，值只能是 yes 或 no。没写的能力就是 unknown，
+	// 路由不会从 Tool 推断它（n039）。
+	Capabilities map[string]string `json:"capabilities"`
 }
 
 // TokenEnv 是存放上游 token 的环境变量名。
@@ -86,6 +92,14 @@ func (c *Config) Validate() error {
 		if m.ID == "" || m.Tool == "" || m.Class == "" {
 			return fmt.Errorf("模型档位表第 %d 行没写全（要有 id、tool、route_class）", i+1)
 		}
+		if err := routing.ValidateCaps(m.Capabilities); err != nil {
+			return fmt.Errorf("模型 %s：%w", m.ID, err)
+		}
+	}
+	for node, caps := range c.NodeCapabilities {
+		if err := routing.ValidateRequired(caps); err != nil {
+			return fmt.Errorf("node_capabilities 里的节点 %s：%w", node, err)
+		}
 	}
 	return nil
 }
@@ -95,7 +109,7 @@ func (c *Config) RouteTable() (*dispatch.RouteTable, error) {
 	models := make([]dispatch.Model, 0, len(c.Models))
 	for _, m := range c.Models {
 		models = append(models, dispatch.Model{
-			ID: m.ID, Tool: m.Tool, Class: dispatch.RouteClass(m.Class),
+			ID: m.ID, Tool: m.Tool, Class: dispatch.RouteClass(m.Class), Caps: m.Capabilities,
 		})
 	}
 	return dispatch.NewRouteTable(models)

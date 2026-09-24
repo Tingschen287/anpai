@@ -148,6 +148,7 @@ func FromInbox(records []agentdeck.InboxRecord, now time.Time) []Item {
 			BlockingSessions: []string{r.ChildSessionID},
 			Source: Source{
 				Kind: SourceSession, SessionID: r.ChildSessionID, Profile: r.Profile, Present: true,
+				DoneStatus: strings.ToLower(strings.TrimSpace(r.DoneStatus)),
 			},
 			FirstSeen: now,
 			LastSeen:  now,

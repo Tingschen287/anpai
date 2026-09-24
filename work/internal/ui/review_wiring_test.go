@@ -65,8 +65,9 @@ func realDispatcher(t *testing.T, launcher dispatch.Launcher) *dispatch.Dispatch
 	}
 	return &dispatch.Dispatcher{
 		Deck: launcher, Store: store, Table: table,
-		LogPath: filepath.Join(dir, "dispatch-log.jsonl"),
-		Now:     func() time.Time { return time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC) },
+		LogPath:    filepath.Join(dir, "dispatch-log.jsonl"),
+		RoutingLog: filepath.Join(dir, "routing-decisions.jsonl"),
+		Now:        func() time.Time { return time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC) },
 	}
 }
 
@@ -188,4 +189,3 @@ func TestRealDispatcherIgnoresCallerSuppliedReviewerIdentity(t *testing.T) {
 		t.Error("以上都该在启动会话之前就被拒")
 	}
 }
-

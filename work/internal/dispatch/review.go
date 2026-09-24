@@ -126,6 +126,11 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 			req.NodeID, req.Attempt, existing.SessionID))
 	}
 
+	// 起会话之前先算路由并写审计记录：说不清为什么派给这个模型，就不派。
+	if err := d.routeAndRecord(req.NodeID, req.Attempt, "reviewer", req.RequiredClass, req.ModelID, req.DispatchedBy); err != nil {
+		return refuse(err)
+	}
+
 	// 第一步：起一个空会话。brief **不**随它出去。
 	//
 	// 会话号要等这一步返回才存在，而「这个会话是不是执行者正在用的那个」
