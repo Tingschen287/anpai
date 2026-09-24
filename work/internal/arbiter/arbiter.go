@@ -70,7 +70,7 @@ func (d Deck) SendMessage(ctx context.Context, sessionID, message string) error 
 	}
 	if n > 0 {
 		reason := fmt.Sprintf("检测到 %d 个 tmux 客户端连着会话（不经 Work Deck 的接管）", n)
-		if terr := d.Leases.OwnerTakeover(sessionID, "external"); terr != nil {
+		if terr := d.Leases.ExternalTakeover(sessionID, n); terr != nil {
 			return fmt.Errorf("不自动投递：%s；登记接管也失败：%v", reason, terr)
 		}
 		return fmt.Errorf("不自动投递：%s，已按 owner 接管登记，要你确认交还后才恢复", reason)

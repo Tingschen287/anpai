@@ -85,6 +85,7 @@ const (
 	EventReturn   = "owner_return"   // owner 回来，等确认
 	EventConfirm  = "handback_confirmed"
 	EventRenew    = "renewed"
+	EventExternal = "external_takeover" // 投递前查到不经 Work Deck 的接入
 )
 
 type file struct {
@@ -255,6 +256,31 @@ func (s *Store) OwnerTakeover(sessionID, via string) error {
 	}
 	next := &Lease{SessionID: sessionID, Holder: HolderOwner, Since: now}
 	return s.commitLocked(sessionID, next, Event{At: now, SessionID: sessionID, Kind: EventTakeover, From: from, To: HolderOwner, Reason: "owner 经 " + via + " 进入会话"})
+}
+
+// ExternalTakeover 登记一次不经 Work Deck 的接管：投递前查到 tmux 上有客户端连着这个会话。
+//
+// 一步里既转给 owner、也挂上一份「等确认交还」的摘要（进入时间与画面都不知道）：Work Deck 看不到这次接管何时结束，
+// 只能让 owner 自己确认。他在还连着的时候就确认也不会误投——下一次自动投递前会再查一次客户端，查到就再登记接管。
+func (s *Store) ExternalTakeover(sessionID string, clients int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sessionID == "" {
+		return fmt.Errorf("没有会话号，不能登记接管")
+	}
+	if s.inflight[sessionID] > 0 {
+		return &ErrDeliveryInProgress{SessionID: sessionID}
+	}
+	now := s.now()
+	from := ""
+	if l, ok := s.leases[sessionID]; ok {
+		from = l.Holder
+	}
+	hb := &Handback{ReturnedAt: now, Via: "external",
+		Notes: []string{fmt.Sprintf("不经 Work Deck 的接入：投递前查到 %d 个 tmux 客户端连着这个会话；进入时间与进入前画面不知道", clients)}}
+	next := &Lease{SessionID: sessionID, Holder: HolderOwner, Since: now, PendingHandback: hb}
+	return s.commitLocked(sessionID, next, Event{At: now, SessionID: sessionID, Kind: EventExternal, From: from, To: HolderOwner,
+		Reason: fmt.Sprintf("查到 %d 个 tmux 客户端连着会话，按 owner 接管处理，等确认交还", clients)})
 }
 
 // OwnerReturn 在 owner 回来之后调用：写入权仍在 owner 手上，挂一份介入摘要等确认。

@@ -37,11 +37,24 @@ func TestExternalAttachIsTreatedAsTakeover(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "检测到 1 个 tmux 客户端") {
 		t.Fatalf("有客户端连着必须拒绝并说明：%v", err)
 	}
-	if l, _ := leases.Get("sess-1"); l.Holder != lease.HolderOwner {
-		t.Errorf("应当登记为 owner 接管：%+v", l)
+	if l, _ := leases.Get("sess-1"); l.Holder != lease.HolderOwner || l.PendingHandback == nil {
+		t.Errorf("应当登记为 owner 接管并挂上等确认的摘要（否则 H 交还不了）：%+v", l)
 	}
 	if got := sentLines(t, sent); len(got) != 0 {
 		t.Errorf("上游不该收到任何东西：%v", got)
+	}
+	// owner 确认交还后：客户端还在就再次登记接管；客户端走了才投。
+	leases.ConfirmHandback("sess-1")
+	if err := d.SendMessage(context.Background(), "sess-1", "brief"); err == nil {
+		t.Error("确认后客户端仍连着，必须再次拒绝")
+	}
+	leases.ConfirmHandback("sess-1")
+	d.Clients = fakeProbe{n: 0}
+	if err := d.SendMessage(context.Background(), "sess-1", "brief"); err != nil {
+		t.Errorf("客户端都走了、已确认交还，应当恢复：%v", err)
+	}
+	if got := sentLines(t, sent); len(got) != 1 {
+		t.Errorf("上游应当只收到恢复后那一条：%v", got)
 	}
 }
 
