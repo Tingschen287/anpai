@@ -59,7 +59,11 @@ import (
 //
 // 这条是独立评审顺着源码追出来的。我读过 `list --json` 那段代码，
 // RefreshInstancesForCLIStatus 就在我查的结构体下面几行，我没追进去看它做什么。
-var Subcommands = []string{"launch", "web", "list", "session attach", "session output", "session send"}
+//
+// inbox 只放两条非消费式读取（n038）：export 读全机记录不删任何东西，writer-status 问
+// notify-daemon 在不在。drain 与裸 `inbox <id>` 都会消费记录，和 conductor 抢，一律拒绝。
+var Subcommands = []string{"launch", "web", "list", "session attach", "session output", "session send",
+	"inbox export", "inbox writer-status"}
 
 // isAllowedSubcommand 按整条命令路径匹配。
 //

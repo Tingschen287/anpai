@@ -92,7 +92,7 @@ func TestLaunchRequestRefusesUnknownModel(t *testing.T) {
 
 // 依赖清单不能写完就烂掉：清单里列的字段必须真的是结构体在读的字段，反过来也一样。
 //
-// 只核下面三个结构体。ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在这里核。
+// 只核下面五个结构体。ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在这里核。
 func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
 	check := func(name string, listed []string, v any) {
 		t.Helper()
@@ -126,6 +126,8 @@ func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
 	check("launch --json", LaunchFields, LaunchResult{})
 	check("会话对象", SessionFields, Session{})
 	check("菜单事件", MenuFields, MenuEvent{})
+	check("inbox export", InboxFields, InboxRecord{})
+	check("inbox writer-status", WriterStatusFields, WriterStatus{})
 }
 
 // 清单里列的子命令，必须正好是白名单。
@@ -134,6 +136,7 @@ func TestManifestSubcommandsMatchAllowList(t *testing.T) {
 	// 让「多放行一条上游命令」成为一个必须被看见的改动，而不是顺手加上去的。
 	if !reflect.DeepEqual(Subcommands, []string{
 		"launch", "web", "list", "session attach", "session output", "session send",
+		"inbox export", "inbox writer-status",
 	}) {
 		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
 	}
@@ -336,6 +339,35 @@ func TestDangerousSessionSubcommandsAreRefused(t *testing.T) {
 		var refused *ErrSubcommandNotAllowed
 		if !errors.As(err, &refused) {
 			t.Errorf("%v 必须被拒绝，实际得到 %v", args, err)
+		}
+	}
+}
+
+// inbox 底下只许两条非消费式读取。
+//
+// drain 按父会话分片、读完即删，是 conductor 的消费口；裸 `inbox <id>` 读完就截断。
+// Work Deck 碰其中任何一条，都是在和 conductor 抢同一份记录。
+func TestInboxOnlyAllowsNonConsumingReads(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"inbox"},
+		{"inbox", "drain"},
+		{"inbox", "drain", "self"},
+		{"inbox", "some-session-id"},
+		{"inbox", "--json", "some-session-id"},
+	} {
+		_, err := c.exec(context.Background(), args[0], args[1:]...)
+		var refused *ErrSubcommandNotAllowed
+		if !errors.As(err, &refused) {
+			t.Errorf("%v 必须被拒绝，实际得到 %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"inbox", "export"}, {"inbox", "writer-status"}} {
+		if !isAllowedSubcommand(args...) {
+			t.Errorf("%v 应当被允许", args)
 		}
 	}
 }

@@ -21,6 +21,8 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `session output` | 只读预览会话当前画面 | `-pane` |
 | `session send` | 把评审 brief 投进一个已核验会话号的评审会话 | `--message-file -`（文本走标准输入，不进 argv） |
 | `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
+| `inbox export` | 决策队列：非消费式读全机 completion/transition 记录（n038） | `--json` |
+| `inbox writer-status` | 决策队列：读 export 之前自检 notify-daemon 在不在（n038） | `--json` |
 
 - 白名单在 `client.go` 的 `Subcommands`。清单之外的子命令，adapter 拒绝执行（`ErrSubcommandNotAllowed`）。
 - **白名单精确到第二级。** 只写 `session` 会把 `session stop`、`remove` 等一并放行。
@@ -30,20 +32,27 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 - `list` 直接读上游存储，不经 headless 服务。服务的菜单缓存看不见刚 launch 的会话，`list` 看得见（见第 7 节）。
   按 T 直连时先问 `/api/menu`，问不到才退到它。
 - `session send` 用于派评审的第二步：先起空会话、核验上游返回的会话号，再投递 brief。
-  加它不放开 `session` 底下别的命令，二级匹配照旧生效。
+  加它不放开 `session` 底下别的命令，二级匹配照旧生效。n038 起它也是决策队列回答的投递口。
+- `inbox` 只放 `export` 与 `writer-status` 两条非消费式读取。`inbox drain`（conductor 的消费口，读完即删）
+  与裸 `inbox <id>`（读完即截断）都拒绝，`TestInboxOnlyAllowsNonConsumingReads` 逐条确认。
+  上游对 export 的承诺原文：「NON-DESTRUCTIVE ... two conductors draining the same host both get the records」
+  （`internal/session/inbox_export.go:31-34`）。
 
 ### 白名单里哪些命令会写上游
 
 **「在允许清单里」不等于「没有副作用」。** 这两件事分开记。
 
-**先说一条对所有命令都成立的**：每条 CLI 子命令跑起来都要先加载 profile。
+**先说一条对 inbox 之外各条命令都成立的**：这些子命令跑起来都要先加载 profile。
 那条路（上游 `internal/session/storage.go:209` 的 `NewStorageWithProfile`）会
 建 profile 目录、建 `state.db`、跑 schema 迁移，必要时还会把旧的 `sessions.json` 迁过来改名。
-**所以没有一条命令是纯读的**，哪怕它叫 `list` 或 `output`。
+**所以它们没有一条是纯读的**，哪怕它叫 `list` 或 `output`。
+
+`inbox` 两条例外：上游 main 在加载 profile 之前就把 `inbox` 分派出去了（`cmd/agent-deck/main.go:417`，
+早于 `:518` 的 `NewStorageWithProfile`）。它们各自的副作用写在下表。
 
 各条命令另外还写什么：
 
-| 命令 | 除共有的 storage 初始化外，还写什么 | 上游依据（文件:行 · 所属函数） |
+| 命令 | 除共有的 storage 初始化外（inbox 两条没有这一项），还写什么 | 上游依据（文件:行 · 所属函数） |
 |---|---|---|
 | `launch` | `InsertSessionAndVerify` 写进上游存储；`SetEnvironment` 写会话环境变量 `AGENTDECK_INSTANCE_ID` | `cmd/agent-deck/launch_cmd.go:626` · `handleLaunch`<br>`internal/session/instance.go:4939` · `Start` |
 | `web` | 按配置跑 `costStore.PurgeOlderThan`，删超出保留期的成本记录 | `cmd/agent-deck/main.go:826` · `main` |
@@ -51,6 +60,8 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `session attach` | 给目标 tmux 会话加一个 attached client；启动 badge watcher，`os.MkdirAll` 建 badge 更新目录 | `cmd/agent-deck/session_cmd.go:1370` · `handleSessionAttach`<br>`internal/tmux/badge_update.go:125` · `WatchBadgeUpdates` |
 | `session output` | `-pane` 分支调 `PreviewFull`，最终由 `CaptureFullHistory` 跑 `capture-pane` 取画面 | `cmd/agent-deck/session_cmd.go:4409` · `handleSessionOutput`<br>`internal/tmux/tmux.go:3689` · `CaptureFullHistory` |
 | `session send` | `executeSend` 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2894` · `handleSessionSend` |
+| `inbox export` | 读三处记录取并集，不删不截断；但记录里出现的每个 profile 都会被 `NewStorageWithProfile` 打开，没有就建 `state.db` | `cmd/agent-deck/inbox_cmd.go:423` · `runInboxExport`<br>`internal/session/inbox_export.go:151` · `dropSuppressedChildren` |
+| `inbox writer-status` | 只读 notify-daemon 的心跳文件 | `cmd/agent-deck/inbox_cmd.go:466` · `runInboxWriterStatus`<br>`internal/session/notify_heartbeat.go:74` · `ReadWriterStatus` |
 
 `list --json` 在输出之前会先刷新状态，那条路一直通到 SQLite：
 
@@ -116,7 +127,7 @@ internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
 
 ## 3. 依赖的输出字段
 
-`TestManifestMatchesTheStructsWeActuallyDecode` 只双向核对三组：`launch --json`、会话对象、菜单事件顶层。
+`TestManifestMatchesTheStructsWeActuallyDecode` 只双向核对五组：`launch --json`、会话对象、菜单事件顶层、`inbox export` 记录、`inbox writer-status`。
 其余几组（`list --json` 的行、分组、菜单行、`/api/sessions` 顶层）只写在这里，没有测试核对。
 
 ### `launch --json`（有测试核对）
@@ -146,6 +157,24 @@ internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
 ### 菜单事件顶层（有测试核对）
 
 `profile`、`generatedAt`、`totalGroups`、`totalSessions`、`items`
+
+### `inbox export --json` 的每条记录（有测试核对）
+
+顶层是数组，没有记录时是 `[]`。字段照上游 `TransitionNotificationEvent`（`internal/session/transition_notifier.go:40-108`）：
+
+`child_session_id`、`child_title`、`profile`、`from_status`、`to_status`、`timestamp`、`substate`、
+`last_output_hash`、`target_session_id`、`target_kind`、`kind`、`done_status`、`done_summary`、
+`turn_fingerprint`、`source_remote`、`dead_letter_reason`
+
+- `kind` 为空是一次状态翻转；`kind` 为 `finished` 是完成回报，from/to 都是空串。
+- 没有 id。去重键由 `InboxRecord.Fingerprint` 照上游 `EventFingerprint`（`internal/session/event_fingerprint.go:22-48`）重算，不含时间戳。
+- 发起会话是 `child_session_id`；`target_session_id` 是它的父会话或 conductor，不是投递对象。
+
+### `inbox writer-status --json`（有测试核对）
+
+`running`、`last_heartbeat`、`age_seconds`、`detail`
+
+上游只看心跳文件新旧（90 秒内算在跑，`internal/session/notify_heartbeat.go:31`），不论结果退出码都是 0，只能看 `running`。
 
 ### 没有测试核对的几组
 
@@ -296,10 +325,23 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
 3. `TestIntegrationLaunchLandsInStorageEvenThoughServerCachesIt` 在没有上述失效事件的条件下（新 profile、刚起的服务）
    把这条约束钉成了断言：上游哪天修好，该测试会失败，那时回来更新本节与视图逻辑。
 
+## 7b. 已知约束：inbox 事件看得到什么、看不到什么（n038）
+
+- **顶层会话的等待不进 export。** 没有父会话的会话，状态翻转按 `orphan` 丢弃，不写任何 inbox
+  （`internal/session/inbox_outbox.go:467-471`、`transition_notifier.go:219-221`）。Work Deck 派出去的会话都是顶层的，
+  所以它们的 running→waiting 不会出现；只有打出完成标记时，完成账本里会有一条 `finished`。
+  能进 export 的等待来自有父会话（conductor 或上级会话）的子会话。
+- **记录只由 notify-daemon 写**（`cmd/agent-deck/inbox_cmd.go:447-450`）。daemon 不在时 export 永远是 `[]`，
+  和「没有待决事项」长得一样，所以每次读之前先问 `writer-status`。
+- **父 inbox 会被 conductor 的 drain 清掉**，清掉后那些翻转就从 export 里消失；完成账本从不删除，`finished` 会一直在。
+- **`events/` 目录在 v1.15.0 没有生产代码写入**：上游 `WriteStatusEvent`（`internal/session/event_writer.go`）
+  只有测试在调，二进制里也没有相应字符串。按设计它是每会话一个文件、整体覆盖写，两次快速翻转会互相覆盖、丢中间态，
+  本来就只能当「该刷新了」的信号，不能当队列。Work Deck 不读它，按固定间隔轮询 writer-status 与 export。
+
 ## 8. 上游变更时怎么核对
 
 1. 跑 `go test ./internal/agentdeck/`（设 `WORKDECK_UPSTREAM_SRC` 指向新快照）。
-   它能查出一部分不一致：白名单、三组字段、副作用断言的依据、源码里的字面量端点，
+   它能查出一部分不一致：白名单、五组字段、副作用断言的依据、源码里的字面量端点，
    以及端点、版本、提交、子命令、环境变量这几类在本文件出现。参数不查；字段只查 `tmuxSocketName` 一个
    （`TestManifestListsSocketName`，查词语出现与提到 `omitempty`），其余字段不查。
    查不出的部分见 `manifest.go` 头部与 `boundary-limits.md` 第三节，要靠下面几步人工核对。

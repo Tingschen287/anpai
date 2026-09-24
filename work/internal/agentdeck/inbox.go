@@ -1,0 +1,119 @@
+package agentdeck
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// InboxRecord 是 `inbox export --json` 的一条记录。
+//
+// 字段照上游 session.TransitionNotificationEvent（internal/session/transition_notifier.go:40-108）。
+// 两类记录共用这个结构：Kind 为空是一次状态翻转（from → to），Kind 为 "finished"
+// 是一次完成回报（来自上游的完成账本，from/to 都是空串）。
+type InboxRecord struct {
+	ChildSessionID   string    `json:"child_session_id"`
+	ChildTitle       string    `json:"child_title"`
+	Profile          string    `json:"profile"`
+	FromStatus       string    `json:"from_status"`
+	ToStatus         string    `json:"to_status"`
+	Timestamp        time.Time `json:"timestamp"`
+	Substate         string    `json:"substate"`
+	LastOutputHash   string    `json:"last_output_hash"`
+	TargetSessionID  string    `json:"target_session_id"`
+	TargetKind       string    `json:"target_kind"`
+	Kind             string    `json:"kind"`
+	DoneStatus       string    `json:"done_status"`
+	DoneSummary      string    `json:"done_summary"`
+	TurnFingerprint  string    `json:"turn_fingerprint"`
+	SourceRemote     string    `json:"source_remote"`
+	DeadLetterReason string    `json:"dead_letter_reason"`
+}
+
+// Fingerprint 是这条记录的去重键。
+//
+// 上游 export 的输出里没有 id，也剥掉了自己的 fp 字段。这里照上游 EventFingerprint
+// （internal/session/event_fingerprint.go:22-48）同一组输入重算：不含时间戳，
+// 所以 daemon 重启后用新时间戳重发的同一轮，算出来还是同一个键。
+//
+// 代价写在这里：没有 last_output_hash 的状态翻转，同一个会话每次 running→waiting
+// 都算出同一个键，两次不同的等待会被当成同一条。上游 turn_fingerprint 在这种情况下
+// 也一样退化（inbox_outbox.go:92-106）。
+func (r InboxRecord) Fingerprint() string {
+	parts := []string{r.SourceRemote, r.ChildSessionID, r.FromStatus, r.ToStatus, r.LastOutputHash}
+	if r.Kind != "" {
+		parts = append(parts, r.Kind, r.DoneStatus, r.DoneSummary)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(sum[:])
+}
+
+// WriterStatus 是 `inbox writer-status --json` 的输出。
+//
+// 字段照上游 session.WriterStatus（internal/session/notify_heartbeat.go:57-65）。
+// 上游只看心跳文件的新旧（90 秒内算在跑），不看进程；不论在不在跑，退出码都是 0，
+// 所以只能看 Running。
+type WriterStatus struct {
+	Running       bool      `json:"running"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	AgeSeconds    int64     `json:"age_seconds"`
+	Detail        string    `json:"detail"`
+}
+
+// InboxExport 非消费式地读本机全部 completion 与 transition 记录。
+//
+// 为什么是 export 而不是 drain：drain 按父会话分片、读完就删，是 conductor 的消费口；
+// Work Deck 不是会话，去 drain 等于和 conductor 抢同一份记录。上游对 export 的承诺是
+// 「NON-DESTRUCTIVE ... two conductors draining the same host both get the records」
+// （internal/session/inbox_export.go:31-34）。白名单只放 export 与 writer-status，
+// inbox 底下其余子命令一律拒绝，见 TestInboxOnlyAllowsNonConsumingReads。
+//
+// export 不分 profile：它读的是全机记录，要区分只能看每条的 Profile 字段。
+// 副作用不为零：记录里出现的每个 profile，上游都会打开它的注册表，没有就建一个
+// state.db（见 manifest.go 的 SideEffects）。
+func (c *Client) InboxExport(ctx context.Context) ([]InboxRecord, error) {
+	out, err := c.exec(ctx, "inbox", "export", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var records []InboxRecord
+	if err := json.Unmarshal(out, &records); err != nil {
+		return nil, fmt.Errorf("解析 inbox export --json 输出失败：%w", err)
+	}
+	return records, nil
+}
+
+// InboxWriterStatus 问本机有没有 notify-daemon 在记录。
+//
+// 上游的记录只由 notify-daemon 写（cmd/agent-deck/inbox_cmd.go:447-450）。
+// 没有 daemon 时 export 永远是空数组，看起来和「没有待决事项」一模一样——
+// 所以每次读 export 之前都先问这一句，daemon 不在就必须明说，不能画一个空队列。
+func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
+	out, err := c.exec(ctx, "inbox", "writer-status", "--json")
+	if err != nil {
+		return WriterStatus{}, err
+	}
+	var st WriterStatus
+	if err := json.Unmarshal(out, &st); err != nil {
+		return WriterStatus{}, fmt.Errorf("解析 inbox writer-status --json 输出失败：%w", err)
+	}
+	return st, nil
+}
+
+// DeliverAnswer 把一条回答投递回发起会话。
+//
+// 投递口就是 session send，文本走标准输入。只投本客户端 profile 里的会话：
+// session send 只在当前 profile 里解析会话号（上游 session_cmd.go:2760-2767），
+// 而本包的 profile 是配置里显式写死的，不会为一条记录临时换 profile。
+// 记录属于别的 profile 时直接拒绝，说清原因。
+func (c *Client) DeliverAnswer(ctx context.Context, rec InboxRecord, message string) error {
+	if rec.Profile != "" && rec.Profile != c.Profile {
+		return fmt.Errorf("会话 %s 属于 profile %q，Work Deck 只向自己的 profile %q 投递，不代投",
+			rec.ChildSessionID, rec.Profile, c.Profile)
+	}
+	return c.SendMessage(ctx, rec.ChildSessionID, message)
+}

@@ -62,6 +62,10 @@ type Screen struct {
 	// 进入会话前要知道的按键用法（嵌套 tmux 时要按两次前缀）。常驻显示在按键说明上方，按宽度折行：
 	// 按下 a/T 那一刻的 Notice 只停一帧——交出终端时 bubbletea 立刻退出全屏界面。
 	EnterHint string
+	// 决策队列：QueueOn 表示接了队列；Queue.Show 为真时整屏换成队列视图。
+	QueueOn   bool
+	QueueOpen int
+	Queue     QueueScreen
 }
 
 // Render 把快照画成一屏。width 是终端宽度。
@@ -92,6 +96,19 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	w("%s", styleTitle.Render("Work Deck — "+name))
 	w("%s", styleDim.Render(headline(s)))
 	w("%s", strings.Repeat("─", width))
+
+	if sc.Queue.Show {
+		renderQueuePanel(sc.Queue, width, w)
+		if sc.Notice != "" {
+			if sc.NoticeOK {
+				w("%s", styleOK.Render(sc.Notice))
+			} else {
+				w("%s", styleAlert.Render(sc.Notice))
+			}
+		}
+		w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
+		return b.String()
+	}
 
 	// 预算：三个维度加 token，未知的明着说未知。
 	w("%s", styleSection.Render("预算"))
@@ -260,12 +277,16 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
+	// 决策队列的告警常驻主界面：notify-daemon 不在时绝不能只显示一个空队列。
+	if sc.QueueOn {
+		renderQueueSummary(sc.Queue, sc.QueueOpen, w)
+	}
 	// 按宽度折行：这句话比一行长，Bubble Tea 会截掉超出终端宽度的部分，
 	// 恰好把「按两次」截没。宽度下限是上面的 60 列，更窄的终端本身就放不下这块表盘。
 	for _, ln := range wrapText(sc.EnterHint, width) {
 		w("%s", styleDim.Render(ln))
 	}
-	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　r 刷新　q 退出"))
+	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
 	w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
 	return b.String()

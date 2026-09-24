@@ -80,6 +80,10 @@ type Model struct {
 	// 真实项目上一次完整取数要近两分钟，而心跳是 5 秒一次；不挡一下的话，
 	// 取数会一轮压一轮，每一轮又各开几个控制器进程，很快就把机器占满。
 	inflight bool
+
+	// 决策队列。qw.store 为 nil 表示没接队列。
+	qw queueWiring
+	qv queueView
 }
 
 // Dispatcher 是界面用到的那一点点派工能力。
@@ -146,7 +150,11 @@ func New(reader *projectctl.Reader) Model {
 // 真实项目里逐个问节点状态要一两分钟，不能让人对着空屏等。投影里已经有等 owner
 // 的条目、运行中的 attempt 和预算，这些先画出来，其余节点标「查询中」慢慢填。
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchFast(), m.fetch(), tick())
+	cmds := []tea.Cmd{m.fetchFast(), m.fetch(), tick()}
+	if m.qw.store != nil {
+		cmds = append(cmds, m.pollQueue(), queueTick())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) fetchFast() tea.Cmd {
@@ -215,6 +223,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case fastSnapshotMsg:
 		// 先行快照只在完整快照还没到的时候顶上，不覆盖已经查全的结果。
+		// 先行快照里状态不全，不拿它合并 Graph 门：那会把查询中的门误标成「已不等」。
 		if m.loading {
 			m.snap = projectctl.Snapshot(msg)
 		}
@@ -223,6 +232,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snap = projectctl.Snapshot(msg)
 		m.loading = false
 		m.inflight = false
+		if err := m.mergeGraph(); err != "" {
+			m.notice, m.noticeOK = err, false
+		}
+		return m, nil
+	case queueTickMsg:
+		return m, tea.Batch(m.pollQueue(), queueTick())
+	case queuePolledMsg:
+		m.qv.intake, m.qv.polled = msg.intake, true
+		if msg.err != nil {
+			m.notice, m.noticeOK = "决策队列落盘失败："+msg.err.Error(), false
+		}
+		return m, nil
+	case queueAnsweredMsg:
+		m.qv.busy = false
+		switch {
+		case msg.err != nil:
+			m.notice, m.noticeOK = "回答没记上："+msg.err.Error(), false
+		case msg.item.Answer != nil && msg.item.Answer.DeliveryError != "":
+			m.notice, m.noticeOK = "投递失败，条目留在待拍板："+msg.item.Answer.DeliveryError, false
+		case msg.item.Answer != nil:
+			m.notice, m.noticeOK = msg.item.Answer.Note, true
+		}
 		return m, nil
 	case tickMsg:
 		// 上一轮还没回来就跳过这一拍，只把心跳续上。
@@ -255,6 +286,12 @@ type dispatchDoneMsg struct {
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.qv.show && m.qw.store != nil && m.mode == ModeBrowse {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m.onQueueKey(msg)
+	}
 	switch m.mode {
 	case ModePickModel:
 		switch msg.String() {
@@ -313,6 +350,16 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginDirectAttach()
 	case "p":
 		return m.beginPreview()
+	case "i":
+		if m.qw.store == nil {
+			m.notice, m.noticeOK = "没有接决策队列（配置加载失败或队列文件打不开，见启动时的提示）", false
+			return m, nil
+		}
+		m.qv.show = true
+		if m.qv.cursor >= len(m.qw.store.Items()) {
+			m.qv.cursor = 0
+		}
+		return m, nil
 	case "esc":
 		switch {
 		case m.preview != "":
@@ -680,6 +727,9 @@ func (m Model) View() string {
 		DetailOf:    m.detailOf,
 		ShowAll:     m.showAll,
 		EnterHint:   m.enterHint(),
+		QueueOn:     m.qw.store != nil,
+		QueueOpen:   m.queueOpen(),
+		Queue:       m.queueScreen(),
 	})
 }
 

@@ -11,7 +11,7 @@ import "fmt"
 // 它存在的理由：上游一改，这里就是核对基准。人读版本在同目录的 MANIFEST.md。
 //
 // 有测试盯着它不漂移，但**各条测试查到哪一步是有边界的**，不是「清单外的东西一律会红」：
-//   - 字段：只核 LaunchResult、Session、MenuEvent 三个结构体，两个方向都核；
+//   - 字段：只核 LaunchResult、Session、MenuEvent、InboxRecord、WriterStatus 五个结构体，两个方向都核；
 //     ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在核对范围内。
 //   - 子命令：白名单与测试里写死的那张表必须完全相等。
 //   - 端点：按字面量找源码里的 "/api/..."、"/events/..."；拼出来的路径看不见。
@@ -209,11 +209,12 @@ type SideEffect struct {
 	Claims []Claim
 }
 
-// SharedStorageInit 是所有命令共有的那一份副作用。
+// SharedStorageInit 是 inbox 之外各条命令共有的那一份副作用。
 //
-// 每条 CLI 子命令跑起来都要先加载 profile，那条路会建 profile 目录、
+// 除 inbox 两条外，白名单里每条 CLI 子命令跑起来都要先加载 profile，那条路会建 profile 目录、
 // 建 state.db、跑 schema 迁移，必要时还会把旧的 sessions.json 迁过来改名。
-// 也就是说**没有一条命令是纯读的**，哪怕它叫 list 或 output。
+// 也就是说这些命令**没有一条是纯读的**，哪怕它叫 list 或 output。
+// inbox 两条在加载 profile 之前就分派出去了，各自的副作用见 SideEffects。
 //
 // 它单独放在这里，正是为了让各条命令**不能**拿它当自己的依据：
 // 「每条命令都会初始化 storage」证明不了「session output 跑了 capture-pane」。
@@ -471,6 +472,56 @@ var SideEffects = map[string]SideEffect{
 			}},
 		}},
 	},
+	// inbox 的两条在上游 main 里早于 profile 加载就分派出去了（cmd/agent-deck/main.go:417
+	// 早于 :518 的 NewStorageWithProfile），所以 SharedStorageInit 对它们不成立，各自写清楚。
+	"inbox export": {
+		Claims: []Claim{
+			{
+				// 读完成账本、各父会话 inbox 与 _unowned 三处，取并集；不删、不截断任何东西。
+				Effect: Effect{Kind: EffectCalls, Target: "session.ExportPendingRecords"},
+				Evidence: []Evidence{{
+					Path:   "cmd/agent-deck/inbox_cmd.go",
+					Line:   423,
+					Anchor: "session.ExportPendingRecords()",
+					Within: "runInboxExport",
+				}},
+			},
+			{
+				// 不是纯读：记录里出现的每个 profile 都会被打开注册表，没有就建 state.db。
+				Effect: Effect{Kind: EffectCalls, Target: "NewStorageWithProfile"},
+				Evidence: []Evidence{{
+					Path:   "internal/session/inbox_export.go",
+					Line:   151,
+					Anchor: "NewStorageWithProfile(profile)",
+					Within: "dropSuppressedChildren",
+				}},
+			},
+		},
+	},
+	"inbox writer-status": {
+		Claims: []Claim{
+			{
+				// 只看心跳文件的新旧判断 notify-daemon 在不在。
+				Effect: Effect{Kind: EffectCalls, Target: "session.ReadWriterStatus"},
+				Evidence: []Evidence{{
+					Path:   "cmd/agent-deck/inbox_cmd.go",
+					Line:   466,
+					Anchor: "session.ReadWriterStatus()",
+					Within: "runInboxWriterStatus",
+				}},
+			},
+			{
+				// 读的就是那个心跳文件。
+				Effect: Effect{Kind: EffectCalls, Target: "os.ReadFile"},
+				Evidence: []Evidence{{
+					Path:   "internal/session/notify_heartbeat.go",
+					Line:   74,
+					Anchor: "os.ReadFile(path)",
+					Within: "ReadWriterStatus",
+				}},
+			},
+		},
+	},
 }
 
 // HTTPEndpoints 是 Work Deck 会请求的端点。
@@ -490,6 +541,16 @@ var SessionFields = []string{
 	"id", "title", "tool", "status", "groupPath", "projectPath",
 	"tmuxSession", "tmuxSocketName", "command", "createdAt", "lastAccessedAt",
 }
+
+// InboxFields 是 Work Deck 从 inbox export --json 每条记录里读的字段。
+var InboxFields = []string{
+	"child_session_id", "child_title", "profile", "from_status", "to_status", "timestamp",
+	"substate", "last_output_hash", "target_session_id", "target_kind", "kind",
+	"done_status", "done_summary", "turn_fingerprint", "source_remote", "dead_letter_reason",
+}
+
+// WriterStatusFields 是 Work Deck 从 inbox writer-status --json 里读的字段。
+var WriterStatusFields = []string{"running", "last_heartbeat", "age_seconds", "detail"}
 
 // MenuFields 是 Work Deck 从菜单事件顶层读的字段。
 var MenuFields = []string{"profile", "generatedAt", "totalGroups", "totalSessions", "items"}

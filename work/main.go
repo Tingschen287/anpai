@@ -28,6 +28,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/config"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/queue"
 	"github.com/Tingschen287/terminal-deck/work/internal/ui"
 )
 
@@ -95,6 +96,16 @@ func main() {
 		// 派工配好了却进不去，说明配置有别的毛病，要说出来。
 		fmt.Fprintf(os.Stderr, "work: 进入会话未启用：%v\n", err)
 	}
+	// 决策队列：Graph 的门总能接上；上游没配好时照样开，界面会明说运行时来源取不到。
+	if store, up, err := buildQueue(); err == nil {
+		if up != nil {
+			model = model.WithQueue(store, up, up, pc)
+		} else {
+			model = model.WithQueue(store, nil, nil, pc)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "work: 决策队列未启用：%v\n", err)
+	}
 	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fail("界面异常退出：%v", err)
 	}
@@ -156,6 +167,31 @@ func buildAttacher() (ui.Attacher, ui.Bindings, error) {
 		return nil, nil, err
 	}
 	return client, store, nil
+}
+
+// buildQueue 打开决策队列，并在配置可用时接上 upstream agent-deck。
+//
+// 队列文件放在配置目录的 queue.json。上游配置加载失败不算错：返回的 client 为 nil，
+// 界面上队列照开，只含 Graph 的门，并常驻告警「运行时来源取不到」。
+// 队列文件本身打不开（例如损坏）才算错：不能当成空队列，丢掉已回答的记录。
+func buildQueue() (*queue.Store, *agentdeck.Client, error) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := queue.Open(filepath.Join(filepath.Dir(path), "queue.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return store, nil, nil
+	}
+	client, err := agentdeck.NewClient(cfg.UpstreamBinary, cfg.Profile, cfg.UpstreamAddr, config.Token())
+	if err != nil {
+		return store, nil, nil
+	}
+	return store, client, nil
 }
 
 func fail(format string, args ...any) {

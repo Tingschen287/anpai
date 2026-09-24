@@ -119,7 +119,8 @@ func cleanupTmux(t *testing.T, profile string) {
 		return // 没有 tmux 服务就没有要收的
 	}
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.Contains(name, "n036it") {
+		// n037 起有的测试用 n037it 作标题前缀；只认 n036it 时那些会话一直漏在默认 tmux server 上。
+		if strings.Contains(name, "n036it") || strings.Contains(name, "n037it") {
 			_ = exec.Command("tmux", "kill-session", "-t", name).Run()
 		}
 	}
