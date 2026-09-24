@@ -300,7 +300,8 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
 
 1. 跑 `go test ./internal/agentdeck/`（设 `WORKDECK_UPSTREAM_SRC` 指向新快照）。
    它能查出一部分不一致：白名单、三组字段、副作用断言的依据、源码里的字面量端点，
-   以及端点、版本、提交、子命令、环境变量这几类在本文件出现（参数与字段不查）。
+   以及端点、版本、提交、子命令、环境变量这几类在本文件出现。参数不查；字段只查 `tmuxSocketName` 一个
+   （`TestManifestListsSocketName`，查词语出现与提到 `omitempty`），其余字段不查。
    查不出的部分见 `manifest.go` 头部与 `boundary-limits.md` 第三节，要靠下面几步人工核对。
 2. 对照第 1、2 节，确认子命令与端点还在、参数名没改。
 3. 对照第 3 节，确认字段名没改、语义没变（尤其 `session_id` 与 `status`）。没有测试核对的那几组要逐个看。

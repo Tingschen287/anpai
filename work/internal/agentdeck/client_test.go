@@ -576,8 +576,10 @@ func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
 //
 // 所以现在不再有「一条命令一段描述」这回事：**一条断言，一份依据，各自核对。**
 //
-//	正面断言  States 里点名的标识符，要出现在它自己的 Evidence 锚点上
-//	否定断言  用 Absence：去指定函数体里搜，搜到就红；Scope 空着也红
+//	正面断言  Effect（封闭枚举）去上游语法树里查证；Evidence 的锚点要落在被选中那个调用的源码区间里
+//	否定断言  用 Absence：去 In 列出的函数体里搜 Absent，搜到就红；NotCovered 要与这些函数体里的真实调用两头对上
+//
+// （早先的 States 与 Scope 字段都已删除，现行结构见 manifest.go 的 Claim 与 Absence。）
 //
 // 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
 func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {

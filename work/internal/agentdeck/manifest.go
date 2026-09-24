@@ -16,7 +16,9 @@ import "fmt"
 //   - 子命令：白名单与测试里写死的那张表必须完全相等。
 //   - 端点：按字面量找源码里的 "/api/..."、"/events/..."；拼出来的路径看不见。
 //   - 人读清单：只查端点、上游版本与提交、子命令、环境变量这几类在 MANIFEST.md 出现；
-//     LaunchFlags、WebFlags、各组字段、TmuxConventions 不查。MANIFEST.md 多写了什么也不查。
+//     LaunchFlags、WebFlags、TmuxConventions 不查。字段只有一个特例：TestManifestListsSocketName
+//     查 tmuxSocketName 在 SessionFields 与 MANIFEST.md 里都出现、且文档提到 omitempty（只查词语出现）；
+//     其余字段不查。MANIFEST.md 多写了什么也不查。
 // 边界总表见 4.eval/results/n037_workbench_attach/boundary-limits.md。
 
 // UpstreamVersion 是本清单核对过的上游版本。
@@ -248,7 +250,7 @@ var SharedStorageInit = SideEffect{
 // 守边测试 TestAdapterMayAttachButNeverSendsKeysOrKills 会放过这个声明，
 // 它认的是语法树上的这个变量，不是「哪一行文本里有这个名字」，
 // 所以另起一个名字含这个子串的变量蹭不过去（对照脚本 B4）。
-// 另一条 TestPreviewPathIsReadOnly 仍按行文本跳过含 `keyInjectionCommands = ` 的整行，
+// 另一条 TestPreviewPathIsReadOnly 仍按行文本跳过「本变量名后跟等号」的整行（原串见该测试），
 // 那是已知缺口 K8；同一段注入会让前一条变红（对照 A24-1）。
 var keyInjectionCommands = []string{"send-keys", "paste-buffer"}
 
