@@ -15,7 +15,7 @@ import (
 // 查三件事：
 //  1. 包内调 exec / execWithStdin 且前两个参数是字面量 "session"、"send" 的地方，只在 SendMessage 里；
 //  2. SendMessage 的第二个参数类型是 lease.Permit（签名由 reflect 核对，改掉就红）；
-//  3. SendMessage 里对许可的 Allows 调用，出现在那次 exec 之前。
+//  3. SendMessage 里对许可的 Begin 调用（核对并登记在途），出现在那次 exec 之前。
 //
 // 边界：它按字面量认命令名，拼出来的 "se"+"nd" 看不见——那种写法同时会被 n037 的守边测试
 // （TestCommandArgumentsAreBuiltFromConstantsOnly）拦住，见 boundary-limits.md。
@@ -42,7 +42,7 @@ func TestEveryWriteIntoASessionNeedsAPermit(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if fn.Name.Name == "SendMessage" && sel.Sel.Name == "Allows" && allowsPos == token.NoPos {
+				if fn.Name.Name == "SendMessage" && sel.Sel.Name == "Begin" && allowsPos == token.NoPos {
 					allowsPos = call.Pos()
 				}
 				var args []ast.Expr
@@ -71,7 +71,7 @@ func TestEveryWriteIntoASessionNeedsAPermit(t *testing.T) {
 		t.Fatalf("往会话写字的上游调用应当恰好一处、在 SendMessage 里，实际：%v", where)
 	}
 	if allowsPos == token.NoPos || allowsPos > sends[0].pos {
-		t.Error("SendMessage 必须在执行 session send 之前核对许可（Permit.Allows）")
+		t.Error("SendMessage 必须在执行 session send 之前核对并登记许可（Permit.Begin）")
 	}
 	m, ok := reflect.TypeOf(&Client{}).MethodByName("SendMessage")
 	if !ok || m.Type.NumIn() < 3 || m.Type.In(2) != reflect.TypeOf(lease.Permit{}) {

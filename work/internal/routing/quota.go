@@ -60,12 +60,18 @@ func ObservationsFromQueue(items []queue.Item, modelOf func(sessionID string) (s
 		if !ok || model == "" {
 			continue
 		}
+		// 有效期按上游记录的发生时间算，不按 Work Deck 最后一次看到它的时间：
+		// 同一条旧记录每轮都会被再读到，LastSeen 会一直是「刚才」。没有发生时间的不折算。
+		if it.Source.ReportedAt == nil {
+			continue
+		}
+		at := *it.Source.ReportedAt
 		switch {
 		case it.Category == queue.CatSessionUsageLimit:
-			out = append(out, Observation{Model: model, State: QuotaExhausted, At: it.LastSeen,
+			out = append(out, Observation{Model: model, State: QuotaExhausted, At: at,
 				Source: "Work Deck 读到会话 " + it.Source.SessionID + " 卡在额度上（inbox 记录 substate=usage-limit）"})
 		case it.Category == queue.CatSessionFinished && it.Source.DoneStatus == "ok":
-			out = append(out, Observation{Model: model, State: QuotaAvailable, At: it.LastSeen,
+			out = append(out, Observation{Model: model, State: QuotaAvailable, At: at,
 				Source: "Work Deck 读到会话 " + it.Source.SessionID + " 正常完成"})
 		}
 	}

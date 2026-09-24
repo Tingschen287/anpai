@@ -104,11 +104,17 @@ type Decision struct {
 	Recommended        string    `json:"recommended"`
 	Reason             string    `json:"reason"`
 	// Escalated 为真：没有能自动推荐的候选，交给 owner 挑。
-	Escalated  bool     `json:"escalated_to_owner"`
-	Unknowns   []string `json:"unknowns"`
-	Chosen     string   `json:"chosen"`
-	ChosenBy   string   `json:"chosen_by"`
-	QuotaBasis string   `json:"quota_basis"`
+	Escalated bool     `json:"escalated_to_owner"`
+	Unknowns  []string `json:"unknowns"`
+	Chosen    string   `json:"chosen"`
+	// ChosenBy 是做出选择的人：Work Deck 里每一次派单都由 owner 在界面上挑定。
+	ChosenBy string `json:"chosen_by"`
+	// ChoiceReason 说明为什么选了 Chosen：采纳推荐、没有推荐由 owner 挑、或 owner 改选。
+	// Reason 只解释推荐本身，两者分开。
+	ChoiceReason string `json:"choice_reason"`
+	// DispatchedBy 是派工记账里的身份（例如 work-deck），不是选择者。
+	DispatchedBy string `json:"dispatched_by"`
+	QuotaBasis   string `json:"quota_basis"`
 }
 
 // Decide 算出一次派单的全部因子与推荐。它不挑默认值：推荐不了就升级。
@@ -208,6 +214,21 @@ func (d *Decision) Choose(model, by string) error {
 			return fmt.Errorf("模型 %s 不可选：%s", model, f.Excluded)
 		}
 		d.Chosen, d.ChosenBy = model, by
+		switch {
+		case d.Recommended == model:
+			d.ChoiceReason = by + " 采纳了推荐"
+		case d.Recommended == "":
+			d.ChoiceReason = "没有推荐（" + d.Reason + "）；" + by + " 在可选候选里选定 " + model
+			if len(f.Unknowns) > 0 {
+				d.ChoiceReason += "，它的未知项：" + strings.Join(f.Unknowns, "、")
+			}
+		default:
+			d.ChoiceReason = by + " 没有采纳推荐的 " + d.Recommended + "，改选 " + model +
+				"；Work Deck 只记下这是 " + by + " 的决定，界面不收集他的理由"
+			if len(f.Unknowns) > 0 {
+				d.ChoiceReason += "；所选模型的未知项：" + strings.Join(f.Unknowns, "、")
+			}
+		}
 		return nil
 	}
 	return fmt.Errorf("模型 %s 不在这次派单的候选里", model)

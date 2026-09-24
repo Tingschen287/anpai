@@ -145,7 +145,12 @@ func (s *Store) mergeKeeping(kind string, fresh []Item, now time.Time, keep func
 			old.Category, old.Risk, old.Title, old.Detail = f.Category, f.Risk, f.Title, f.Detail
 			old.Options, old.Recommendation = f.Options, f.Recommendation
 			old.EvidenceRefs, old.BlockingSessions, old.Deadline = f.EvidenceRefs, f.BlockingSessions, f.Deadline
+			// 上报时间留第一次读到的：daemon 重启会用当前时间重发同一轮，那不是事情又发生了一次。
+			first := old.Source.ReportedAt
 			old.Source = f.Source
+			if first != nil {
+				old.Source.ReportedAt = first
+			}
 			old.LastSeen = now
 			if kind == SourceGraph && old.Status == StatusResolved {
 				// 节点又回到了同一个 attempt 的同一状态：重新打开。

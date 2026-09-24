@@ -162,7 +162,7 @@ func buildDispatcher(projectRoot string, leases *lease.Store, queueItems func() 
 		return b.Model, ok
 	}
 	return &dispatch.Dispatcher{
-		Deck:       arbiter.Deck{Client: client, Leases: leases},
+		Deck:       arbiter.Deck{Client: client, Leases: leases, Clients: client},
 		Store:      store,
 		Table:      table,
 		LogPath:    filepath.Join(filepath.Dir(path), "dispatch-log.jsonl"),

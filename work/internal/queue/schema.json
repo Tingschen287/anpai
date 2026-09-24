@@ -69,6 +69,7 @@
         "session_id": {"type": "string"},
         "profile": {"type": "string"},
         "done_status": {"type": "string", "description": "完成回报的 ok/fail，只有 session_finished 条目有"},
+        "reported_at": {"type": "string", "format": "date-time", "description": "上游记录里这件事发生的时间，第一次读到的值"},
         "present": {"type": "boolean"}
       }
     },

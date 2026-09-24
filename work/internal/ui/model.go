@@ -68,7 +68,7 @@ type Model struct {
 	// enterNote 是这次进入前 adapter 给的降级说明（按 T 退到次一等来源时才有）。
 	// 进入前的 notice 在真终端上只停一帧，所以回来之后再说一遍。
 	enterNote string
-	bindings Bindings
+	bindings  Bindings
 	// 预览内容，非空时占据屏幕下半部分。
 	preview     string
 	previewFrom string
@@ -478,7 +478,11 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 	m.notice = m.attacher.NestingAdvice()
 	m.noticeOK = true
 	// 交出终端。回来之后立刻重取一次，屏幕上的状态不能停在进去之前。
-	m = m.beforeAttach(sessionID, "upstream")
+	var busyErr error
+	if m, busyErr = m.beforeAttach(sessionID, "upstream"); busyErr != nil {
+		m.notice, m.noticeOK = "先不进："+busyErr.Error(), false
+		return m, nil
+	}
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}
 	})
@@ -532,7 +536,11 @@ func (m Model) beginDirectAttach() (tea.Model, tea.Cmd) {
 	}
 	m.notice += m.attacher.NestingAdvice()
 	m.noticeOK = true
-	m = m.beforeAttach(sessionID, "tmux")
+	var busyErr error
+	if m, busyErr = m.beforeAttach(sessionID, "tmux"); busyErr != nil {
+		m.notice, m.noticeOK = "先不进："+busyErr.Error(), false
+		return m, nil
+	}
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachDoneMsg{sessionID: sessionID, err: err}
 	})
@@ -754,24 +762,24 @@ func (m Model) View() string {
 		return "正在读取 Graph…\n"
 	}
 	return RenderScreen(m.snap, m.width, Screen{
-		Cursor:     m.cursor,
+		Cursor:          m.cursor,
 		Picking:         m.mode == ModePickModel,
 		PickingReviewer: m.pickingReviewer,
-		Candidates: m.candidates,
-		Routing:    m.routing,
-		Pick:       m.pick,
-		Notice:      m.notice,
-		NoticeOK:    m.noticeOK,
-		Preview:     m.preview,
-		PreviewFrom: m.previewFrom,
-		Detail:      m.detail,
-		DetailOf:    m.detailOf,
-		ShowAll:     m.showAll,
-		EnterHint:   m.enterHint(),
-		QueueOn:     m.queueOn(),
-		LeaseLines:  m.leaseLines(),
-		QueueOpen:   m.queueOpen(),
-		Queue:       m.queueScreen(),
+		Candidates:      m.candidates,
+		Routing:         m.routing,
+		Pick:            m.pick,
+		Notice:          m.notice,
+		NoticeOK:        m.noticeOK,
+		Preview:         m.preview,
+		PreviewFrom:     m.previewFrom,
+		Detail:          m.detail,
+		DetailOf:        m.detailOf,
+		ShowAll:         m.showAll,
+		EnterHint:       m.enterHint(),
+		QueueOn:         m.queueOn(),
+		LeaseLines:      m.leaseLines(),
+		QueueOpen:       m.queueOpen(),
+		Queue:           m.queueScreen(),
 	})
 }
 

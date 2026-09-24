@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ func openAt(t *testing.T, path string, now *time.Time) *Store {
 		t.Fatal(err)
 	}
 	s.now = func() time.Time { return *now }
+	t.Cleanup(s.Close)
 	return s
 }
 
@@ -115,6 +117,7 @@ func TestLeasesSurviveRestartAndBadFilesAreErrors(t *testing.T) {
 	s := openAt(t, path, &now)
 	s.Grant("s1", "测试")
 	s.OwnerTakeover("s1", "upstream")
+	s.Close() // 模拟进程退出：锁随之释放
 	s2 := openAt(t, path, &now)
 	if _, err := s2.Automatic("s1"); err == nil {
 		t.Fatal("重启后 owner 接管的记录丢了")
@@ -128,7 +131,8 @@ func TestLeasesSurviveRestartAndBadFilesAreErrors(t *testing.T) {
 	} {
 		p := filepath.Join(t.TempDir(), "leases.json")
 		os.WriteFile(p, []byte(content), 0o600)
-		if _, err := Open(p); err == nil {
+		if s, err := Open(p); err == nil {
+			s.Close()
 			t.Errorf("%s：应当报错", name)
 		}
 	}
@@ -193,5 +197,72 @@ func TestFlushFailureStopsAllDelivery(t *testing.T) {
 	}
 	if _, err := s.Manual("s9"); err == nil {
 		t.Error("停用后手动许可也不签")
+	}
+}
+
+// 同一份记账只许一个进程持有：第二个 Open 失败，第一个关掉后才能再开。
+func TestOnlyOneStoreMayHoldTheLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := Open(path); err == nil {
+		b.Close()
+		t.Fatal("第二个实例不该打开：两份记账互不知道对方的接管")
+	} else if !strings.Contains(err.Error(), "另一个 Work Deck 进程持有") {
+		t.Errorf("要说清为什么打不开：%v", err)
+	}
+	a.Close()
+	c, err := Open(path)
+	if err != nil {
+		t.Fatalf("第一个关掉后应当能打开：%v", err)
+	}
+	c.Close()
+}
+
+// 投递进行中不许登记接管；投完才能进。
+func TestTakeoverWaitsForADeliveryInProgress(t *testing.T) {
+	now := t0
+	s := openAt(t, filepath.Join(t.TempDir(), "leases.json"), &now)
+	s.Grant("s1", "测试")
+	p, _ := s.Automatic("s1")
+	release, err := p.Begin("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var busy *ErrDeliveryInProgress
+	if err := s.OwnerTakeover("s1", "upstream"); !errors.As(err, &busy) {
+		t.Fatalf("投递进行中登记接管必须被拒：%v", err)
+	}
+	release()
+	release() // 多调一次无害
+	if err := s.OwnerTakeover("s1", "upstream"); err != nil {
+		t.Fatalf("投完之后应当能接管：%v", err)
+	}
+	if _, err := p.Begin("s1"); err == nil {
+		t.Error("接管后旧许可不能再开始投递")
+	}
+}
+
+// 切换事件和持有者在同一个文件里：重开之后事件还在，且与持有者一致。
+func TestEventsLiveInTheSameFileAsHolders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "leases.json")
+	now := t0
+	s := openAt(t, path, &now)
+	s.Grant("s1", "测试")
+	s.OwnerTakeover("s1", "tmux")
+	s.Close()
+	s2 := openAt(t, path, &now)
+	evs, _ := s2.Events()
+	l, _ := s2.Get("s1")
+	if len(evs) != 2 || evs[1].To != l.Holder {
+		t.Errorf("重开后事件与持有者对不上：%+v %+v", evs, l)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			t.Errorf("事件不该另写文件：%s", e.Name())
+		}
 	}
 }

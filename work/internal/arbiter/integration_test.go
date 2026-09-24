@@ -31,7 +31,8 @@ func TestIntegrationOwnerTakeoverBlocksRealDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	leases, _ := lease.Open(filepath.Join(t.TempDir(), "leases.json"))
-	d := Deck{Client: c, Leases: leases}
+	t.Cleanup(leases.Close)
+	d := Deck{Client: c, Leases: leases, Clients: c}
 	ctx := context.Background()
 	res, err := d.Launch(ctx, agentdeck.LaunchRequest{ProjectPath: t.TempDir(), Title: "n039it-lease", Tool: "shell", ModelNotApplicable: true})
 	if err != nil {
@@ -72,5 +73,49 @@ func TestIntegrationOwnerTakeoverBlocksRealDelivery(t *testing.T) {
 	}
 	if strings.Contains(pane, "停下") {
 		t.Fatalf("接管期间那一条不该出现在会话里：%q", pane)
+	}
+
+	// 不经 Work Deck 的接管：交还后，用一个真实 tmux 客户端直接连上这个会话，
+	// 自动投递必须查到它、登记为 owner 接管、不投递。
+	leases.OwnerReturn(res.SessionID, lease.Handback{})
+	if err := leases.ConfirmHandback(res.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := c.ListSessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxName, ok := agentdeck.TmuxSessionOf(listed, res.SessionID)
+	if !ok {
+		t.Fatal("list 里没有这个会话的 tmux 会话名")
+	}
+	client := exec.Command("script", "-qfc", "tmux attach -t '="+tmuxName+"'", "/dev/null")
+	client.Env = os.Environ()
+	for i, kv := range client.Env {
+		if strings.HasPrefix(kv, "TMUX=") {
+			client.Env[i] = "TMUX_UNSET_FOR_TEST="
+		}
+	}
+	if err := client.Start(); err != nil {
+		t.Skip("起不了外部 tmux 客户端（没有 script？）：", err)
+	}
+	t.Cleanup(func() { _ = client.Process.Kill(); _ = client.Wait() })
+	attached := false
+	for i := 0; i < 40; i++ {
+		if n, err := c.AttachedClients(ctx, res.SessionID); err == nil && n > 0 {
+			attached = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !attached {
+		t.Fatal("外部客户端没连上，测不了")
+	}
+	err = d.SendMessage(ctx, res.SessionID, "外部")
+	if err == nil || !strings.Contains(err.Error(), "tmux 客户端连着会话") {
+		t.Fatalf("有外部客户端连着时必须拒绝：%v", err)
+	}
+	if l, _ := leases.Get(res.SessionID); l.Holder != lease.HolderOwner {
+		t.Errorf("外部接入应当登记为 owner 接管：%+v", l)
 	}
 }

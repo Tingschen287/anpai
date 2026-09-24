@@ -149,6 +149,7 @@ func FromInbox(records []agentdeck.InboxRecord, now time.Time) []Item {
 			Source: Source{
 				Kind: SourceSession, SessionID: r.ChildSessionID, Profile: r.Profile, Present: true,
 				DoneStatus: strings.ToLower(strings.TrimSpace(r.DoneStatus)),
+				ReportedAt: reportedAt(r.Timestamp),
 			},
 			FirstSeen: now,
 			LastSeen:  now,
@@ -298,4 +299,12 @@ func firstLine(s string, max int) string {
 		return string(r[:max]) + "…"
 	}
 	return s
+}
+
+func reportedAt(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }

@@ -239,10 +239,9 @@ func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, 
 		return fmt.Errorf("没有配置路由审计记录，不派单")
 	}
 	dec := d.Route(nodeID, attempt, purpose, required)
-	if by == "" {
-		by = "owner"
-	}
-	if err := dec.Choose(modelID, by); err != nil {
+	// 选择者是 owner：Work Deck 的每一次派单都由他在界面上挑定模型。by 是派工记账身份，另记。
+	dec.DispatchedBy = by
+	if err := dec.Choose(modelID, "owner"); err != nil {
 		return fmt.Errorf("路由拒绝：%w", err)
 	}
 	if err := routing.Append(d.RoutingLog, dec); err != nil {

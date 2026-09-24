@@ -301,7 +301,8 @@ func TestEveryDispatchLeavesARoutingRecord(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.NodeID != "n099_demo" || rec.Chosen != "claude-opus-5" || len(rec.Candidates) == 0 || rec.QuotaBasis == "" {
+	if rec.NodeID != "n099_demo" || rec.Chosen != "claude-opus-5" || rec.ChosenBy != "owner" || rec.ChoiceReason == "" ||
+		len(rec.Candidates) == 0 || rec.QuotaBasis == "" {
 		t.Errorf("记录缺字段：%+v", rec)
 	}
 

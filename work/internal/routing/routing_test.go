@@ -114,8 +114,10 @@ func TestDeclaredNoAndExhaustedQuotaExclude(t *testing.T) {
 // 额度只来自 Work Deck 自己读到的会话结果：卡在额度上 → 耗尽；正常完成 → 可用；
 // 出错、等待、失败的完成都不说明额度；超过 6 小时的观测不算。
 func TestQuotaComesOnlyFromWorkbenchObservations(t *testing.T) {
+	// seen 同时当作上游记录的发生时间；LastSeen 一律设成「刚才」，模拟每轮轮询都再读到它。
 	sess := func(id string, cat queue.Category, done string, seen time.Time) queue.Item {
-		return queue.Item{Category: cat, LastSeen: seen, Source: queue.Source{Kind: queue.SourceSession, SessionID: id, DoneStatus: done}}
+		at := seen
+		return queue.Item{Category: cat, LastSeen: t0, Source: queue.Source{Kind: queue.SourceSession, SessionID: id, DoneStatus: done, ReportedAt: &at}}
 	}
 	items := []queue.Item{
 		sess("s-limit", queue.CatSessionUsageLimit, "", t0.Add(-time.Hour)),
@@ -124,12 +126,14 @@ func TestQuotaComesOnlyFromWorkbenchObservations(t *testing.T) {
 		sess("s-err", queue.CatSessionError, "", t0.Add(-time.Hour)),
 		sess("s-old", queue.CatSessionFinished, "ok", t0.Add(-7*time.Hour)),
 		sess("s-foreign", queue.CatSessionFinished, "ok", t0),
+		// 没有发生时间的记录不折算。
+		{Category: queue.CatSessionFinished, LastSeen: t0, Source: queue.Source{Kind: queue.SourceSession, SessionID: "s-notime", DoneStatus: "ok"}},
 	}
-	modelOf := map[string]string{"s-limit": "m-limit", "s-ok": "m-ok", "s-fail": "m-fail", "s-err": "m-err", "s-old": "m-old"}
+	modelOf := map[string]string{"s-limit": "m-limit", "s-ok": "m-ok", "s-fail": "m-fail", "s-err": "m-err", "s-old": "m-old", "s-notime": "m-notime"}
 	obs := Observed{Obs: ObservationsFromQueue(items, func(id string) (string, bool) { m, ok := modelOf[id]; return m, ok })}
 	for model, want := range map[string]string{
 		"m-limit": QuotaExhausted, "m-ok": QuotaAvailable, "m-fail": QuotaUnknown,
-		"m-err": QuotaUnknown, "m-old": QuotaUnknown, "m-none": QuotaUnknown,
+		"m-err": QuotaUnknown, "m-old": QuotaUnknown, "m-none": QuotaUnknown, "m-notime": QuotaUnknown,
 	} {
 		if got := obs.QuotaOf(model, t0).State; got != want {
 			t.Errorf("%s：额度应当是 %s，实际 %s", model, want, got)
@@ -179,5 +183,34 @@ func TestCapabilityDeclarationsAreValidated(t *testing.T) {
 	}
 	if err := ValidateRequired([]string{"resume", "nope"}); err == nil {
 		t.Error("不认识的能力要求应当报错")
+	}
+}
+
+// 选择理由单独记：采纳推荐、没有推荐由 owner 挑、owner 改选，三种说法不同。
+func TestChoiceReasonIsRecordedSeparatelyFromTheRecommendation(t *testing.T) {
+	cands := []Candidate{{ID: "a", Tool: "t", Class: "frontier"}, {ID: "b", Tool: "t", Class: "frontier"}}
+	q := fixedQuota{"a": avail()}
+	d := Decide(Request{RequiredClass: "frontier"}, cands, q, t0)
+	if d.Recommended != "a" {
+		t.Fatalf("前提：应当推荐 a，实际 %q", d.Recommended)
+	}
+	took := d
+	took.Choose("a", "owner")
+	over := d
+	over.Choose("b", "owner")
+	none := Decide(Request{RequiredClass: "frontier"}, cands, nil, t0)
+	none.Choose("b", "owner")
+	for name, c := range map[string]struct {
+		d    Decision
+		want string
+	}{
+		"采纳": {took, "采纳了推荐"}, "改选": {over, "没有采纳推荐的 a，改选 b"}, "无推荐": {none, "没有推荐"},
+	} {
+		if !strings.Contains(c.d.ChoiceReason, c.want) || c.d.ChosenBy != "owner" {
+			t.Errorf("%s：选择理由 %q、选择者 %q", name, c.d.ChoiceReason, c.d.ChosenBy)
+		}
+	}
+	if strings.Contains(over.Reason, "改选") {
+		t.Error("Reason 只解释推荐，不该混进选择理由")
 	}
 }

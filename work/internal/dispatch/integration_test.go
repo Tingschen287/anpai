@@ -72,7 +72,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Dispatcher{Deck: shellLauncher{arbiter.Deck{Client: client, Leases: leases}}, Store: store, Table: tbl, LogPath: logPath,
+	d := &Dispatcher{Deck: shellLauncher{arbiter.Deck{Client: client, Leases: leases, Clients: client}}, Store: store, Table: tbl, LogPath: logPath,
 		RoutingLog: filepath.Join(t.TempDir(), "routing-decisions.jsonl")}
 
 	project := t.TempDir()

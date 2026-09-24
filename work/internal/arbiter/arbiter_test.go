@@ -20,8 +20,8 @@ func fakeUpstream(t *testing.T) (bin, sent string) {
 	bin = filepath.Join(dir, "agent-deck")
 	script := `#!/bin/sh
 case "$1" in
-  launch) echo '{"success":true,"session_id":"sess-1","id":"sess-1"}' ;;
-  session) if [ "$2" = "send" ]; then echo "to=$3 $(cat)" >> "$FAKE_SENT"; fi ;;
+  launch) echo "launch $*" >> "$FAKE_SENT.launch"; echo '{"success":true,"session_id":"sess-1","id":"sess-1"}' ;;
+  session) if [ "$2" = "send" ]; then [ -n "$FAKE_SLOW" ] && sleep 1; echo "to=$3 $(cat)" >> "$FAKE_SENT"; fi ;;
 esac
 `
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -49,7 +49,7 @@ func TestAutomaticDeliveryStopsWhileOwnerHoldsTheSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	leases, _ := lease.Open(filepath.Join(t.TempDir(), "leases.json"))
-	d := Deck{Client: c, Leases: leases}
+	d := Deck{Client: c, Leases: leases, Clients: fakeProbe{}}
 	ctx := context.Background()
 	res, err := d.Launch(ctx, agentdeck.LaunchRequest{ProjectPath: "/tmp", Tool: "shell", ModelNotApplicable: true})
 	if err != nil {
@@ -90,7 +90,7 @@ func TestManualAnswerRules(t *testing.T) {
 	c, _ := agentdeck.NewClient(bin, "_arb", "", "")
 	leases, _ := lease.Open(filepath.Join(t.TempDir(), "leases.json"))
 	ctx := context.Background()
-	if err := (Deck{Client: c, Leases: leases}).SendMessage(ctx, "child-1", "x"); err == nil {
+	if err := (Deck{Client: c, Leases: leases, Clients: fakeProbe{}}).SendMessage(ctx, "child-1", "x"); err == nil {
 		t.Error("没有记录的会话不该被自动投递")
 	}
 	del := Deliverer{Client: c, Leases: leases}
@@ -123,5 +123,15 @@ func TestNoLeaseStoreMeansNoDelivery(t *testing.T) {
 	}
 	if got := sentLines(t, sent); len(got) != 0 {
 		t.Errorf("上游不该收到任何东西：%v", got)
+	}
+}
+
+// breakLedger 让记账落盘失败一次，从而停用。
+func breakLedger(t *testing.T, s *lease.Store, dir string) {
+	t.Helper()
+	os.Chmod(dir, 0o500)
+	defer os.Chmod(dir, 0o700)
+	if err := s.OwnerTakeover("any", "upstream"); err == nil || s.Broken() == nil {
+		t.Skip("当前环境下目录只读没能挡住写入（可能以 root 运行），跳过")
 	}
 }

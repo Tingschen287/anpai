@@ -2,6 +2,7 @@ package lease
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -48,6 +49,34 @@ func (s *Store) Manual(sessionID string) (Permit, error) {
 		return Permit{}, err
 	}
 	return Permit{store: s, sessionID: sessionID, kind: KindManual}, nil
+}
+
+// Begin 在投递开始前核对许可，并把这个会话登记为「有投递在进行」，直到调用返回的 release。
+//
+// 在途期间 OwnerTakeover 会被拒（ErrDeliveryInProgress）：核过许可与消息真正送达之间，
+// owner 不可能已经登记接管。release 必须调用，且只调一次。
+func (p Permit) Begin(sessionID string) (release func(), err error) {
+	if err := p.Allows(sessionID); err != nil {
+		return nil, err
+	}
+	s := p.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkLocked(sessionID, p.kind, s.now()); err != nil {
+		return nil, err
+	}
+	s.inflight[sessionID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			s.inflight[sessionID]--
+			if s.inflight[sessionID] <= 0 {
+				delete(s.inflight, sessionID)
+			}
+			s.mu.Unlock()
+		})
+	}, nil
 }
 
 // Allows 在投递那一刻核对许可仍然有效。零值 Permit 恒为无效。

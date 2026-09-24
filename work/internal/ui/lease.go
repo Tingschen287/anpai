@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,7 +50,7 @@ func (m Model) WithLeasesError(err error) Model {
 //
 // 登记失败时照样让 owner 进去：记账此时已停用（lease 包的 fail-closed），
 // 所有自动投递都被拒，放行进入不会让自动投递撞上 owner。失败原因回来后告诉他。
-func (m Model) beforeAttach(sessionID, via string) Model {
+func (m Model) beforeAttach(sessionID, via string) (Model, error) {
 	ac := &attachContext{sessionID: sessionID, via: via, at: time.Now()}
 	if m.attacher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -61,13 +62,18 @@ func (m Model) beforeAttach(sessionID, via string) Model {
 			ac.paneBefore = pane
 		}
 	}
-	m.attachCtx = ac
 	if m.lw.store != nil {
 		if err := m.lw.store.OwnerTakeover(sessionID, via); err != nil {
+			var busy *lease.ErrDeliveryInProgress
+			if errors.As(err, &busy) {
+				// 有一条自动投递正在进行：此刻进去，消息可能在你进去之后才送达。不进。
+				return m, err
+			}
 			ac.beforeErr = strings.TrimSpace(ac.beforeErr + "；登记接管失败：" + err.Error())
 		}
 	}
-	return m
+	m.attachCtx = ac
+	return m, nil
 }
 
 // afterAttach 在 owner 回来后生成介入摘要，登记「等确认交还」。返回要追加给人看的一句话。

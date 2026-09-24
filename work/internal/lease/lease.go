@@ -20,8 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -90,15 +90,26 @@ const (
 type file struct {
 	Version int     `json:"version"`
 	Leases  []Lease `json:"leases"`
+	// Events 与持有者写在同一个文件、同一次原子落盘里：进程在两次写之间中断，
+	// 不会留下「事件说接管了、快照还是旧持有者」这种不一致。只留最近 maxEvents 条。
+	Events []Event `json:"events"`
 }
+
+// maxEvents 是记账文件里保留的切换事件条数。
+const maxEvents = 500
 
 const currentVersion = 1
 
 // Store 是持久化的写入权记账。
 type Store struct {
-	path, eventsPath string
-	mu               sync.Mutex
-	leases           map[string]*Lease
+	path     string
+	lockFile *os.File
+	mu       sync.Mutex
+	leases   map[string]*Lease
+	events   []Event
+	// inflight 是正在进行的投递数。有投递在进行时不许登记接管，
+	// 否则「核过许可」与「消息真正送达」之间，owner 可能已经进去了。
+	inflight map[string]int
 	// broken 非空表示落盘出过错：此后一律不签发 Permit，直到重新打开且读回正常。
 	broken error
 	ttl    time.Duration
@@ -107,21 +118,37 @@ type Store struct {
 
 // Open 打开记账文件。文件不存在是空记账（没有任何会话有写入权，全部 fail-closed）；
 // 文件坏了报错，不当成空记账——那会把一个 owner 正接管着的会话当成无主。
+//
+// 打开时对 path+".lock" 取排他文件锁（flock，不阻塞）：同一份记账只许一个 Work Deck 进程持有，
+// 第二个进程打开失败，拿不到记账，它的一切投递都被拒。用完调 Close 释放。
 func Open(path string) (*Store, error) {
-	// 切换事件另写一个文件，一行一条。文件名避开 Graph 账本的名字，那是 projectctl 的地盘。
-	s := &Store{path: path, eventsPath: strings.TrimSuffix(path, ".json") + "-log.jsonl", leases: map[string]*Lease{}, ttl: DefaultTTL, now: time.Now}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("打不开写入权记账的锁文件：%w", err)
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lf.Close()
+		return nil, fmt.Errorf("写入权记账 %s 正被另一个 Work Deck 进程持有（%v）：两份记账不能互斥，本进程不投递任何东西", path, err)
+	}
+	s := &Store{path: path, lockFile: lf, leases: map[string]*Lease{}, inflight: map[string]int{}, ttl: DefaultTTL, now: time.Now}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
 	if err != nil {
+		s.Close()
 		return nil, fmt.Errorf("读写入权记账失败：%w", err)
 	}
 	var f struct {
 		Version int      `json:"version"`
 		Leases  *[]Lease `json:"leases"`
+		Events  []Event  `json:"events"`
 	}
 	bad := func(why string) error {
+		s.Close()
 		return fmt.Errorf("写入权记账 %s %s；不当成空记账打开，免得把 owner 接管中的会话当成无主", path, why)
 	}
 	if err := json.Unmarshal(data, &f); err != nil {
@@ -143,7 +170,24 @@ func Open(path string) (*Store, error) {
 		}
 		s.leases[l.SessionID] = &l
 	}
+	s.events = f.Events
 	return s, nil
+}
+
+// Close 释放文件锁。之后这个 Store 不该再用。
+func (s *Store) Close() {
+	if s.lockFile != nil {
+		syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+		s.lockFile.Close()
+		s.lockFile = nil
+	}
+}
+
+// ErrDeliveryInProgress 表示这个会话有一条投递正在进行，此刻不能登记接管。
+type ErrDeliveryInProgress struct{ SessionID string }
+
+func (e *ErrDeliveryInProgress) Error() string {
+	return "会话 " + e.SessionID + " 有一条自动投递正在进行，等它结束再进入（否则消息可能在你进去之后才送达）"
 }
 
 // Get 取一个会话的记录。
@@ -201,6 +245,9 @@ func (s *Store) OwnerTakeover(sessionID, via string) error {
 	if sessionID == "" {
 		return fmt.Errorf("没有会话号，不能登记接管")
 	}
+	if s.inflight[sessionID] > 0 {
+		return &ErrDeliveryInProgress{SessionID: sessionID}
+	}
 	now := s.now()
 	from := ""
 	if l, ok := s.leases[sessionID]; ok {
@@ -257,7 +304,7 @@ func (s *Store) Broken() error {
 	return s.broken
 }
 
-// commitLocked 先写事件、再写记账；任何一步失败，内存退回原样并把存储标成停用。
+// commitLocked 把新持有者与这条事件一起、一次原子落盘；失败时内存退回原样并把存储标成停用。
 //
 // 标成停用是 fail-closed：落盘失败意味着磁盘上的记账可能与内存不一致，
 // 这时签发任何 Permit 都没有依据。
@@ -266,14 +313,15 @@ func (s *Store) commitLocked(sessionID string, next *Lease, ev Event) error {
 		return fmt.Errorf("写入权记账已停用（%v）", s.broken)
 	}
 	prev, had := s.leases[sessionID]
+	prevEvents := s.events
 	s.leases[sessionID] = next
-	if err := s.appendEventLocked(ev); err != nil {
-		s.restore(sessionID, prev, had)
-		s.broken = err
-		return fmt.Errorf("写入权事件落盘失败，记账停用：%w", err)
+	s.events = append(append([]Event{}, s.events...), ev)
+	if len(s.events) > maxEvents {
+		s.events = s.events[len(s.events)-maxEvents:]
 	}
 	if err := s.flushLocked(); err != nil {
 		s.restore(sessionID, prev, had)
+		s.events = prevEvents
 		s.broken = err
 		return fmt.Errorf("写入权记账落盘失败，记账停用：%w", err)
 	}
@@ -288,33 +336,13 @@ func (s *Store) restore(sessionID string, prev *Lease, had bool) {
 	}
 }
 
-func (s *Store) appendEventLocked(ev Event) error {
-	if err := os.MkdirAll(filepath.Dir(s.eventsPath), 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	line, _ := json.Marshal(ev)
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
 func (s *Store) flushLocked() error {
 	list := make([]Lease, 0, len(s.leases))
 	for _, l := range s.leases {
 		list = append(list, *l)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].SessionID < list[j].SessionID })
-	data, err := json.MarshalIndent(file{Version: currentVersion, Leases: list}, "", "  ")
+	data, err := json.MarshalIndent(file{Version: currentVersion, Leases: list, Events: s.events}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -340,39 +368,9 @@ func (s *Store) flushLocked() error {
 	return os.Rename(name, s.path)
 }
 
-// Events 读回事件文件，供界面与测试观察切换。读不了返回错误。
+// Events 返回记账里保留的切换事件，供界面与测试观察。
 func (s *Store) Events() ([]Event, error) {
-	data, err := os.ReadFile(s.eventsPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var out []Event
-	for _, line := range splitLines(data) {
-		var ev Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			return nil, fmt.Errorf("写入权事件文件有坏行：%w", err)
-		}
-		out = append(out, ev)
-	}
-	return out, nil
-}
-
-func splitLines(b []byte) [][]byte {
-	var out [][]byte
-	start := 0
-	for i, c := range b {
-		if c == '\n' {
-			if i > start {
-				out = append(out, b[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < len(b) {
-		out = append(out, b[start:])
-	}
-	return out
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Event{}, s.events...), nil
 }
