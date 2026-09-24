@@ -73,6 +73,11 @@ func Render(s projectctl.Snapshot, width int) string {
 	return RenderScreen(s, width, Screen{Cursor: -1})
 }
 
+// RenderWithQueue 是 --once 用的一次性渲染，带上决策队列的告警与条数。
+func RenderWithQueue(s projectctl.Snapshot, width int, q QueueScreen, openCount int) string {
+	return RenderScreen(s, width, Screen{Cursor: -1, QueueOn: true, QueueOpen: openCount, Queue: q})
+}
+
 // RenderScreen 按给定的界面状态画一屏。
 func RenderScreen(s projectctl.Snapshot, width int, sc Screen) string {
 	return renderWith(s, width, sc)

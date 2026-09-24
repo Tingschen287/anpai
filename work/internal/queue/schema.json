@@ -32,7 +32,7 @@
         "source": {"$ref": "#/$defs/source"},
         "first_seen": {"type": "string", "format": "date-time"},
         "last_seen": {"type": "string", "format": "date-time"},
-        "status": {"type": "string", "enum": ["open", "answered", "resolved"]},
+        "status": {"type": "string", "enum": ["open", "answered", "resolved"], "description": "Graph 条目只有 open 与 resolved；answered 只用于会话条目"},
         "answer": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/answer"}]}
       }
     },
@@ -80,7 +80,8 @@
         "answered_at": {"type": "string", "format": "date-time"},
         "delivered": {"type": "boolean"},
         "delivery_error": {"type": "string"},
-        "note": {"type": "string"}
+        "note": {"type": "string"},
+        "in_flight": {"type": "boolean", "description": "投递已开始、结果未记下；重启后看到它表示结果未知，不自动重投"}
       }
     }
   }

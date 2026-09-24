@@ -75,6 +75,9 @@ func writeHeartbeat(t *testing.T, dataDir string, at time.Time) {
 	}
 }
 
+// fixtureProfile 是 inbox 夹具记录里写的 profile；读夹具的客户端用它。
+const fixtureProfile = "_n038fixture"
+
 func testProfile(t *testing.T) string {
 	b := make([]byte, 3)
 	rand.Read(b)
@@ -97,16 +100,23 @@ func treeDigest(t *testing.T, dir string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// notify-daemon 没在跑时必须告警；心跳新鲜才不告警；心跳陈旧又得告警。
+// notify-daemon 没在跑时必须告警；心跳陈旧也得告警；心跳新鲜时还要看进程表。
 // 上游 writer-status 不论结果退出码都是 0，只能看 running 字段。
+//
+// 本测试不启动 daemon。心跳是测试手写的，本机进程表里通常没有 daemon——
+// 这正是「心跳新鲜但进程已退出」那种情形，必须告警。本机恰好有 daemon 在跑时，按实况断言。
 func TestIntegrationWriterStatusDrivesTheAlert(t *testing.T) {
 	bin := upstreamBin(t)
 	data := fixtureDataHome(t)
-	c, err := agentdeck.NewClient(bin, testProfile(t), "", "")
+	c, err := agentdeck.NewClient(bin, fixtureProfile, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	hostDaemon, err := c.NotifyDaemonRunning(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	in, recs := Poll(ctx, c, time.Now())
 	if in.Writer.Running || in.Alert() == "" {
@@ -118,8 +128,15 @@ func TestIntegrationWriterStatusDrivesTheAlert(t *testing.T) {
 
 	writeHeartbeat(t, data, time.Now())
 	in, _ = Poll(ctx, c, time.Now())
-	if !in.Writer.Running || in.Alert() != "" {
-		t.Fatalf("心跳新鲜时不该告警：running=%v alert=%q", in.Writer.Running, in.Alert())
+	if !in.Writer.Running {
+		t.Fatalf("心跳新鲜时 writer-status 应当答 running：%+v", in.Writer)
+	}
+	if hostDaemon {
+		if in.Alert() != "" {
+			t.Fatalf("心跳新鲜且进程在时不该告警：%q", in.Alert())
+		}
+	} else if !strings.Contains(in.Alert(), "进程表里找不到") {
+		t.Fatalf("心跳新鲜但进程不在，必须告警：%q", in.Alert())
 	}
 
 	writeHeartbeat(t, data, time.Now().Add(-10*time.Minute))
@@ -131,16 +148,22 @@ func TestIntegrationWriterStatusDrivesTheAlert(t *testing.T) {
 
 // export 是非消费式的：读两次拿到同样的记录，数据目录一个字节都不变。
 // 夹具里 parent-1 与 _unowned 各有一份相同的 child-a，队列里只留一条。
+//
+// export 会为记录里的 profile 建 state.db（有文档的副作用），所以只比 inboxes/ 与 runtime/ 两棵子树：
+// 那才是记录本身，drain 会动、export 不该动的地方。
 func TestIntegrationExportIsNonConsumingAndDeduped(t *testing.T) {
 	bin := upstreamBin(t)
 	data := fixtureDataHome(t)
 	writeHeartbeat(t, data, time.Now())
-	c, err := agentdeck.NewClient(bin, testProfile(t), "", "")
+	c, err := agentdeck.NewClient(bin, fixtureProfile, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	before := treeDigest(t, data)
+	digest := func() string {
+		return treeDigest(t, filepath.Join(data, "inboxes")) + treeDigest(t, filepath.Join(data, "runtime"))
+	}
+	before := digest()
 
 	first, err := c.InboxExport(ctx)
 	if err != nil {
@@ -153,8 +176,8 @@ func TestIntegrationExportIsNonConsumingAndDeduped(t *testing.T) {
 	if len(first) != len(second) || len(first) == 0 {
 		t.Fatalf("两次读取条数不同或为空：%d vs %d", len(first), len(second))
 	}
-	if after := treeDigest(t, data); after != before {
-		t.Fatal("export 改动了数据目录：它应当不消费、不截断任何东西")
+	if after := digest(); after != before {
+		t.Fatal("export 改动了 inbox 或完成账本：它应当不消费、不截断任何东西")
 	}
 
 	s, _ := Open(filepath.Join(t.TempDir(), "queue.json"))

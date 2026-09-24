@@ -176,10 +176,26 @@ func TestLeftoverTempFileDoesNotBreakReopen(t *testing.T) {
 
 // 队列文件坏了不能当成空队列打开：那会悄悄丢掉已回答的记录。
 func TestCorruptQueueFileIsNotAnEmptyQueue(t *testing.T) {
+	for name, content := range map[string]string{
+		"截断的 JSON":     `{"version":1,"items":[`,
+		"缺 items":      `{"version":1}`,
+		"items 为 null": `{"version":1,"items":null}`,
+		"版本不对":         `{"version":2,"items":[]}`,
+		"条目缺 id":       `{"version":1,"items":[{"category":"session_waiting","status":"open","source":{"kind":"session","present":true},"options":[{"key":"ack","label":"x"}]}]}`,
+		"条目状态乱写":       `{"version":1,"items":[{"id":"x","category":"session_waiting","status":"??","source":{"kind":"session","present":true},"options":[{"key":"ack","label":"x"}]}]}`,
+		"条目没有选项":       `{"version":1,"items":[{"id":"x","category":"session_waiting","status":"open","source":{"kind":"session","present":true},"options":[]}]}`,
+	} {
+		path := filepath.Join(t.TempDir(), "queue.json")
+		os.WriteFile(path, []byte(content), 0o600)
+		if _, err := Open(path); err == nil {
+			t.Errorf("%s：应当报错，不能当成空队列", name)
+		}
+	}
+	// 合法的空队列照常打开。
 	path := filepath.Join(t.TempDir(), "queue.json")
-	os.WriteFile(path, []byte(`{"version":1,"items":[`), 0o600)
-	if _, err := Open(path); err == nil {
-		t.Fatal("坏文件应当报错，不能当成空队列")
+	os.WriteFile(path, []byte(`{"version":1,"items":[]}`), 0o600)
+	if _, err := Open(path); err != nil {
+		t.Errorf("合法的空队列应当能打开：%v", err)
 	}
 }
 
@@ -279,6 +295,53 @@ func TestGraphAnswerOnlyHandsOverCommand(t *testing.T) {
 	if !strings.Contains(it.Answer.Note, "python3 /x/projectctl.py resume f04_external_probe") {
 		t.Errorf("没把命令交给 owner：%q", it.Answer.Note)
 	}
+	// 门还在：条目留在 open，仍计入待拍板；Graph 状态没变时再合并也还是 open。
+	if it.Status != StatusOpen {
+		t.Errorf("Graph 条目选了选项后应当仍是 open，实际 %s", it.Status)
+	}
+	before := s.OpenCount()
+	s.Merge(SourceGraph, FromGraph(fixtureSnapshot(), nil, "/x/projectctl.py", t0), t0.Add(time.Minute))
+	if got, _ := s.Get("graph:f04_external_probe#1:blocked"); got.Status != StatusOpen || s.OpenCount() != before {
+		t.Errorf("Graph 状态没变，条目不该离开待拍板：%s", got.Status)
+	}
+}
+
+// 已回答的会话条目不会被再投一遍。
+func TestAnsweredSessionItemIsNotDeliveredTwice(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0)}, t0), t0)
+	id := s.Items()[0].ID
+	d := &fakeDeliverer{}
+	Respond(context.Background(), s, d, id, "continue", t0)
+	if _, err := Respond(context.Background(), s, d, id, "continue", t0); err == nil {
+		t.Error("第二次回答应当被拒绝")
+	}
+	if len(d.calls) != 1 {
+		t.Errorf("只该投递一次，实际 %d 次", len(d.calls))
+	}
+}
+
+// 投递中途进程中断：重启后结果未知，不自动重投。
+func TestInterruptedDeliveryIsNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	s, _ := Open(path)
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0)}, t0), t0)
+	id := s.Items()[0].ID
+	if err := s.MarkInFlight(id, "continue", t0); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟投递途中崩溃：结果没记下，从磁盘重开。
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &fakeDeliverer{}
+	if _, err := Respond(context.Background(), s2, d, id, "continue", t0); err == nil || !strings.Contains(err.Error(), "结果未知") {
+		t.Errorf("中断后的条目应当拒绝自动重投：%v", err)
+	}
+	if len(d.calls) != 0 {
+		t.Error("不该重投")
+	}
 }
 
 type fakeUpstream struct {
@@ -287,6 +350,9 @@ type fakeUpstream struct {
 	recs   []agentdeck.InboxRecord
 	recErr error
 	calls  []string
+	// procDown 为真表示进程表里找不到 daemon；procErr 是查进程表失败。
+	procDown bool
+	procErr  error
 }
 
 func (f *fakeUpstream) InboxWriterStatus(context.Context) (agentdeck.WriterStatus, error) {
@@ -297,12 +363,17 @@ func (f *fakeUpstream) InboxExport(context.Context) ([]agentdeck.InboxRecord, er
 	f.calls = append(f.calls, "export")
 	return f.recs, f.recErr
 }
+func (f *fakeUpstream) NotifyDaemonRunning(context.Context) (bool, error) {
+	f.calls = append(f.calls, "process")
+	return !f.procDown, f.procErr
+}
+func (f *fakeUpstream) ProfileName() string { return "_wd" }
 
 // 先自检再读；只有 daemon 在跑且读取成功时，才没有告警。
 func TestPollChecksWriterFirstAndAlertsLoudly(t *testing.T) {
 	up := &fakeUpstream{st: agentdeck.WriterStatus{Running: true}}
 	in, _ := Poll(context.Background(), up, t0)
-	if !reflect.DeepEqual(up.calls, []string{"writer-status", "export"}) {
+	if !reflect.DeepEqual(up.calls, []string{"writer-status", "process", "export"}) {
 		t.Errorf("调用顺序应当先自检再读：%v", up.calls)
 	}
 	if in.Alert() != "" {
@@ -313,6 +384,8 @@ func TestPollChecksWriterFirstAndAlertsLoudly(t *testing.T) {
 		"daemon 没在跑": {st: agentdeck.WriterStatus{Running: false, Detail: "no notify-daemon has ever stamped"}},
 		"自检失败":       {stErr: errors.New("exit 1")},
 		"读取失败":       {st: agentdeck.WriterStatus{Running: true}, recErr: errors.New("exit 1")},
+		"心跳新鲜但进程已退出": {st: agentdeck.WriterStatus{Running: true}, procDown: true},
+		"查不了进程表":     {st: agentdeck.WriterStatus{Running: true}, procErr: errors.New("permission denied")},
 	}
 	for name, up := range cases {
 		in, _ := Poll(context.Background(), up, t0)
@@ -328,6 +401,23 @@ func TestPollChecksWriterFirstAndAlertsLoudly(t *testing.T) {
 	}
 	if in, _ := Poll(context.Background(), nil, t0); in.Alert() == "" {
 		t.Error("没配置 upstream 时必须说明运行时来源取不到")
+	}
+}
+
+// 只收本 profile 的记录：别的 profile 或没写 profile 的回答投递不过去，不进队列，但要数出来。
+func TestPollKeepsOnlyOwnProfileRecords(t *testing.T) {
+	mine := waiting("c1", "h1", t0) // profile _wd
+	theirs := waiting("c2", "h2", t0)
+	theirs.Profile = "work"
+	blank := waiting("c3", "h3", t0)
+	blank.Profile = ""
+	up := &fakeUpstream{st: agentdeck.WriterStatus{Running: true}, recs: []agentdeck.InboxRecord{mine, theirs, blank}}
+	in, recs := Poll(context.Background(), up, t0)
+	if len(recs) != 1 || recs[0].ChildSessionID != "c1" {
+		t.Fatalf("只该收本 profile 的记录：%v", recs)
+	}
+	if in.Foreign != 2 || !strings.Contains(in.ForeignNote(), "2 条") {
+		t.Errorf("没收进来的记录要数出来：foreign=%d note=%q", in.Foreign, in.ForeignNote())
 	}
 }
 

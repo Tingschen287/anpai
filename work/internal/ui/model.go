@@ -286,7 +286,7 @@ type dispatchDoneMsg struct {
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.qv.show && m.qw.store != nil && m.mode == ModeBrowse {
+	if m.qv.show && m.queueOn() && m.mode == ModeBrowse {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -351,12 +351,12 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		return m.beginPreview()
 	case "i":
-		if m.qw.store == nil {
-			m.notice, m.noticeOK = "没有接决策队列（配置加载失败或队列文件打不开，见启动时的提示）", false
+		if !m.queueOn() {
+			m.notice, m.noticeOK = "没有接决策队列（配置目录不可用，见启动时的提示）", false
 			return m, nil
 		}
 		m.qv.show = true
-		if m.qv.cursor >= len(m.qw.store.Items()) {
+		if m.qw.store != nil && m.qv.cursor >= len(m.qw.store.Items()) {
 			m.qv.cursor = 0
 		}
 		return m, nil
@@ -727,7 +727,7 @@ func (m Model) View() string {
 		DetailOf:    m.detailOf,
 		ShowAll:     m.showAll,
 		EnterHint:   m.enterHint(),
-		QueueOn:     m.qw.store != nil,
+		QueueOn:     m.queueOn(),
 		QueueOpen:   m.queueOpen(),
 		Queue:       m.queueScreen(),
 	})

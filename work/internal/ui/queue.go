@@ -20,6 +20,9 @@ const queueInterval = 15 * time.Second
 
 // queueWiring 是决策队列用到的外部能力。store 为 nil 表示没接队列。
 type queueWiring struct {
+	// err 非空表示队列文件打不开（例如损坏）。这时队列不可用，但界面必须常驻告警，
+	// 不能因为没接上就一声不吭。
+	err   string
 	store *queue.Store
 	// up 为 nil 表示没配置 upstream agent-deck：队列里只有 Graph 的门，并且要明说。
 	up     queue.Upstream
@@ -38,6 +41,12 @@ type queueView struct {
 	pendingID     string
 	pendingOption string
 	busy          bool
+}
+
+// WithQueueError 记下队列打不开的原因：界面常驻告警，按 i 也只看到这句。
+func (m Model) WithQueueError(err error) Model {
+	m.qw = queueWiring{err: err.Error()}
+	return m
 }
 
 // WithQueue 给界面接上决策队列。
@@ -103,6 +112,9 @@ func (m Model) mergeGraph() string {
 
 // queueAlert 是必须常驻显示的告警。没接队列时不说话。
 func (m Model) queueAlert() string {
+	if m.qw.err != "" {
+		return "决策队列打不开（" + m.qw.err + "）：待决事项一律看不到，不能当作没有"
+	}
 	if m.qw.store == nil {
 		return ""
 	}
@@ -113,6 +125,14 @@ func (m Model) queueAlert() string {
 }
 
 func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.qw.store == nil {
+		// 队列打不开：视图里只有告警，只认返回键。
+		switch msg.String() {
+		case "i", "esc", "q":
+			m.qv.show = false
+		}
+		return m, nil
+	}
 	items := m.qw.store.Items()
 	if m.qv.pendingID != "" {
 		switch msg.String() {
@@ -160,6 +180,14 @@ func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		it := items[m.qv.cursor]
+		if it.Source.Kind == queue.SourceSession && it.Status == queue.StatusAnswered {
+			m.notice, m.noticeOK = "这一条已经回答过了，不再投递", false
+			return m, nil
+		}
+		if it.Answer != nil && it.Answer.InFlight {
+			m.notice, m.noticeOK = "上次投递在途中中断，结果未知；为免对方收到两遍不再自动重投，先按 Esc 回主界面用 p 预览那个会话", false
+			return m, nil
+		}
 		if it.Status == queue.StatusResolved {
 			m.notice, m.noticeOK = "这一条来源那头已经不等了，不用再回答", false
 			return m, nil
@@ -193,13 +221,32 @@ type QueueScreen struct {
 	Items  []queue.Item
 	Cursor int
 	Alert  string
+	// Healthy 是来源可信时的依据，Foreign 是没收进队列的记录说明。
+	Healthy string
+	Foreign string
 }
 
 func (m Model) queueScreen() QueueScreen {
 	if m.qw.store == nil {
-		return QueueScreen{}
+		return QueueScreen{Show: m.qv.show, Alert: m.queueAlert()}
 	}
-	return QueueScreen{Show: m.qv.show, Items: m.qw.store.Items(), Cursor: m.qv.cursor, Alert: m.queueAlert()}
+	q := QueueScreen{Show: m.qv.show, Items: m.qw.store.Items(), Cursor: m.qv.cursor, Alert: m.queueAlert()}
+	if m.qv.polled {
+		q.Foreign = m.qv.intake.ForeignNote()
+		if q.Alert == "" {
+			q.Healthy = m.qv.intake.Healthy()
+		}
+	}
+	return q
+}
+
+// QueueSnapshot 是 --once 一次性渲染用的队列内容：不开界面，也要把告警与条数画出来。
+func QueueSnapshot(store *queue.Store, in queue.Intake, openErr error) (QueueScreen, int) {
+	if openErr != nil {
+		return QueueScreen{Alert: "决策队列打不开（" + openErr.Error() + "）：待决事项一律看不到，不能当作没有"}, 0
+	}
+	q := QueueScreen{Items: store.Items(), Alert: in.Alert(), Foreign: in.ForeignNote(), Healthy: in.Healthy()}
+	return q, store.OpenCount()
 }
 
 // renderQueueSummary 是主界面上常驻的一行：几条待决，以及来源有没有问题。
@@ -210,10 +257,13 @@ func renderQueueSummary(q QueueScreen, openCount int, w func(string, ...any)) {
 	switch {
 	case openCount > 0:
 		w("%s", styleUnknown.Render(fmt.Sprintf("决策队列：%d 条待你拍板（按 i 打开）", openCount)))
-	case q.Alert != "":
-		w("%s", styleDim.Render("决策队列暂无条目——但上面的来源有问题，这不代表没有待决事项（按 i 打开）"))
+	case q.Alert != "" || q.Healthy == "":
+		w("%s", styleDim.Render("决策队列暂无条目——但来源不可信，这不代表没有待决事项（按 i 打开）"))
 	default:
-		w("%s", styleDim.Render("决策队列为空：notify-daemon 在记录，Graph 里也没有门在等（按 i 打开）"))
+		w("%s", styleDim.Render("决策队列为空："+q.Healthy+"，Graph 里也没有门在等（按 i 打开）"))
+	}
+	if q.Foreign != "" {
+		w("%s", styleDim.Render(q.Foreign))
 	}
 }
 
@@ -223,11 +273,14 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 	if q.Alert != "" {
 		w("%s", styleAlert.Render("告警："+q.Alert))
 	}
+	if q.Foreign != "" {
+		w("%s", styleDim.Render(q.Foreign))
+	}
 	if len(q.Items) == 0 {
-		if q.Alert != "" {
-			w("%s", styleAlert.Render("队列里暂无条目，但来源有问题，不能当作没有待决事项"))
+		if q.Alert != "" || q.Healthy == "" {
+			w("%s", styleAlert.Render("队列里暂无条目，但来源不可信，不能当作没有待决事项"))
 		} else {
-			w("%s", styleDim.Render("队列为空"))
+			w("%s", styleDim.Render("队列为空："+q.Healthy))
 		}
 		w("%s", styleDim.Render("i/Esc 返回　r 立即重取"))
 		return
@@ -280,7 +333,9 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 			w("%s", styleDim.Render("  上游记录已不在 export 里（可能被 conductor 取走或过期清掉）"))
 		}
 		if a := it.Answer; a != nil {
-			if a.DeliveryError != "" {
+			if a.InFlight {
+				w("%s", styleAlert.Render("  上次投递在途中中断，结果未知：不自动重投，先预览那个会话确认"))
+			} else if a.DeliveryError != "" {
 				w("%s", styleAlert.Render("  上次回答投递失败："+a.DeliveryError+"（可以重选）"))
 			} else if a.Note != "" {
 				w("%s", styleDim.Render("  已回答："+a.Note))
@@ -299,6 +354,8 @@ func statusLabel(s string) string {
 	}
 	return "已不等"
 }
+
+func (m Model) queueOn() bool { return m.qw.store != nil || m.qw.err != "" }
 
 func (m Model) queueOpen() int {
 	if m.qw.store == nil {

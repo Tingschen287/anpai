@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,19 +39,34 @@ type InboxRecord struct {
 
 // Fingerprint 是这条记录的去重键。
 //
-// 上游 export 的输出里没有 id，也剥掉了自己的 fp 字段。这里照上游 EventFingerprint
-// （internal/session/event_fingerprint.go:22-48）同一组输入重算：不含时间戳，
-// 所以 daemon 重启后用新时间戳重发的同一轮，算出来还是同一个键。
+// 上游 export 的输出里没有 id，也剥掉了自己的 fp 字段。这里逐字照上游 EventFingerprint
+// （internal/session/event_fingerprint.go:22-48）重算：每段先去首尾空白，from/to/done_status
+// 再转小写，kind 原样；不含时间戳，所以 daemon 重启后用新时间戳重发的同一轮，算出来还是同一个键。
+// TestFingerprintNormalizesLikeUpstream 核对这些规范化。
 //
 // 代价写在这里：没有 last_output_hash 的状态翻转，同一个会话每次 running→waiting
 // 都算出同一个键，两次不同的等待会被当成同一条。上游 turn_fingerprint 在这种情况下
 // 也一样退化（inbox_outbox.go:92-106）。
 func (r InboxRecord) Fingerprint() string {
-	parts := []string{r.SourceRemote, r.ChildSessionID, r.FromStatus, r.ToStatus, r.LastOutputHash}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(r.SourceRemote))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(r.ChildSessionID))
+	b.WriteByte('|')
+	b.WriteString(strings.ToLower(strings.TrimSpace(r.FromStatus)))
+	b.WriteByte('|')
+	b.WriteString(strings.ToLower(strings.TrimSpace(r.ToStatus)))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(r.LastOutputHash))
 	if r.Kind != "" {
-		parts = append(parts, r.Kind, r.DoneStatus, r.DoneSummary)
+		b.WriteByte('|')
+		b.WriteString(r.Kind)
+		b.WriteByte('|')
+		b.WriteString(strings.ToLower(strings.TrimSpace(r.DoneStatus)))
+		b.WriteByte('|')
+		b.WriteString(strings.TrimSpace(r.DoneSummary))
 	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -89,8 +107,9 @@ func (c *Client) InboxExport(ctx context.Context) ([]InboxRecord, error) {
 
 // InboxWriterStatus 问本机有没有 notify-daemon 在记录。
 //
-// 上游的记录只由 notify-daemon 写（cmd/agent-deck/inbox_cmd.go:447-450）。
-// 没有 daemon 时 export 永远是空数组，看起来和「没有待决事项」一模一样——
+// 会话的等待、出错这类状态翻转只由 notify-daemon 写（cmd/agent-deck/inbox_cmd.go:447-450）；
+// 完成账本另有 run-task 的 worker 会写（internal/session/taskworker.go）。没有 daemon 时，
+// export 里就没有任何翻转，最多剩几条完成记录，看起来和「没有待决事项」一模一样——
 // 所以每次读 export 之前都先问这一句，daemon 不在就必须明说，不能画一个空队列。
 func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
 	out, err := c.exec(ctx, "inbox", "writer-status", "--json")
@@ -117,3 +136,44 @@ func (c *Client) DeliverAnswer(ctx context.Context, rec InboxRecord, message str
 	}
 	return c.SendMessage(ctx, rec.ChildSessionID, message)
 }
+
+// procRoot 是进程表的位置，测试里换成假目录。
+var procRoot = "/proc"
+
+// NotifyDaemonRunning 看本机进程表里有没有 upstream agent-deck 的 notify-daemon 在跑。
+//
+// 为什么光有 writer-status 不够：上游只看心跳文件新旧，90 秒内都算在跑
+// （internal/session/notify_heartbeat.go:31），daemon 刚退出的那 90 秒里它照样答 running。
+// 这里读 /proc 下每个进程的 cmdline，找「程序名含 agent-deck、参数里有 notify-daemon」的进程。
+// 只读文件，不执行任何命令。读不了进程表时返回错误，调用方据此告警，不当作在跑。
+func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return false, fmt.Errorf("读不了进程表 %s：%w", procRoot, err)
+	}
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue // 进程已经没了，或是内核线程
+		}
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if !strings.Contains(filepath.Base(argv[0]), "agent-deck") {
+			continue
+		}
+		for _, a := range argv[1:] {
+			if a == "notify-daemon" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ProfileName 是本客户端显式指定的 profile。队列只收这个 profile 的会话记录。
+func (c *Client) ProfileName() string { return c.Profile }

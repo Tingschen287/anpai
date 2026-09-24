@@ -80,7 +80,7 @@ func main() {
 		} else {
 			snap = reader.Snapshot(ctx)
 		}
-		fmt.Print(ui.Render(snap, width))
+		fmt.Print(renderOnce(ctx, snap, pc, width))
 		return
 	}
 
@@ -97,6 +97,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "work: 进入会话未启用：%v\n", err)
 	}
 	// 决策队列：Graph 的门总能接上；上游没配好时照样开，界面会明说运行时来源取不到。
+	// 队列文件打不开时不静默退掉：界面常驻告警。
 	if store, up, err := buildQueue(); err == nil {
 		if up != nil {
 			model = model.WithQueue(store, up, up, pc)
@@ -104,7 +105,7 @@ func main() {
 			model = model.WithQueue(store, nil, nil, pc)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "work: 决策队列未启用：%v\n", err)
+		model = model.WithQueueError(err)
 	}
 	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fail("界面异常退出：%v", err)
@@ -192,6 +193,39 @@ func buildQueue() (*queue.Store, *agentdeck.Client, error) {
 		return store, nil, nil
 	}
 	return store, client, nil
+}
+
+// renderOnce 是 --once 的输出：Graph 表盘加决策队列的告警与条数。
+func renderOnce(ctx context.Context, snap projectctl.Snapshot, script string, width int) string {
+	q, open := onceQueue(ctx, snap, script)
+	return ui.RenderWithQueue(snap, width, q, open)
+}
+
+// onceQueue 给 --once 走一遍队列：并入 Graph 门，自检后读一次 export，返回要画的内容。
+func onceQueue(ctx context.Context, snap projectctl.Snapshot, script string) (ui.QueueScreen, int) {
+	store, client, err := buildQueue()
+	if err != nil {
+		return ui.QueueSnapshot(nil, queue.Intake{}, err)
+	}
+	now := time.Now()
+	var b queue.Bindings
+	if _, bs, err := buildAttacher(); err == nil {
+		b = bs
+	}
+	if _, err := store.Merge(queue.SourceGraph, queue.FromGraph(snap, b, script, now), now); err != nil {
+		return ui.QueueSnapshot(nil, queue.Intake{}, err)
+	}
+	var up queue.Upstream
+	if client != nil {
+		up = client
+	}
+	in, recs := queue.Poll(ctx, up, now)
+	if in.Configured && in.ExportErr == "" {
+		if _, err := store.Merge(queue.SourceSession, queue.FromInbox(recs, now), now); err != nil {
+			return ui.QueueSnapshot(nil, queue.Intake{}, err)
+		}
+	}
+	return ui.QueueSnapshot(store, in, nil)
 }
 
 func fail(format string, args ...any) {

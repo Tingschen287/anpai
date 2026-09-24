@@ -63,8 +63,8 @@ var AllConfidences = []string{ConfidenceNone, ConfidenceLow, ConfidenceMedium, C
 const (
 	// StatusOpen：还没人回答。
 	StatusOpen = "open"
-	// StatusAnswered：owner 选了一个选项。会话条目已投递（或投递失败，见 Answer），
-	// Graph 条目已给出命令，等 owner 自己执行。
+	// StatusAnswered：会话条目已回答（投递成功，或选了不发消息的选项）。
+	// Graph 条目不会进这个状态：选了选项只是拿到命令，门还在，直到 Graph 状态变了才转 resolved。
 	StatusAnswered = "answered"
 	// StatusResolved：来源那一头已经不再等了（Graph 节点换了状态）。
 	StatusResolved = "resolved"
@@ -124,6 +124,9 @@ type Answer struct {
 	DeliveryError string `json:"delivery_error,omitempty"`
 	// Note 是给人看的说明，例如 Graph 条目要 owner 执行的命令。
 	Note string `json:"note,omitempty"`
+	// InFlight 为真表示投递已开始、结果还没记下。进程若在这时中断，重启后看到的就是它：
+	// 结果未知，不自动重投（重投可能让对方收到两遍）。
+	InFlight bool `json:"in_flight,omitempty"`
 }
 
 // Item 是队列里的一条待决事项。

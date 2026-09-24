@@ -41,18 +41,69 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读队列文件失败：%w", err)
 	}
-	var f file
+	// items 用指针接：缺这个字段（例如 {"version":1}）与「有、但是空数组」要分得开。
+	var f struct {
+		Version int     `json:"version"`
+		Items   *[]Item `json:"items"`
+	}
+	bad := func(why string) error {
+		return fmt.Errorf("队列文件 %s %s。不当成空队列打开，免得丢掉已回答的记录；请先检查或移走它", path, why)
+	}
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("队列文件 %s 解析不了（%v）。不当成空队列打开，免得丢掉已回答的记录；请先检查或移走它", path, err)
+		return nil, bad(fmt.Sprintf("解析不了（%v）", err))
 	}
 	if f.Version != currentVersion {
-		return nil, fmt.Errorf("队列文件版本是 %d，本程序只认 %d", f.Version, currentVersion)
+		return nil, bad(fmt.Sprintf("版本是 %d，本程序只认 %d", f.Version, currentVersion))
 	}
-	for i := range f.Items {
-		it := f.Items[i]
+	if f.Items == nil {
+		return nil, bad("缺少 items 字段")
+	}
+	for i := range *f.Items {
+		it := (*f.Items)[i]
+		if err := validateItem(it); err != nil {
+			return nil, bad(fmt.Sprintf("第 %d 条不完整（%v）", i+1, err))
+		}
+		if _, dup := s.items[it.ID]; dup {
+			return nil, bad("有重复的条目 " + it.ID)
+		}
 		s.items[it.ID] = &it
 	}
 	return s, nil
+}
+
+// validateItem 检查读回来的条目说不说得清楚。字段集以 schema.json 为准，这里只挡
+// 读回后会让队列行为出错的缺项：没有 id、来源或状态不认识、没有选项。
+func validateItem(it Item) error {
+	switch {
+	case it.ID == "":
+		return fmt.Errorf("缺 id")
+	case !contains(categoryStrings(), string(it.Category)):
+		return fmt.Errorf("类别 %q 不认识", it.Category)
+	case it.Source.Kind != SourceGraph && it.Source.Kind != SourceSession:
+		return fmt.Errorf("来源 %q 不认识", it.Source.Kind)
+	case !contains(AllStatuses, it.Status):
+		return fmt.Errorf("状态 %q 不认识", it.Status)
+	case len(it.Options) == 0:
+		return fmt.Errorf("没有选项")
+	}
+	return nil
+}
+
+func categoryStrings() []string {
+	out := make([]string, 0, len(AllCategories))
+	for _, c := range AllCategories {
+		out = append(out, string(c))
+	}
+	return out
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Merge 把一轮取到的条目并进队列，返回新增的条数。
@@ -119,15 +170,29 @@ func (s *Store) Record(id string, ans Answer) (Item, error) {
 		return Item{}, fmt.Errorf("条目 %s 没有选项 %q", id, ans.Option)
 	}
 	a := ans
+	a.InFlight = false
 	it.Answer = &a
 	// 投递失败的不算答完：留在 open，owner 能看到失败原因并重试。
-	if a.DeliveryError == "" {
+	// Graph 条目选了选项也不算答完：门还在，Graph 状态变了才转 resolved。
+	if a.DeliveryError == "" && it.Source.Kind == SourceSession {
 		it.Status = StatusAnswered
 	}
 	if err := s.flushLocked(); err != nil {
 		return Item{}, err
 	}
 	return *it, nil
+}
+
+// MarkInFlight 在投递之前把「正在投递」落盘。
+func (s *Store) MarkInFlight(id, option string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[id]
+	if !ok {
+		return fmt.Errorf("队列里没有条目 %s", id)
+	}
+	it.Answer = &Answer{Option: option, AnsweredAt: now, InFlight: true}
+	return s.flushLocked()
 }
 
 // Get 取一个条目。

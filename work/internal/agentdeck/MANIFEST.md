@@ -331,8 +331,14 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
   （`internal/session/inbox_outbox.go:467-471`、`transition_notifier.go:219-221`）。Work Deck 派出去的会话都是顶层的，
   所以它们的 running→waiting 不会出现；只有打出完成标记时，完成账本里会有一条 `finished`。
   能进 export 的等待来自有父会话（conductor 或上级会话）的子会话。
-- **记录只由 notify-daemon 写**（`cmd/agent-deck/inbox_cmd.go:447-450`）。daemon 不在时 export 永远是 `[]`，
-  和「没有待决事项」长得一样，所以每次读之前先问 `writer-status`。
+- **状态翻转只由 notify-daemon 写**（`cmd/agent-deck/inbox_cmd.go:447-450`）；完成账本另有 run-task 的 worker 会写
+  （`internal/session/taskworker.go`）。daemon 不在时 export 里没有任何翻转，最多剩几条完成记录，
+  和「没有待决事项」分不开，所以每次读之前先问 `writer-status`，并查进程表（心跳 90 秒内都算在跑）。
+- **writer-status 在 daemon 刚退出的 90 秒里仍答 running**（只看心跳，`internal/session/notify_heartbeat.go:31`）。
+  所以 adapter 另读 `/proc/*/cmdline` 找「程序名含 agent-deck、参数有 notify-daemon」的进程（`NotifyDaemonRunning`），
+  心跳新鲜且进程在才算可信。这不是上游命令调用，只读进程表。
+- **export 是全机的，不分 profile。** Work Deck 只收本客户端 profile 的记录：别的 profile 的会话，`session send`
+  在当前 profile 里找不到它，回答投递不过去。没收进来的条数在界面上说明。
 - **父 inbox 会被 conductor 的 drain 清掉**，清掉后那些翻转就从 export 里消失；完成账本从不删除，`finished` 会一直在。
 - **`events/` 目录在 v1.15.0 没有生产代码写入**：上游 `WriteStatusEvent`（`internal/session/event_writer.go`）
   只有测试在调，二进制里也没有相应字符串。按设计它是每会话一个文件、整体覆盖写，两次快速翻转会互相覆盖、丢中间态，
