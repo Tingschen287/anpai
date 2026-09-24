@@ -15,7 +15,8 @@ import "fmt"
 //     ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在核对范围内。
 //   - 子命令：白名单与测试里写死的那张表必须完全相等。
 //   - 端点：按字面量找源码里的 "/api/..."、"/events/..."；拼出来的路径看不见。
-//   - 人读清单：机器清单里的每一项要在 MANIFEST.md 出现；MANIFEST.md 多写了什么不查。
+//   - 人读清单：只查端点、上游版本与提交、子命令、环境变量这几类在 MANIFEST.md 出现；
+//     LaunchFlags、WebFlags、各组字段、TmuxConventions 不查。MANIFEST.md 多写了什么也不查。
 // 边界总表见 4.eval/results/n037_workbench_attach/boundary-limits.md。
 
 // UpstreamVersion 是本清单核对过的上游版本。

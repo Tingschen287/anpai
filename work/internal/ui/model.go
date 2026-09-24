@@ -102,9 +102,9 @@ type Attacher interface {
 	// DirectAttachCommand 造一条绕开上游 CLI、直连会话所在 tmux 的命令。
 	//
 	// 这是 owner 按 T 时走的那条。为什么要有它：上游的 session attach 是另一个
-	// 进程去问 headless 服务的，而那个服务对菜单快照做内存缓存，只在自己处理
-	// 变更时失效——CLI 刚 launch 出来的会话，同一个服务实例可能一直看不到，
-	// 直到重启。那种时候 tmux 里的会话好好的，只是上游那条路问不到它。
+	// 进程去问 headless 服务的，而那个服务对菜单快照做内存缓存，只在服务自己的
+	// 写接口或 hook 状态文件 watcher 触发时失效——CLI 刚 launch 出来的会话，
+	// 同一个服务实例可能一直看不到。那种时候 tmux 里的会话好好的，只是上游那条路问不到它。
 	//
 	// 第二个返回值是给人看的说明：adapter 若退到了次一等的取数来源，
 	// 这里会讲清楚退到了哪、代价是什么。空串表示走的是最准的那条。
@@ -418,7 +418,7 @@ func (m Model) beginAttach() (tea.Model, tea.Cmd) {
 // 那说明会话活着，是上游那条路问不到它。上游 headless 服务对菜单快照做内存缓存，
 // CLI 刚起的会话它可能一直看不到，这是实测过的。
 //
-// 取数在 adapter 里分两处：先问 `GET /api/menu`（唯一给 socket 名的来源），
+// 取数在 adapter 里分两处：先问 `GET /api/menu`（直连路径查的 HTTP 来源，给会话名与 socket 名），
 // 菜单里没有这个会话时退到 CLI `list --json`，再扫本用户 tmux socket 目录下的 server 把 socket
 // 名找回来并证明目标唯一。证明不了就拒绝，不盲连。细节见 adapter 的
 // DirectAttachCommand 与 ResolveSocketFor。

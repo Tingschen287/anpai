@@ -59,7 +59,7 @@ type Screen struct {
 	DetailOf string
 	// 是否把已验收的节点也列出来。
 	ShowAll bool
-	// 进入会话前要知道的按键用法（嵌套 tmux 时要按两次前缀）。常驻显示在按键说明上方：
+	// 进入会话前要知道的按键用法（嵌套 tmux 时要按两次前缀）。常驻显示在按键说明上方，按宽度折行：
 	// 按下 a/T 那一刻的 Notice 只停一帧——交出终端时 bubbletea 立刻退出全屏界面。
 	EnterHint string
 }
@@ -260,8 +260,10 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, p := range s.Problems {
 		w("%s", styleAlert.Render("问题："+p))
 	}
-	if sc.EnterHint != "" {
-		w("%s", styleDim.Render(sc.EnterHint))
+	// 按宽度折行：这句话比一行长，Bubble Tea 会截掉超出终端宽度的部分，
+	// 恰好把「按两次」截没。宽度下限是上面的 60 列，更窄的终端本身就放不下这块表盘。
+	for _, ln := range wrapText(sc.EnterHint, width) {
+		w("%s", styleDim.Render(ln))
 	}
 	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。

@@ -27,9 +27,9 @@ type ListedSession struct {
 // ListSessions 走 CLI 的 `list --json`，直接读上游存储。
 //
 // 为什么要有它，而不是都走 HTTP：headless 服务对菜单快照做内存缓存，
-// 只在自己处理变更时失效。CLI `launch` 是另一个进程，服务感知不到，
-// 所以刚派出去的会话在 `/api/sessions`、`/api/menu` 和 SSE 里都看不到，
-// 直到服务重启。这条约束由 TestIntegrationLaunchLandsInStorageEvenThoughServerCachesIt
+// 只在服务自己的写接口或 hook 状态文件 watcher 触发时失效。CLI `launch` 是另一个进程，
+// 本身不触发，所以刚派出去的会话在 `/api/sessions`、`/api/menu` 和 SSE 里可能一直看不到，
+// 直到别的失效事件或服务重启（见 MANIFEST.md 第 7 节）。这条约束由 TestIntegrationLaunchLandsInStorageEvenThoughServerCachesIt
 // 钉着。
 //
 // `list` 不经服务，看得见。实测：同一时刻菜单里 0 个会话，list 里 1 个，

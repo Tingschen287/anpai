@@ -128,8 +128,9 @@ func cleanupTmux(t *testing.T, profile string) {
 // 派工到真实上游，拿回真实会话号，并确认它确实落进了上游的存储。
 //
 // 这里同时钉死一条上游的已知约束：headless 服务对菜单快照做了缓存，
-// 缓存只在服务自己处理变更时失效。`launch` 是另一个进程，服务不会感知，
-// 所以刚派的会话在 /api/sessions 与 SSE 里都看不到，直到服务重启。
+// 缓存只在 notifyMenuChanged 被调用时失效：服务自己的写接口，或服务内的 hook 状态文件 watcher。
+// `launch` 是另一个进程，本身不触发这两类，所以在没有别的失效事件时，
+// 刚派的会话在 /api/sessions 与 SSE 里都看不到（本测试就是这个条件）。
 // 上游自己的注释承认了这点（internal/web/server.go 的 notifyMenuChanged）。
 //
 // 断言这条约束，而不是绕开它：上游哪天修好了，这个测试会失败，

@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -470,6 +473,41 @@ func TestPrefixKeyAdviceIsOnScreenBeforeAnyKeyPress(t *testing.T) {
 		t.Error("没有接管能力时不该提示进入会话的按键")
 	}
 }
+
+// 常驻那一行要在最窄的 60 列里也整句看得到。
+//
+// Bubble Tea 会截掉超出终端宽度的单行。真实的嵌套提示里「按两次」在第 70 多列，
+// 不折行的话 60 列终端上恰好看不到关键那半句。
+func TestPrefixKeyAdviceFitsANarrowTerminal(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-test/default,1,0") // 让 adapter 按嵌套给出原话
+	advice := agentdeck.NestingAdvice("")
+	if !strings.Contains(advice, "要操作内层得按两次") {
+		t.Fatalf("adapter 的嵌套提示变了，这条测试要跟着改：%q", advice)
+	}
+	fa := &fakeAttacher{advice: advice}
+	m := modelWithAttacher(t, []projectctl.Node{runningNode("n1", 1)}, fa, fakeBindings{})
+	m.width = 60
+	ansi := regexp.MustCompile("\x1b\\[[0-9;]*m")
+	plain := ansi.ReplaceAllString(m.View(), "")
+	// 只量提示那几行：表盘别的行在 60 列下也会超宽，那不是这条测试的范围。
+	var hintLines int
+	for _, ln := range strings.Split(plain, "\n") {
+		if ln == "" || !strings.Contains(advice, ln) {
+			continue
+		}
+		hintLines++
+		if cells := lipgloss.Width(ln); cells > 60 {
+			t.Errorf("提示有一行 %d 列，超出 60 列会被截断：%q", cells, ln)
+		}
+	}
+	if hintLines == 0 {
+		t.Fatal("屏幕上找不到提示的任何一行")
+	}
+	if !strings.Contains(strings.ReplaceAll(plain, "\n", ""), "要操作内层得按两次") {
+		t.Error("60 列下看不到「按两次」那半句")
+	}
+}
+
 
 // 从会话回来要刷新状态，不能停在进去之前那一刻。
 func TestReturningFromSessionRefreshesState(t *testing.T) {

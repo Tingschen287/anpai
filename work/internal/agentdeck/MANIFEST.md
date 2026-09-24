@@ -270,11 +270,14 @@ adapter 的 `prepareNested`（`nested.go`）在检测到自己处于 tmux 内时
 
 **这是本清单里最要紧的一条。**
 
-headless 服务对菜单快照做了内存缓存，缓存只在**服务自己**处理变更时失效
-（上游 `internal/web/server.go` 的 `notifyMenuChanged`）。`launch` 是另一个进程，服务感知不到，所以：
+headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChanged`（上游 `internal/web/server.go:450`）被调用时失效。
+调用它的有两类：服务自己的写接口（`handlers_sessions.go`、`handlers_groups.go` 等），
+以及服务内的 hook 状态文件 watcher（`server.go:331-332`，某个会话的 hook 状态文件变了就触发）。
+`launch` 是另一个进程，它本身不触发这两类，所以：
 
-- 刚用 `launch` 派出去的会话，在**同一个**服务实例的 `/api/sessions` 与 `/events/menu` 里都**看不到**，直到服务重启。
-- 上游没有提供纯刷新端点；能触发缓存失效的都是带副作用的写接口。
+- 刚用 `launch` 派出去的会话，在**同一个**服务实例的 `/api/sessions` 与 `/events/menu` 里**看不到**，
+  直到发生上面某一次失效，或服务重启。什么时候发生不由 Work Deck 控制，所以按「可能一直看不到」处理。
+- 上游没有提供纯刷新端点；服务的写接口都带副作用。
 - 数据确实落进了存储：**另起**一个服务实例就看得见。
 
 上游自己的注释承认了这点，原文（`server.go`）：
@@ -290,13 +293,14 @@ headless 服务对菜单快照做了内存缓存，缓存只在**服务自己**�
 
 1. 自己派出去的会话，**以绑定存储为准**，不等服务确认。`launch` 的返回值里已经有会话号、profile、工具和模型。
 2. 界面上对服务尚未感知的会话据实标注。
-3. `TestIntegrationLaunchLandsInStorageEvenThoughServerCachesIt` 把这条约束钉成了断言：
-   上游哪天修好，该测试会失败，那时回来更新本节与视图逻辑。
+3. `TestIntegrationLaunchLandsInStorageEvenThoughServerCachesIt` 在没有上述失效事件的条件下（新 profile、刚起的服务）
+   把这条约束钉成了断言：上游哪天修好，该测试会失败，那时回来更新本节与视图逻辑。
 
 ## 8. 上游变更时怎么核对
 
 1. 跑 `go test ./internal/agentdeck/`（设 `WORKDECK_UPSTREAM_SRC` 指向新快照）。
-   它能查出一部分不一致：白名单、三组字段、副作用断言的依据、源码里的字面量端点、机器清单各项在本文件出现。
+   它能查出一部分不一致：白名单、三组字段、副作用断言的依据、源码里的字面量端点，
+   以及端点、版本、提交、子命令、环境变量这几类在本文件出现（参数与字段不查）。
    查不出的部分见 `manifest.go` 头部与 `boundary-limits.md` 第三节，要靠下面几步人工核对。
 2. 对照第 1、2 节，确认子命令与端点还在、参数名没改。
 3. 对照第 3 节，确认字段名没改、语义没变（尤其 `session_id` 与 `status`）。没有测试核对的那几组要逐个看。
