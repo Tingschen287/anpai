@@ -3,8 +3,8 @@
 // 包外的代码不得自己去 exec projectctl、不得读 events.jsonl、不得碰 ledger-head.json。
 // 想加一条新的数据来源，就加在这个包里，别处不开第二个口子。
 //
-// 本轮（n035）是只读的：这个包只认四个不写任何文件的子命令，写命令在这里根本没有
-// 对应的方法，调用方即使想写也没有入口。
+// n035 起只读：run() 只认四个不写任何文件的子命令。n042 起有且只有一个写入口 Client.Start（见文件末尾），
+// 由界面在 owner 选定模型、按回车之后调用；submit / review / block 等写命令仍然没有方法、run() 也拒绝。
 package projectctl
 
 import (
@@ -191,6 +191,10 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	}
 	if !env.OK {
 		return StartResult{}, fmt.Errorf("projectctl start 返回失败：%s", truncate(env.Error, 400))
+	}
+	// 回执说 ok、进程却非零退出：两边对不上就不信，不拿这个 attempt 去派（n042 attempt 1 评审次要项）。
+	if runErr != nil {
+		return StartResult{}, fmt.Errorf("projectctl start 回执说成功，但进程退出失败：%w（stderr: %s）", runErr, truncate(stderr.String(), 400))
 	}
 	var res StartResult
 	if err := json.Unmarshal(env.Result, &res); err != nil {

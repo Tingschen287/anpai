@@ -244,3 +244,14 @@ func TestStartRejectsAMismatchedReceipt(t *testing.T) {
 		}
 	}
 }
+
+// 回执 ok 但进程非零退出：不信（n042 attempt 1 评审次要项）。
+func TestStartDistrustsOkWithANonZeroExit(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.py")
+	os.WriteFile(script, []byte("import json, sys\nprint(json.dumps({\"ok\": True, \"result\": {\"node_id\": \"n1\", \"state\": \"running\", \"attempt\": 1, \"event_id\": \"e\"}}))\nsys.exit(3)\n"), 0o644)
+	_, err := NewClient(dir, script).Start(context.Background(), StartRequest{NodeID: "n1", Actor: "a", Role: "r", RouteClass: "frontier", Model: "m", Reason: "why"})
+	if err == nil || !strings.Contains(err.Error(), "进程退出失败") {
+		t.Errorf("ok 回执配非零退出应当报错：%v", err)
+	}
+}

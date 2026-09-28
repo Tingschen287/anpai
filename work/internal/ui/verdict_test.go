@@ -113,3 +113,35 @@ func TestIntegrationVerdictCommandIsAcceptedByTheRealController(t *testing.T) {
 		t.Fatalf("控制器没接受这条命令：%v\n%s", err, out)
 	}
 }
+
+// n042 attempt 1 评审 blocker 2：评审 brief 本身会留在画面上（送达未确认时还可能停在输入框），
+// 它不能被认成结论；只认独占一行的结论，夹在句子里的不算。
+func TestOnlyAStandaloneVerdictLineCounts(t *testing.T) {
+	brief := reviewBrief(submittedNode("n1", 2, "exec"), 2)
+	if v := lastVerdict(brief); v != "" {
+		t.Errorf("brief 本身不该被认成结论，却认出 %q", v)
+	}
+	for pane, want := range map[string]string{
+		"VERDICT: accept":     "accept",
+		"  • VERDICT: rework": "rework",
+		"**VERDICT: accept**": "accept",
+		"> VERDICT: rework.":  "rework",
+		"`VERDICT: accept`":   "accept",
+		"格式：`VERDICT: accept` 或 `VERDICT: rework`。": "",
+		"结论写 VERDICT: accept 即可":                    "",
+		"VERDICT: accept 但我还没看完":                    "",
+		"说明：VERDICT: accept":                        "",
+		"评审者说 VERDICT: rework":                      "",
+		"VERDICT: acceptable":                       "",
+		brief + "\n…评审中…\nVERDICT: accept\n":        "accept",
+	} {
+		if got := lastVerdict(pane); got != want {
+			t.Errorf("画面 %q：认出 %q，期望 %q", pane, got, want)
+		}
+	}
+	// 画面上只有 brief（评审还没开始）时按 v 不给命令。
+	m, _, _ := verdictModel(t, brief)
+	if m = pressV(m); m.detail != "" || !strings.Contains(m.notice, "还没有 VERDICT 行") {
+		t.Errorf("只有 brief 时不该给记账命令：%q", m.notice)
+	}
+}

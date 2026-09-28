@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -125,4 +127,56 @@ func (u *unconfirmedDispatcher) Dispatch(ctx context.Context, req dispatch.Reque
 	b, err := u.fakeDispatcher.Dispatch(ctx, req)
 	b.Delivery = binding.DeliveryUnconfirmed
 	return b, err
+}
+
+// n042 attempt 1 评审 blocker 1：派工回执一到，同一进程立刻按 p 就能看到新会话，不等刷新；
+// 派工前就发出的那次刷新晚到（旧快照：ready、attempt 未知），也盖不掉；快照追上后覆盖撤掉。
+func TestObserveRightAfterDispatchWithoutWaitingForRefresh(t *testing.T) {
+	lau := &recordingLauncher{next: "new-sess"}
+	d := realDispatcher(t, lau)
+	stale := nodeWith("n1", projectctl.StateReady, "frontier")
+	m := modelWithDispatcherAndBindings(t, []projectctl.Node{stale}, d, d.Store)
+	att := &fakeAttacher{text: "画面"}
+	m.attacher = att
+	m = pressD(m)
+	m, cmd := enterWithReason(t, m, "唯一够档的")
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+
+	pressP := func(m Model) Model {
+		next, c := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+		m = next.(Model)
+		if c != nil {
+			if msg := c(); msg != nil {
+				next, _ = m.Update(msg)
+				m = next.(Model)
+			}
+		}
+		return m
+	}
+	m = pressP(m)
+	if len(att.previews) != 1 || att.previews[0] != "new-sess" {
+		t.Fatalf("派工回执后立刻按 p 应当预览新会话：previews=%v notice=%q", att.previews, m.notice)
+	}
+
+	// 晚到的旧快照：覆盖照样生效。
+	next, _ = m.Update(snapshotMsg(projectctl.Snapshot{Nodes: []projectctl.Node{stale}, ProjectRoot: "/tmp/proj"}))
+	m = next.(Model)
+	if a, ok := m.snap.Nodes[0].Attempt.Get(); !ok || a != 1 {
+		t.Errorf("旧快照不该盖掉派工后的 attempt：%v %v", a, ok)
+	}
+	if st, _ := m.snap.Nodes[0].State.Get(); st != projectctl.StateRunning {
+		t.Errorf("开工后应当显示 running：%v", st)
+	}
+	if m = pressP(m); len(att.previews) != 2 {
+		t.Errorf("旧快照到了之后按 p 仍应能预览：%v", att.previews)
+	}
+
+	// 快照追上（账本也是 attempt 1）：覆盖撤掉。
+	fresh := runningNode("n1", 1)
+	next, _ = m.Update(snapshotMsg(projectctl.Snapshot{Nodes: []projectctl.Node{fresh}, ProjectRoot: "/tmp/proj"}))
+	m = next.(Model)
+	if len(m.overlays) != 0 {
+		t.Errorf("快照追上后覆盖应当撤掉：%v", m.overlays)
+	}
 }

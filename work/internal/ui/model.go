@@ -53,6 +53,8 @@ type Model struct {
 	dispatcher Dispatcher
 	// starter 在派工前对 Graph 开工（n042）。
 	starter Starter
+	// overlays 是派工后本地已知、快照还没刷到的 attempt（见 ledgerOverlay）。
+	overlays map[string]ledgerOverlay
 	// 光标停在哪个节点上。
 	cursor int
 	mode   Mode
@@ -247,6 +249,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = ModeBrowse
 		m.notice = msg.text
 		m.noticeOK = msg.ok
+		if msg.nodeID != "" && msg.attempt > 0 {
+			if m.overlays == nil {
+				m.overlays = map[string]ledgerOverlay{}
+			}
+			m.overlays[msg.nodeID] = ledgerOverlay{attempt: msg.attempt, running: msg.started}
+			m = m.applyOverlays()
+		}
 		// 派完立刻重取一次，让绑定和状态尽快反映到屏幕上。
 		if !m.inflight {
 			m.inflight = true
@@ -258,10 +267,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 先行快照里状态不全，不拿它合并 Graph 门：那会把查询中的门误标成「已不等」。
 		if m.loading {
 			m.snap = projectctl.Snapshot(msg)
+			m = m.applyOverlays()
 		}
 		return m, nil
 	case snapshotMsg:
 		m.snap = projectctl.Snapshot(msg)
+		m = m.applyOverlays()
 		m.loading = false
 		m.inflight = false
 		if err := m.mergeGraph(); err != "" {
@@ -315,6 +326,44 @@ type previewDoneMsg struct {
 type dispatchDoneMsg struct {
 	ok   bool
 	text string
+	// 账本此刻已知的情况（n042）：nodeID 的 attempt 已由 projectctl 建立（started），
+	// 或已有 attempt 被派出会话。attempt 为 0 表示账本没有变化。
+	nodeID  string
+	attempt int
+	started bool
+}
+
+// ledgerOverlay 是派工后本地已知、但快照还没刷到的账本事实（n040 终审断点 1，n042 attempt 1 评审）。
+// 刷新是异步的：刷新回来之前按 p / a / T，界面用的还是旧快照的 attempt，会说「还没开过工」。
+// 所以派工回执一到就把 attempt（开工了还有 running）叠到快照上，之后每份快照都再叠一次，
+// 直到快照自己的 attempt 追上来——派工前就已发出的那次刷新晚到，也盖不掉它。
+type ledgerOverlay struct {
+	attempt int
+	running bool
+}
+
+// applyOverlays 把本地已知的账本事实叠到当前快照上；快照追上的就撤掉。
+func (m Model) applyOverlays() Model {
+	if len(m.overlays) == 0 {
+		return m
+	}
+	nodes := append([]projectctl.Node(nil), m.snap.Nodes...)
+	for i, n := range nodes {
+		ov, ok := m.overlays[n.ID]
+		if !ok {
+			continue
+		}
+		if a, known := n.Attempt.Get(); known && a >= ov.attempt {
+			delete(m.overlays, n.ID)
+			continue
+		}
+		nodes[i].Attempt = projectctl.Known(ov.attempt)
+		if ov.running {
+			nodes[i].State = projectctl.Known(projectctl.StateRunning)
+		}
+	}
+	m.snap.Nodes = nodes
+	return m
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -849,13 +898,14 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		started := ""
+		started, startedAttempt := "", 0
 		if needStart {
 			res, err := starter.Start(ctx, start)
 			if err != nil {
 				return dispatchDoneMsg{ok: false, text: "Graph 开工失败，不派：" + err.Error()}
 			}
 			attempt = res.Attempt
+			startedAttempt = res.Attempt
 			started = fmt.Sprintf("Graph 已开工 attempt %d（%s）", res.Attempt, res.EventID)
 		}
 		req := dispatch.Request{
@@ -875,7 +925,8 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		if err != nil {
 			if started != "" {
 				return dispatchDoneMsg{ok: false, text: started + "，但派工没成：" + err.Error() +
-					"。节点现在是 running，修好后选中它按 d 补派同一个 attempt"}
+					"。节点现在是 running，修好后选中它按 d 补派同一个 attempt",
+					nodeID: node.ID, attempt: startedAttempt, started: true}
 			}
 			return dispatchDoneMsg{ok: false, text: "派工被拒：" + err.Error()}
 		}
@@ -886,11 +937,13 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		if b.Delivery == binding.DeliveryUnconfirmed {
 			return dispatchDoneMsg{ok: false, text: fmt.Sprintf(
 				"%s已派 %s attempt %d → 会话 %s（%s / %s），但执行 brief 送达未确认。%s",
-				prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass, unconfirmedAdvice)}
+				prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass, unconfirmedAdvice),
+				nodeID: node.ID, attempt: b.Attempt, started: startedAttempt > 0 || state == projectctl.StateRunning}
 		}
 		return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
 			"%s已派 %s attempt %d → 会话 %s（%s / %s），执行 brief 已送达",
-			prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass)}
+			prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass),
+			nodeID: node.ID, attempt: b.Attempt, started: startedAttempt > 0 || state == projectctl.StateRunning}
 	}
 }
 

@@ -20,9 +20,11 @@ import (
 // 连同报告文件在不在、一条填好参数的 projectctl review 命令摆出来。
 // **Work Deck 不替 owner 记账**：命令由 owner 核对后自己在终端运行。本界面对 Graph 只有派工前的开工一个写入口。
 
-var verdictRe = regexp.MustCompile(`VERDICT:\s*(accept|rework)\b`)
+// verdictRe 只认**独占一行**的结论：行首可以有空白、列表符号、引用符或 Markdown 强调，行尾只能有空白、强调或句点。
+// 夹在一句话中间的「VERDICT: accept」（例如格式说明、引用别人的话）不算（n042 attempt 1 评审 blocker 2）。
+var verdictRe = regexp.MustCompile("(?m)^[\\s•*>`-]*VERDICT:[ \\t]*(accept|rework)[\\s*`.]*$")
 
-// lastVerdict 取画面里最后一个 VERDICT 行的结论；没有就是空。
+// lastVerdict 取画面里最后一个独占一行的 VERDICT 结论；没有就是空。
 func lastVerdict(pane string) string {
 	all := verdictRe.FindAllStringSubmatch(pane, -1)
 	if len(all) == 0 {
