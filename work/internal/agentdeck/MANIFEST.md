@@ -19,7 +19,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
-| `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话 | `--message-file -`（文本走标准输入，不进 argv） |
+| `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话 | `--message-file -`（文本走标准输入，不进 argv）、`--json`（n042，读失败时的 `delivery` 字段） |
 | `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
 | `inbox export` | 决策队列：非消费式读全机 completion/transition 记录（n038） | `--json` |
 | `inbox writer-status` | 决策队列：读 export 之前自检 notify-daemon 在不在（n038） | `--json` |
@@ -39,6 +39,16 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   `TestEveryWriteIntoASessionNeedsAPermit` 核对包内往会话写字的上游调用只有 `SendMessage` 一处且先核许可。
   边界：记账只知道经 Work Deck 的接管；不经 Work Deck 的接入由 arbiter 在投递前用 `AttachedClients`（tmux `list-clients`）查，
   查询与送达之间有人进来仍然看不见（已披露的剩余风险，Graph revision 86）。
+- **n042：`session send --json` 的 `delivery`**。失败时上游输出 `{"success":false,"delivery":...}`（上游 `cmd/agent-deck/session_cmd.go:3056-3125`）。
+  `delivery=typed`（正文到了画面、提交没得到确认，issue #1793）报 `ErrDeliveryUnconfirmed`，派工器照样落绑定并记 `delivery: unconfirmed`；
+  其余取值（`typed_not_submitted`、`line_too_long`、`no_evidence`、`send_failed`）仍是投递失败。`unverified` 上游按成功退出，Work Deck 照上游算成功。
+  n040 实测 `typed` 出现过假阴性（评审会话其实执行了 brief）；n042 期间用 shell 会话试了 5 个 ASCII 单词没复现，所以这条由按上游 JSON 形状写的假上游测试覆盖。
+- **n042：哪些工具接受 `--model`**（`ToolsAcceptingModel`，上游 `internal/session/instance.go:9318` `SupportsLaunchModel`）：claude、codex、gemini、opencode，
+  以及用户在上游配置里声明为与 claude / codex 兼容的自定义工具。`shell` 没有模型（`ToolsWithoutModel`）。配置条目用 `model_not_applicable: true` 显式声明，
+  `CheckToolModel` 在加载配置和发 launch 前核对两类已知冲突；认不出的自定义工具交给上游。升级上游要重核这张表。
+- **n042：不继承 `TMUX` / `TMUX_PANE`**。tmux 不带 `-L`/`-S` 时按 `$TMUX` 找 server；Work Deck 自己跑在 tmux 里时，上游 launch、`has-session`、
+  `show-environment`、`list-clients` 都会被带到外层 server（n040 终审实测：会话落到私有 server、随即 error）。所有上游与 tmux 子进程都用 `withoutTmux` 去掉这两个变量。
+  依赖的约定：upstream agent-deck 的会话都在默认 tmux server 上。
 - **n039 起不用 `launch -m`**：它在 Work Deck 登记写入权之前就把消息送进会话，登记失败时消息已经发出。
   现在一律先起空会话、登记写入权，再经 arbiter 的 `SendMessage` 投递。`LaunchRequest` 没有消息字段，`LaunchFlags` 不含 `-m`。
 - **实测（n039）**：对 shell 会话，上游 `session send` 判「已提交」看正文是否还在输入区；shell 的
