@@ -228,3 +228,19 @@ print(json.dumps({"ok": True, "result": {"node_id": sys.argv[4], "state": "runni
 		t.Error("字段不全时不该调控制器")
 	}
 }
+
+// 控制器回执对不上（attempt 不是正数、节点号不是这个）时 Start 报错：派工不能拿一个错的 attempt 去绑。
+func TestStartRejectsAMismatchedReceipt(t *testing.T) {
+	for name, result := range map[string]string{
+		"attempt 为 0": `{"node_id": "n1", "state": "running", "attempt": 0, "event_id": "e"}`,
+		"节点号不对":      `{"node_id": "n2", "state": "running", "attempt": 1, "event_id": "e"}`,
+	} {
+		dir := t.TempDir()
+		script := filepath.Join(dir, "fake.py")
+		os.WriteFile(script, []byte("import json\nprint(json.dumps({\"ok\": True, \"result\": "+result+"}))\n"), 0o644)
+		_, err := NewClient(dir, script).Start(context.Background(), StartRequest{NodeID: "n1", Actor: "a", Role: "r", RouteClass: "frontier", Model: "m", Reason: "why"})
+		if err == nil || !strings.Contains(err.Error(), "回执对不上") {
+			t.Errorf("%s：应当报回执对不上：%v", name, err)
+		}
+	}
+}
