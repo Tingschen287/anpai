@@ -107,7 +107,8 @@ func main() {
 		model = model.WithLeases(leases)
 	}
 	if dispatcher != nil {
-		model = model.WithDispatcher(dispatcher)
+		// 派工前的 Graph 开工走同一个控制器（n042）：attempt 由账本给，不由界面猜。
+		model = model.WithDispatcher(dispatcher).WithStarter(projectctl.NewClient(root, pc))
 	} else if dispatchErr != nil {
 		fmt.Fprintf(os.Stderr, "work: 派工未启用：%v\n", dispatchErr)
 	}

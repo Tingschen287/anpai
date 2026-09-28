@@ -51,6 +51,8 @@ type Model struct {
 
 	// 派工能力。没配置时为 nil，界面照常看，按 d 会说清楚缺什么。
 	dispatcher Dispatcher
+	// starter 在派工前对 Graph 开工（n042）。
+	starter Starter
 	// 光标停在哪个节点上。
 	cursor int
 	mode   Mode
@@ -110,6 +112,11 @@ type Dispatcher interface {
 	Route(nodeID string, attempt int, purpose string, required dispatch.RouteClass) routing.Decision
 }
 
+// Starter 是界面对 Graph 唯一的写入口：派工前让 projectctl 开工，拿账本给的 attempt（n042）。
+type Starter interface {
+	Start(ctx context.Context, r projectctl.StartRequest) (projectctl.StartResult, error)
+}
+
 // Attacher 是界面用到的「进入会话」与「瞄一眼」两件事。
 //
 // 收窄成接口，界面测试不必牵扯真实上游；也一眼看得出界面只会进入和预览，
@@ -149,6 +156,12 @@ func (m Model) WithAttacher(a Attacher, b Bindings) Model {
 // WithDispatcher 给界面接上派工能力。
 func (m Model) WithDispatcher(d Dispatcher) Model {
 	m.dispatcher = d
+	return m
+}
+
+// WithStarter 接上 Graph 开工入口。没接时 ready / rework 的节点不派：派了也对不上账本的 attempt。
+func (m Model) WithStarter(s Starter) Model {
+	m.starter = s
 	return m
 }
 
@@ -613,9 +626,29 @@ func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 	}
 
 	// submitted 的节点派的是评审，不是执行者。这是两件事，别混。
+	// ready / rework 先让 projectctl 开工、拿账本的 attempt 再派；running 只在账本已有 attempt、
+	// 而这个 attempt 还没绑会话时能派（上次开工成功、派工没成的补派）。n042，n040 终审断点 4。
 	reviewing := state == projectctl.StateSubmitted
-	if !reviewing && state != projectctl.StateReady {
-		m.notice = fmt.Sprintf("%s 现在是 %s。ready 的能派工，submitted 的能派评审，别的状态都不行",
+	switch {
+	case reviewing:
+	case state == projectctl.StateReady || state == projectctl.StateRework:
+		// 要先开工；有没有开工入口放到最后查，别盖住档位、候选这些更根本的拒绝理由。
+	case state == projectctl.StateRunning:
+		attempt, ok := node.Attempt.Get()
+		if !ok {
+			m.notice = fmt.Sprintf("%s 正在 running，但不知道是第几次 attempt（%s），对不上账本，不派", node.ID, node.Attempt.Reason())
+			m.noticeOK = false
+			return m, nil
+		}
+		if m.bindings != nil {
+			if b, bound := m.bindings.Get(node.ID, attempt); bound {
+				m.notice = fmt.Sprintf("%s attempt %d 已经绑在会话 %s 上，不重复派。按 p 看、按 a 进去", node.ID, attempt, b.SessionID)
+				m.noticeOK = false
+				return m, nil
+			}
+		}
+	default:
+		m.notice = fmt.Sprintf("%s 现在是 %s。ready / rework 的能开工派工，running 且还没绑会话的能补派，submitted 的能派评审，别的状态都不行",
 			node.ID, state)
 		m.noticeOK = false
 		return m, nil
@@ -690,6 +723,11 @@ func (m Model) beginDispatch() (tea.Model, tea.Cmd) {
 		m.noticeOK = false
 		return m, nil
 	}
+	if !reviewing && (state == projectctl.StateReady || state == projectctl.StateRework) && m.starter == nil {
+		m.notice = fmt.Sprintf("%s 要先在 Graph 开工才能派，但没接 Graph 开工入口，不派", node.ID)
+		m.noticeOK = false
+		return m, nil
+	}
 	m.routing = &dec
 	m.candidates = cands
 	m.pick = 0
@@ -745,9 +783,15 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	chosenBy, reason := "owner", strings.TrimSpace(m.reason)
 	m.askingReason, m.reason = false, ""
 	attempt, hasAttempt := node.Attempt.Get()
-	if !hasAttempt {
-		// ready 节点还没开工，这次派的就是第一次 attempt。
-		attempt = 1
+	state, _ := node.State.Get()
+	// 开工与否：ready / rework 由 projectctl start 给 attempt；其余状态用账本已有的 attempt。
+	// 不知道 attempt 就不派——不再默认成 1（n040 终审断点 4：恢复过的节点会与账本错配）。
+	needStart := !m.pickingReviewer && (state == projectctl.StateReady || state == projectctl.StateRework)
+	if !needStart && !hasAttempt {
+		m.mode = ModeBrowse
+		m.pickingReviewer = false
+		m.notice, m.noticeOK = fmt.Sprintf("%s 不知道是第几次 attempt（%s），对不上账本，不派", node.ID, node.Attempt.Reason()), false
+		return m, nil
 	}
 
 	if m.pickingReviewer {
@@ -782,30 +826,55 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	req := dispatch.Request{
-		NodeID:        node.ID,
-		Attempt:       attempt,
-		RequiredClass: dispatch.RouteClass(node.RouteClass),
-		ModelID:       chosen.ID,
-		ProjectPath:   m.snap.ProjectRoot,
-		Title:         node.ID,
-		// 任务文本：没有它，派出去的就是个空会话（n039 attempt 3 评审）。登记写入权后经仲裁投递。
-		Message:       executorBrief(node, attempt),
-		DispatchedBy:  "work-deck",
-		ChosenBy:      chosenBy,
-		ChoiceReason:  reason,
+	d, starter := m.dispatcher, m.starter
+	start := projectctl.StartRequest{
+		NodeID: node.ID, Actor: "workdeck-" + chosen.ID, Role: node.OwnerRole,
+		RouteClass: string(chosen.Class), Model: chosen.ID,
+		Reason: "Work Deck 派工：owner 在界面上选定 " + chosen.ID,
 	}
-	d := m.dispatcher
+	if reason != "" {
+		start.Reason += "；理由：" + reason
+	}
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
+		started := ""
+		if needStart {
+			res, err := starter.Start(ctx, start)
+			if err != nil {
+				return dispatchDoneMsg{ok: false, text: "Graph 开工失败，不派：" + err.Error()}
+			}
+			attempt = res.Attempt
+			started = fmt.Sprintf("Graph 已开工 attempt %d（%s）", res.Attempt, res.EventID)
+		}
+		req := dispatch.Request{
+			NodeID:        node.ID,
+			Attempt:       attempt,
+			RequiredClass: dispatch.RouteClass(node.RouteClass),
+			ModelID:       chosen.ID,
+			ProjectPath:   m.snap.ProjectRoot,
+			Title:         node.ID,
+			// 任务文本：没有它，派出去的就是个空会话（n039 attempt 3 评审）。登记写入权后经仲裁投递。
+			Message:      executorBrief(node, attempt),
+			DispatchedBy: "work-deck",
+			ChosenBy:     chosenBy,
+			ChoiceReason: reason,
+		}
 		b, err := d.Dispatch(ctx, req)
 		if err != nil {
+			if started != "" {
+				return dispatchDoneMsg{ok: false, text: started + "，但派工没成：" + err.Error() +
+					"。节点现在是 running，修好后选中它按 d 补派同一个 attempt"}
+			}
 			return dispatchDoneMsg{ok: false, text: "派工被拒：" + err.Error()}
 		}
+		prefix := ""
+		if started != "" {
+			prefix = started + "；"
+		}
 		return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
-			"已派 %s attempt %d → 会话 %s（%s / %s），执行 brief 已送达",
-			b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass)}
+			"%s已派 %s attempt %d → 会话 %s（%s / %s），执行 brief 已送达",
+			prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass)}
 	}
 }
 

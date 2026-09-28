@@ -184,9 +184,9 @@ func TestFooterStatesWhatTheScreenCanAndCannotDo(t *testing.T) {
 			t.Errorf("说明行里没讲 %q：%q", want, footer)
 		}
 	}
-	// 屏幕上必须有一处讲清楚不写账本这条边界，不必非在最后一行。
-	if !strings.Contains(out, "不写 Graph 账本") {
-		t.Error("屏幕上没有讲清楚「不写 Graph 账本」这条边界")
+	// 屏幕上必须有一处讲清楚写账本的边界：n042 起只在派工前经控制器开工，不写验收与其他状态。
+	if !strings.Contains(out, "只在派工前经控制器开工") || !strings.Contains(out, "不写验收") {
+		t.Error("屏幕上没有讲清楚写 Graph 账本的边界")
 	}
 }
 
@@ -200,9 +200,9 @@ func TestScreenNeverClaimsToAttachOrWriteLedger(t *testing.T) {
 			t.Errorf("界面上出现了本轮做不到的动作字样：%s", forbidden)
 		}
 	}
-	// 反过来，它必须明说自己不写账本。
-	if !strings.Contains(out, "不写 Graph 账本") {
-		t.Error("界面没有声明自己不写账本")
+	// 反过来，它必须明说自己只开工、不写验收（n042）。
+	if !strings.Contains(out, "不写验收与其他状态变更") {
+		t.Error("界面没有声明自己的写账本边界")
 	}
 }
 

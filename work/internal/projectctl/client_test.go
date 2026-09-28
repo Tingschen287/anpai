@@ -42,11 +42,11 @@ func TestWriteCommandsAreRefused(t *testing.T) {
 	}
 }
 
-// 派工、接管和写账本这三件事，本轮不做。
+// 派工、接管和写账本：本包不做。唯一的例外是 n042 放开的 Start（见 client.go）。
 // 不是靠约定，而是包里根本没有对应的方法：这里按名字挨个查一遍。
 func TestPackageExposesNoDispatchAttachOrWriteMethods(t *testing.T) {
 	forbidden := []string{
-		"Start", "Submit", "Review", "Block", "Resume", "Fail", "Init", "Status", "Render",
+		"Submit", "Review", "Block", "Resume", "Fail", "Init", "Status", "Render",
 		"Dispatch", "Attach", "Send", "Write", "Append",
 	}
 	src := packageSources(t, ".")
@@ -196,4 +196,35 @@ func moduleRoot(t *testing.T) string {
 		t.Fatal("拿不到测试文件路径")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+// n042：Start 是本包唯一的写入口（在 client.go），只跑 start 一条子命令；run() 的只读白名单照旧拒绝 start。
+func TestStartIsTheOnlyWriteAndRunsOnlyStart(t *testing.T) {
+	src := packageSources(t, ".")
+	if n := strings.Count(src, "exec.CommandContext("); n != 2 {
+		t.Errorf("包里执行控制器的地方应当只有 run 与 Start 两处，实际 %d 处", n)
+	}
+	if _, err := NewClient(t.TempDir(), "/x").run(context.Background(), StartCommand); err == nil {
+		t.Error("run() 不该放行 start：写入口只有 Start")
+	}
+	// 用一个假控制器记下收到的参数。
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "fake.py")
+	os.WriteFile(script, []byte(`import sys, json
+open(sys.argv[0].replace("fake.py","args"),"w").write("\n".join(sys.argv[1:]))
+print(json.dumps({"ok": True, "result": {"node_id": sys.argv[4], "state": "running", "attempt": 3, "event_id": "evt_x"}}))
+`), 0o644)
+	c := NewClient(dir, script)
+	res, err := c.Start(context.Background(), StartRequest{NodeID: "n1", Actor: "a", Role: "r", RouteClass: "frontier", Model: "m", Reason: "why"})
+	if err != nil || res.Attempt != 3 {
+		t.Fatalf("应当拿到账本给的 attempt 3：%+v %v", res, err)
+	}
+	got, _ := os.ReadFile(argsFile)
+	if want := "--format\njson\nstart\nn1\n--actor\na\n--role\nr\n--route-class\nfrontier\n--model\nm\n--reason\nwhy"; string(got) != want {
+		t.Errorf("传给控制器的参数不对：\n%s", got)
+	}
+	if _, err := c.Start(context.Background(), StartRequest{NodeID: "n1"}); err == nil {
+		t.Error("字段不全时不该调控制器")
+	}
 }

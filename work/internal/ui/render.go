@@ -119,7 +119,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 				w("%s", styleAlert.Render(sc.Notice))
 			}
 		}
-		w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
+		w("%s", styleDim.Render("本界面只在派工前经控制器开工（projectctl start），不写验收与其他状态变更。"))
 		return b.String()
 	}
 
@@ -329,7 +329,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	}
 	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　H 交还　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
-	w("%s", styleDim.Render("本界面不写 Graph 账本，验收与状态变更一律由控制器负责。"))
+	w("%s", styleDim.Render("本界面只在派工前经控制器开工（projectctl start），不写验收与其他状态变更。"))
 	return b.String()
 }
 

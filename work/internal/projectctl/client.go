@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -131,4 +132,72 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// StartCommand 是本包唯一会写账本的子命令（n042）。
+//
+// n035 起本包对 Graph 控制器只读。n040 终审发现：Work Deck 派了工，Graph 却没有 attempt，
+// 要 owner 另开终端手工 start；恢复过的节点还被界面默认成 attempt 1，与账本错配。
+// n042 合同要求 attempt 由 projectctl 建立并与派工对齐，所以只放开这一条：
+// 由 owner 在界面上选定模型并按回车之后调用，一次派工调一次。submit / review / block 等仍一律拒绝，
+// run() 的只读白名单不变。
+const StartCommand = "start"
+
+// StartRequest 是一次开工要登记的内容，字段一一对应 projectctl start 的参数。
+type StartRequest struct {
+	NodeID     string
+	Actor      string
+	Role       string
+	RouteClass string
+	Model      string
+	Reason     string
+}
+
+// StartResult 是 projectctl start 的回执。Attempt 是账本给出的号，派工就用它。
+type StartResult struct {
+	NodeID  string `json:"node_id"`
+	State   string `json:"state"`
+	Attempt int    `json:"attempt"`
+	EventID string `json:"event_id"`
+}
+
+// Start 对一个节点开工，返回账本分配的 attempt。字段缺一个就不调。
+func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error) {
+	for name, v := range map[string]string{"节点": r.NodeID, "actor": r.Actor, "role": r.Role,
+		"route class": r.RouteClass, "model": r.Model, "reason": r.Reason} {
+		if strings.TrimSpace(v) == "" {
+			return StartResult{}, fmt.Errorf("开工缺少 %s，不调 projectctl start", name)
+		}
+	}
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
+	}
+	args := []string{c.Script, "--format", "json", StartCommand, r.NodeID,
+		"--actor", r.Actor, "--role", r.Role, "--route-class", r.RouteClass, "--model", r.Model, "--reason", r.Reason}
+	cmd := exec.CommandContext(ctx, c.Python, args...)
+	cmd.Dir = c.Project
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	var env envelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		if runErr != nil {
+			return StartResult{}, fmt.Errorf("projectctl start 执行失败：%w（stderr: %s）", runErr, truncate(stderr.String(), 400))
+		}
+		return StartResult{}, fmt.Errorf("projectctl start 的输出不是合法 JSON：%w", err)
+	}
+	if !env.OK {
+		return StartResult{}, fmt.Errorf("projectctl start 返回失败：%s", truncate(env.Error, 400))
+	}
+	var res StartResult
+	if err := json.Unmarshal(env.Result, &res); err != nil {
+		return StartResult{}, fmt.Errorf("解析 projectctl start 回执失败：%w", err)
+	}
+	if res.Attempt <= 0 || res.NodeID != r.NodeID {
+		return StartResult{}, fmt.Errorf("projectctl start 回执对不上：节点 %q attempt %d", res.NodeID, res.Attempt)
+	}
+	return res, nil
 }

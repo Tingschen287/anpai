@@ -136,9 +136,28 @@ func nodeWith(id string, state projectctl.State, class string) projectctl.Node {
 	}
 }
 
+// fakeStarter 记下每一次开工请求，并按账本的样子回一个 attempt（默认 1）。
+type fakeStarter struct {
+	got     []projectctl.StartRequest
+	attempt int
+	err     error
+}
+
+func (f *fakeStarter) Start(ctx context.Context, r projectctl.StartRequest) (projectctl.StartResult, error) {
+	f.got = append(f.got, r)
+	if f.err != nil {
+		return projectctl.StartResult{}, f.err
+	}
+	a := f.attempt
+	if a == 0 {
+		a = 1
+	}
+	return projectctl.StartResult{NodeID: r.NodeID, State: "running", Attempt: a, EventID: "evt_fake"}, nil
+}
+
 func modelWithDispatcher(t *testing.T, nodes []projectctl.Node, d Dispatcher) Model {
 	t.Helper()
-	m := New(nil).WithDispatcher(d)
+	m := New(nil).WithDispatcher(d).WithStarter(&fakeStarter{})
 	m.snap = projectctl.Snapshot{Nodes: nodes, ProjectRoot: "/tmp/proj"}
 	m.inflight = false
 	m.loading = false
