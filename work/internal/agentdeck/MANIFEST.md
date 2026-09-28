@@ -19,7 +19,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
-| `session send` | 把评审 brief 投进一个已核验会话号的评审会话 | `--message-file -`（文本走标准输入，不进 argv） |
+| `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话 | `--message-file -`（文本走标准输入，不进 argv） |
 | `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
 | `inbox export` | 决策队列：非消费式读全机 completion/transition 记录（n038） | `--json` |
 | `inbox writer-status` | 决策队列：读 export 之前自检 notify-daemon 在不在（n038） | `--json` |
@@ -31,7 +31,8 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   只有集成测试用它起服务（`integration_test.go`），上表的参数就是测试用的那几个。
 - `list` 直接读上游存储，不经 headless 服务。服务的菜单缓存看不见刚 launch 的会话，`list` 看得见（见第 7 节）。
   按 T 直连时先问 `/api/menu`，问不到才退到它。
-- `session send` 用于派评审的第二步：先起空会话、核验上游返回的会话号，再投递 brief。
+- `session send` 用于派单的第二步：先起空会话、登记写入权（派评审还要核验上游返回的会话号），再投递 brief。
+  n039 起执行者与评审两条入口都走它；空或只有空白的文本在派工器与 adapter 两层都拒绝。
   加它不放开 `session` 底下别的命令，二级匹配照旧生效。n038 起它也是决策队列回答的投递口。
 - **n039 起 `SendMessage` 与 `DeliverAnswer` 必须带一张 `lease.Permit`**，在执行 `session send` 之前核对并登记「投递进行中」：
   写入权记账登记为 owner 接管着、等确认交还、租约过期、持有者未知时不投。许可只能由 `internal/lease` 签发，

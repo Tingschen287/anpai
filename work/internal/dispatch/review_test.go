@@ -230,15 +230,21 @@ func TestReviewWithoutABriefIsRefused(t *testing.T) {
 	dispatchExecutorFirst(t, d, fake, "exec-sess")
 	before := len(fake.calls)
 
-	req := goodReview()
-	req.Message = ""
-	if _, err := d.DispatchReviewer(context.Background(), req); err == nil {
-		t.Fatal("没有 brief 必须拒绝")
-	} else if !strings.Contains(err.Error(), "空会话") {
-		t.Errorf("拒绝理由不清楚：%v", err)
-	}
-	if len(fake.calls) != before {
-		t.Error("被拒绝的派评审不该真的去启动会话")
+	// 纯空白与空串同样处理（n039 attempt 4 评审：纯空白 brief 曾被记成已派）。
+	for _, msg := range []string{"", " \n\t"} {
+		req := goodReview()
+		req.Message = msg
+		if _, err := d.DispatchReviewer(context.Background(), req); err == nil {
+			t.Fatalf("brief 为 %q 时必须拒绝", msg)
+		} else if !strings.Contains(err.Error(), "空会话") {
+			t.Errorf("拒绝理由不清楚：%v", err)
+		}
+		if len(fake.calls) != before || len(fake.sent) != 0 {
+			t.Errorf("brief 为 %q 时不该启动会话或投递：%+v %+v", msg, fake.calls, fake.sent)
+		}
+		if _, ok := d.Store.Get(ReviewerKey(req.NodeID), req.Attempt); ok {
+			t.Errorf("brief 为 %q 时不该落评审绑定", msg)
+		}
 	}
 }
 

@@ -3,8 +3,11 @@ package agentdeck
 import (
 	"go/ast"
 	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
@@ -106,5 +109,39 @@ func TestSendMessageRefusesAZeroPermit(t *testing.T) {
 	}
 	if err := c.SendMessage(t.Context(), lease.Permit{}, "s1", "x"); err == nil {
 		t.Fatal("零值许可必须被拒")
+	}
+}
+
+// 只有空白的消息和空串一样不投（n039 attempt 4 评审）：许可有效、上游随时能成功，也一次都不调。
+func TestSendMessageRefusesBlankText(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	bin := filepath.Join(dir, "agent-deck")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch \""+called+"\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClient(bin, "_t", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := lease.Open(filepath.Join(dir, "leases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(leases.Close)
+	if err := leases.Grant("s1", "测试"); err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range []string{"", " \n\t"} {
+		p, err := leases.Automatic("s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SendMessage(t.Context(), p, "s1", msg); err == nil || !strings.Contains(err.Error(), "消息是空的") {
+			t.Errorf("消息为 %q 时必须拒绝：%v", msg, err)
+		}
+	}
+	if _, err := os.Stat(called); err == nil {
+		t.Error("空白消息不该调到上游")
 	}
 }

@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
@@ -80,7 +81,8 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 		return refuse(fmt.Errorf("派评审缺少模型 ID：模型未知时拒绝派工，不猜默认值"))
 	case req.ProjectPath == "":
 		return refuse(fmt.Errorf("派评审缺少项目路径"))
-	case req.Message == "":
+	// 只有空白也算没有 brief（n039 attempt 4 评审）：和执行者入口同一个判法。
+	case strings.TrimSpace(req.Message) == "":
 		return refuse(fmt.Errorf(
 			"派评审缺少 brief：说不清要评审者做什么，派出去的就只是一个空会话。" +
 				"上一版正是这样——界面从不设置 Message，评审会话起来了却从没收到任务"))

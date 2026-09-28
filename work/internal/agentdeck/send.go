@@ -31,7 +31,8 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 		return fmt.Errorf("不投递：%w", err)
 	}
 	defer release()
-	if message == "" {
+	// 只有空白也算空（n039 attempt 4 评审）：送出去对方照样不知道要做什么。
+	if strings.TrimSpace(message) == "" {
 		return fmt.Errorf("消息是空的，不投递：说不清要对方做什么，就别派这一趟")
 	}
 	// 默认行为是等对方的 agent 起来再发，这正是刚 launch 出来的会话需要的；
