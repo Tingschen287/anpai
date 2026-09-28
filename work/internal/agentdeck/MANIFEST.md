@@ -41,7 +41,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   查询与送达之间有人进来仍然看不见（已披露的剩余风险，Graph revision 86）。
 - **n042：`session send --json` 的 `delivery`**。失败时上游输出 `{"success":false,"delivery":...}`（上游 `cmd/agent-deck/session_cmd.go:3056-3125`）。
   `delivery=typed`（正文到了画面、提交没得到确认，issue #1793）报 `ErrDeliveryUnconfirmed`，派工器照样落绑定并记 `delivery: unconfirmed`；
-  其余取值（`typed_not_submitted`、`line_too_long`、`no_evidence`、`send_failed`）仍是投递失败。`unverified` 上游按成功退出，Work Deck 照上游算成功。
+  其余取值（`typed_not_submitted`、`line_too_long`、`no_evidence`、`send_failed`）仍是投递失败。`unverified` 上游按成功退出但 `submitted:false`：Work Deck 同样报送达未确认——成功退出时只有 `submitted:true` 才算送达（n042 attempt 2 评审）。
   n040 实测 `typed` 出现过假阴性（评审会话其实执行了 brief）；n042 期间用 shell 会话试了 5 个 ASCII 单词没复现，所以这条由按上游 JSON 形状写的假上游测试覆盖。
 - **n042：哪些工具接受 `--model`**（`ToolsAcceptingModel`，上游 `internal/session/instance.go:9318` `SupportsLaunchModel`）：claude、codex、gemini、opencode，
   以及用户在上游配置里声明为与 claude / codex 兼容的自定义工具。`shell` 没有模型（`ToolsWithoutModel`）。配置条目用 `model_not_applicable: true` 显式声明，

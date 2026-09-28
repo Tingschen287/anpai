@@ -22,8 +22,8 @@ import (
 // ReadOnlyCommands 是本包允许执行的全部子命令。
 //
 // 这四个命令都经过实测：跑完之后项目目录的全文件哈希不变。start / submit / review /
-// block / resume / fail / init / status 会写账本或重写状态投影，一律不在此列，
-// 本包也不提供调用它们的任何方法。
+// block / resume / fail / init / status 会写账本或重写状态投影，一律不在此列，run() 都拒绝。
+// 其中只有 start 另有专门的方法 Start（n042，见文件末尾）；其余写命令本包不提供任何方法。
 var ReadOnlyCommands = []string{"validate", "next", "brief", "verify-chain"}
 
 func isReadOnly(command string) bool {
@@ -39,7 +39,7 @@ func isReadOnly(command string) bool {
 type ErrWriteCommandRefused struct{ Command string }
 
 func (e *ErrWriteCommandRefused) Error() string {
-	return fmt.Sprintf("拒绝执行非只读子命令 %q：Work Deck 对 Graph 控制器只读，不写事件账本", e.Command)
+	return fmt.Sprintf("拒绝执行非只读子命令 %q：Work Deck 对 Graph 控制器只读，唯一的写入口是派工前的 Start", e.Command)
 }
 
 // Client 执行 projectctl 并把输出翻译成 Work Deck 的类型。

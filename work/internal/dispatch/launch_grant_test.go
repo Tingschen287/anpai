@@ -21,7 +21,7 @@ func grantUpstream(t *testing.T) (bin, sent string) {
 	script := `#!/bin/sh
 case "$1" in
   launch) echo "launch $*" >> "$FAKE_SENT.launch"; echo '{"success":true,"session_id":"sess-1","id":"sess-1"}' ;;
-  session) if [ "$2" = "send" ]; then echo "to=$3 $(cat)" >> "$FAKE_SENT"; fi ;;
+  session) if [ "$2" = "send" ]; then echo "to=$3 $(cat)" >> "$FAKE_SENT"; echo '{"success":true,"delivery":"submitted","submitted":true}'; fi ;;
 esac
 `
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {

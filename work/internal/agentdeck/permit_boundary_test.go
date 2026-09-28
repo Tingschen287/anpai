@@ -107,8 +107,10 @@ func TestSendMessageRefusesAZeroPermit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SendMessage(t.Context(), lease.Permit{}, "s1", "x"); err == nil {
-		t.Fatal("零值许可必须被拒")
+	// 光看「有错」不够（n042）：/bin/true 空输出现在会报「送达未确认」，拿掉许可检查也照样有错。
+	// 要看的是错来自许可，而且上游根本没被调用。
+	if err := c.SendMessage(t.Context(), lease.Permit{}, "s1", "x"); err == nil || !strings.Contains(err.Error(), "没有投递许可") || IsDeliveryUnconfirmed(err) {
+		t.Fatalf("零值许可必须在调上游之前被拒：%v", err)
 	}
 }
 
@@ -160,6 +162,10 @@ func TestSendMessageReportsUnconfirmedDeliverySeparately(t *testing.T) {
 		{"no_evidence", `{"success":false,"delivery":"no_evidence","error":"not delivered"}`, 1, false, false},
 		{"非 JSON", `Error: boom`, 1, false, false},
 		{"成功", `{"success":true,"delivery":"submitted","submitted":true}`, 0, false, true},
+		// 上游退出 0 但提交未知（n042 attempt 2 评审 blocker）：不是送达。
+		{"成功退出但 unverified", `{"success":true,"delivery":"unverified","submitted":false}`, 0, true, false},
+		{"成功退出但没有 submitted", `{"success":true}`, 0, true, false},
+		{"成功退出但不是 JSON", `Sent message`, 0, true, false},
 	}
 	for _, c := range cases {
 		dir := t.TempDir()

@@ -40,8 +40,8 @@ const (
 
 // Model 是 Work Deck 的界面状态。
 //
-// 界面能做的事只有两件：看，以及给一个 ready 节点派工。改不了 Graph 状态，
-// 写不了账本，接管终端是后面节点的事。
+// 界面能做的事：看；派工与派评审；进入、预览、交还会话；看评审结论。对 Graph 只有一个写入口——
+// 派工前经 projectctl start 开工（n042）；验收与其他状态变更一律不写，评审结论由 owner 自己运行命令记账。
 type Model struct {
 	reader  *projectctl.Reader
 	snap    projectctl.Snapshot

@@ -94,7 +94,9 @@ func TestIntegrationDispatchWorksFromInsideAnotherTmuxServer(t *testing.T) {
 	if n, err := c.AttachedClients(ctx, res.SessionID); err != nil || n != 0 {
 		t.Fatalf("投递前探测应当找得到会话且没有客户端：n=%d err=%v", n, err)
 	}
-	if err := d.SendMessage(ctx, res.SessionID, "继续"); err != nil {
+	// 对 shell 会话，上游总是回 delivery=unverified、submitted=false（它确认不了 shell 有没有接这一轮），
+	// Work Deck 照实报「送达未确认」（n042）。是否真的到了，由下面读画面核对。
+	if err := d.SendMessage(ctx, res.SessionID, "继续"); err != nil && !agentdeck.IsDeliveryUnconfirmed(err) {
 		t.Fatalf("在 tmux 里运行时任务文本应当送得到：%v", err)
 	}
 	var pane string

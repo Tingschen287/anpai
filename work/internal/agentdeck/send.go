@@ -41,18 +41,30 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 	// 不等的话消息可能落在 CLI 还没就绪的窗口里。超时由 Client.Timeout 兜着。
 	out, err := c.execWithStdin(ctx, strings.NewReader(message),
 		"session", "send", sessionID, "--message-file", "-", "--json")
+	var rep struct {
+		Delivery  string `json:"delivery"`
+		Submitted *bool  `json:"submitted"`
+		Error     string `json:"error"`
+	}
+	jsonErr := json.Unmarshal(out, &rep)
 	if err == nil {
-		return nil
+		// 上游按成功退出，也要看 submitted：只有 true 才算送达。delivery=unverified 时上游退出 0、submitted=false，
+		// 意思是「提交结果未知」（上游 session_cmd.go:3059-3066）——那不是送达（n042 attempt 2 评审 blocker）。
+		// 回执不是 JSON 或没有 submitted 字段，同样说不清，按未确认处理。
+		if jsonErr == nil && rep.Submitted != nil && *rep.Submitted {
+			return nil
+		}
+		detail := "上游成功退出，但回执没有证实提交"
+		if jsonErr == nil && rep.Delivery != "" {
+			detail += "（delivery=" + rep.Delivery + "）"
+		}
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: detail}
 	}
 	// 上游失败时 --json 的输出里有 delivery 字段（上游 session_cmd.go:3056-3087）。
 	// delivery=typed：正文到了会话画面，但没有证据说明对方接了这一轮——上游按失败退出（issue #1793），
 	// 而 n040 终审实测到它是假阴性：评审会话其实收到并执行了 brief。这种情况单独报出来，
 	// 让派工器不把会话当成没派出去丢掉（n042，n040 终审断点 5）。其余 delivery 仍是投递失败。
-	var rep struct {
-		Delivery string `json:"delivery"`
-		Error    string `json:"error"`
-	}
-	if jsonErr := json.Unmarshal(out, &rep); jsonErr == nil && rep.Delivery == DeliveryTyped {
+	if jsonErr == nil && rep.Delivery == DeliveryTyped {
 		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: rep.Error}
 	}
 	return fmt.Errorf("向会话 %s 投递消息失败：%w", sessionID, err)

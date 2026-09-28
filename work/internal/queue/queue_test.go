@@ -589,3 +589,21 @@ func TestFailedMergeFlushRollsBack(t *testing.T) {
 		t.Errorf("落盘失败后应当退回 1 条，实际 %d", n)
 	}
 }
+
+// 送达未确认（n042）：算已发出，免得 owner 再答一遍让对方收到两次；但照实写未确认、请他看一眼。
+func TestUnconfirmedAnswerCountsAsSentButSaysSo(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	s.Merge(SourceSession, FromInbox([]agentdeck.InboxRecord{waiting("c1", "h1", t0)}, t0), t0)
+	id := s.Items()[0].ID
+	d := &fakeDeliverer{err: &agentdeck.ErrDeliveryUnconfirmed{SessionID: "c1", Detail: "delivery=unverified"}}
+	it, err := Respond(context.Background(), s, d, id, "continue", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Status != StatusAnswered || !it.Answer.Delivered || it.Answer.DeliveryError != "" || !strings.Contains(it.Answer.Note, "没确认提交") {
+		t.Errorf("送达未确认应当算已发出并注明：%+v", it.Answer)
+	}
+	if _, err := Respond(context.Background(), s, d, id, "continue", t0); err == nil {
+		t.Error("已算发出的条目不该再投一遍")
+	}
+}

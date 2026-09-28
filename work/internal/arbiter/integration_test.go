@@ -53,7 +53,9 @@ func TestIntegrationOwnerTakeoverBlocksRealDelivery(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	// 文本用与 n038 集成测试相同的「继续」：上游判「已提交」看的是正文还在不在输入区，
 	// shell 的「xxx: command not found」回显会干扰这个判断，某些 ASCII 单词实测会被误报未提交（issue #1793）。
-	if err := d.SendMessage(ctx, res.SessionID, "继续"); err != nil {
+	// 对 shell 会话，上游总是回 delivery=unverified、submitted=false（它确认不了 shell 有没有接这一轮），
+	// Work Deck 照实报「送达未确认」（n042）。是否真的到了，由下面读画面核对。
+	if err := d.SendMessage(ctx, res.SessionID, "继续"); err != nil && !agentdeck.IsDeliveryUnconfirmed(err) {
 		t.Fatal(err)
 	}
 	leases.OwnerTakeover(res.SessionID, "upstream")
