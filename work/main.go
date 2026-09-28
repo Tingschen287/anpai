@@ -77,7 +77,10 @@ func main() {
 		}
 		return qstore.Items()
 	}
-	dispatcher, dispatchErr := buildDispatcher(root, leases, queueItems)
+	// 绑定存储也只开一份（n042，n040 终审断点 1）：派工器写进去的绑定，进入与预览立刻看得见。
+	// 分开各 Open 一次时，进入组件拿的是启动时的旧副本，派完工要重启才能进去。
+	bindings, bindingsErr := openBindings()
+	dispatcher, dispatchErr := buildDispatcher(root, leases, bindings, bindingsErr, queueItems)
 
 	if *once != "" {
 		width := 100
@@ -108,8 +111,8 @@ func main() {
 	} else if dispatchErr != nil {
 		fmt.Fprintf(os.Stderr, "work: 派工未启用：%v\n", dispatchErr)
 	}
-	if attacher, bindings, err := buildAttacher(); err == nil {
-		model = model.WithAttacher(attacher, bindings)
+	if attacher, bs, err := buildAttacher(bindings, bindingsErr); err == nil {
+		model = model.WithAttacher(attacher, bs)
 	} else if dispatchErr == nil {
 		// 派工配好了却进不去，说明配置有别的毛病，要说出来。
 		fmt.Fprintf(os.Stderr, "work: 进入会话未启用：%v\n", err)
@@ -135,7 +138,7 @@ func main() {
 //
 // 配置缺失不是错误，只是没有派工：Work Deck 照样能看。但配置写错了要说出来，
 // 不能让人按了 d 之后对着一句没头没脑的提示发呆。
-func buildDispatcher(projectRoot string, leases *lease.Store, queueItems func() []queue.Item) (ui.Dispatcher, error) {
+func buildDispatcher(projectRoot string, leases *lease.Store, store *binding.Store, storeErr error, queueItems func() []queue.Item) (ui.Dispatcher, error) {
 	path, err := config.DefaultPath()
 	if err != nil {
 		return nil, err
@@ -153,9 +156,8 @@ func buildDispatcher(projectRoot string, leases *lease.Store, queueItems func() 
 	if err != nil {
 		return nil, err
 	}
-	store, err := binding.Open(filepath.Join(filepath.Dir(path), "bindings.json"))
-	if err != nil {
-		return nil, err
+	if storeErr != nil {
+		return nil, storeErr
 	}
 	modelOf := func(sessionID string) (string, bool) {
 		b, ok := store.BySession(sessionID)
@@ -183,11 +185,20 @@ func openLeases() (*lease.Store, error) {
 	return lease.Open(filepath.Join(filepath.Dir(path), "leases.json"))
 }
 
+// openBindings 打开配置目录的 bindings.json。整个进程只调一次，结果交给派工、进入与队列共用。
+func openBindings() (*binding.Store, error) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	return binding.Open(filepath.Join(filepath.Dir(path), "bindings.json"))
+}
+
 // buildAttacher 装配「进入会话」与「预览」能力，外加绑定表。
 //
-// 与派工共用同一份配置和同一个绑定存储：进得去的前提是这次 attempt 是从
+// 与派工共用同一份配置和**同一个**绑定存储实例（由调用方传入）：进得去的前提是这次 attempt 是从
 // Work Deck 派出去的，否则根本不知道该进哪个会话。
-func buildAttacher() (ui.Attacher, ui.Bindings, error) {
+func buildAttacher(store *binding.Store, storeErr error) (ui.Attacher, ui.Bindings, error) {
 	path, err := config.DefaultPath()
 	if err != nil {
 		return nil, nil, err
@@ -200,9 +211,8 @@ func buildAttacher() (ui.Attacher, ui.Bindings, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := binding.Open(filepath.Join(filepath.Dir(path), "bindings.json"))
-	if err != nil {
-		return nil, nil, err
+	if storeErr != nil {
+		return nil, nil, storeErr
 	}
 	return client, store, nil
 }
@@ -246,7 +256,7 @@ func onceQueue(ctx context.Context, snap projectctl.Snapshot, script string) (ui
 	}
 	now := time.Now()
 	var b queue.Bindings
-	if _, bs, err := buildAttacher(); err == nil {
+	if bs, err := openBindings(); err == nil {
 		b = bs
 	}
 	if _, _, err := queue.MergeGraph(store, snap, b, script, now); err != nil {

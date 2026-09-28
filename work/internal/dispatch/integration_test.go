@@ -62,8 +62,9 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 
 	// shell 没有模型可选，用 economy 档占位；本测试验的是链路，不是模型能力。
 	tbl, err := NewRouteTable([]Model{
-		{ID: "shell", Tool: "shell", Class: Economy},
-		{ID: "pretend-frontier", Tool: "shell", Class: Frontier},
+		// shell 没有模型可选：像真实配置一样显式声明（n042），不再靠测试替身改写请求。
+		{ID: "shell", Tool: "shell", Class: Economy, NoModel: true},
+		{ID: "pretend-frontier", Tool: "shell", Class: Frontier, NoModel: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +73,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Dispatcher{Deck: shellLauncher{arbiter.Deck{Client: client, Leases: leases, Clients: client}}, Store: store, Table: tbl, LogPath: logPath,
+	d := &Dispatcher{Deck: arbiter.Deck{Client: client, Leases: leases, Clients: client}, Store: store, Table: tbl, LogPath: logPath,
 		RoutingLog: filepath.Join(t.TempDir(), "routing-decisions.jsonl")}
 
 	project := t.TempDir()
@@ -162,22 +163,6 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	}
 }
 
-// shellLauncher 把 shell 这种没有模型的工具接到派工器上。
-//
-// 派工器坚持要模型，adapter 允许显式声明「这工具没有模型」，两者在这里对接：
-// 模型 ID 仍然记进绑定与流水，只是不往上游传 --model。
-//
-// 投递与起会话都经 arbiter.Deck：新会话登记写入权，投递用「自动」许可，与发布代码同一条路。
-type shellLauncher struct{ d arbiter.Deck }
-
-func (s shellLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
-	return s.d.SendMessage(ctx, sessionID, message)
-}
-
-func (s shellLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
-	if req.Tool == "shell" {
-		req.Model = ""
-		req.ModelNotApplicable = true
-	}
-	return s.d.Launch(ctx, req)
-}
+// n042 之前这里有一个 shellLauncher 替身：它在 Launch 里把 shell 的模型参数改成「不适用」，
+// 于是这条集成测试绿着，真实界面派 shell 却被上游拒绝（n040 终审断点 3）。
+// 现在不经替身：派工器自己按配置的 NoModel 不传 --model。

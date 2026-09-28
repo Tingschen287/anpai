@@ -39,19 +39,29 @@ func prepareNested(cmd *exec.Cmd) *exec.Cmd {
 	if !InTmux() {
 		return cmd
 	}
-	env := make([]string, 0, len(cmd.Env)+1)
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
+	cmd.Env = withoutTmux(base)
+	return cmd
+}
+
+// withoutTmux 去掉 TMUX 与 TMUX_PANE。
+//
+// tmux 不带 -L/-S 时按 $TMUX 找 server。Work Deck 自己跑在 tmux 里时，这两个变量指向的是
+// 外层那个 server，而 upstream agent-deck 的会话都在默认 server 上（n040 终审断点 2：
+// 终审人把 Work Deck 放在私有 tmux 里跑，上游派出的会话落到了私有 server、随即报 error，
+// 投递前的客户端探测也找不到它）。所以凡是 Work Deck 起的上游与 tmux 子进程，一律不继承它们。
+func withoutTmux(base []string) []string {
+	env := make([]string, 0, len(base))
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_PANE=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	cmd.Env = env
-	return cmd
+	return env
 }
 
 // NestingAdvice 是 Client 版本，供界面在进入前提示用。

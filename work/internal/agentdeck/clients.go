@@ -3,6 +3,7 @@ package agentdeck
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -55,7 +56,9 @@ func listClientsOn(ctx context.Context, socket, tmuxSession string) (int, error)
 		args = append(args, "-L", socket)
 	}
 	args = append(args, "list-clients", "-t", exactTarget(tmuxSession), "-F", "#{client_tty}")
-	out, err := exec.CommandContext(probeCtx, "tmux", args...).Output()
+	list := exec.CommandContext(probeCtx, "tmux", args...)
+	list.Env = withoutTmux(os.Environ())
+	out, err := list.Output()
 	if err != nil {
 		return 0, fmt.Errorf("查不了 tmux 会话 %s 连着几个客户端：%w", tmuxSession, err)
 	}

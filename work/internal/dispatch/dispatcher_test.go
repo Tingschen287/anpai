@@ -347,3 +347,29 @@ func TestDispatchWithoutTaskTextIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// n042：配置声明没有模型的条目，派工时不给上游传 --model；绑定仍记配置里的 id。
+func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
+	tbl, err := NewRouteTable([]Model{{ID: "shell-fixture", Tool: "shell", Class: Frontier, NoModel: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "s", Success: true}}
+	d, _ := newDispatcher(t, fake)
+	d.Table = tbl
+	req := goodRequest()
+	req.ModelID = "shell-fixture"
+	b, err := d.Dispatch(context.Background(), req)
+	if err != nil {
+		t.Fatalf("没有模型的工具应当能派：%v", err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].Model != "" || !fake.calls[0].ModelNotApplicable {
+		t.Errorf("launch 不该带模型、应当声明不适用：%+v", fake.calls)
+	}
+	if err := fake.calls[0].Validate(); err != nil {
+		t.Errorf("派工器造出的 launch 请求应当能过 adapter 校验：%v", err)
+	}
+	if b.Model != "shell-fixture" {
+		t.Errorf("绑定应记配置 id：%q", b.Model)
+	}
+}

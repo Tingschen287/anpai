@@ -157,13 +157,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		return refuse(err)
 	}
 
+	lm, na := launchModel(model)
 	res, err := d.Deck.Launch(ctx, agentdeck.LaunchRequest{
-		ProjectPath: req.ProjectPath,
-		Title:       req.Title,
-		Group:       req.Group,
-		Tool:        ToolOf(model),
-		Model:       model.ID,
-		NoWait:      true,
+		ProjectPath:        req.ProjectPath,
+		Title:              req.Title,
+		Group:              req.Group,
+		Tool:               ToolOf(model),
+		Model:              lm,
+		ModelNotApplicable: na,
+		NoWait:             true,
 	})
 	if err != nil {
 		return refuse(fmt.Errorf("upstream agent-deck 启动会话失败：%w", err))

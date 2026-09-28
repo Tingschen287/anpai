@@ -137,7 +137,9 @@ func instanceIDOf(ctx context.Context, socket, tmuxSession string) (string, bool
 		args = append(args, "-L", socket)
 	}
 	args = append(args, "show-environment", "-t", exactTarget(tmuxSession), "AGENTDECK_INSTANCE_ID")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	show := exec.CommandContext(ctx, "tmux", args...)
+	show.Env = withoutTmux(os.Environ())
+	out, err := show.Output()
 	if err != nil {
 		return "", false
 	}
@@ -159,6 +161,7 @@ func probeSocket(ctx context.Context, socket, tmuxSession, wantInstanceID string
 	defer cancel()
 	args := []string{"-L", socket, "has-session", "-t", exactTarget(tmuxSession)}
 	cmd := exec.CommandContext(probeCtx, "tmux", args...)
+	cmd.Env = withoutTmux(os.Environ())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

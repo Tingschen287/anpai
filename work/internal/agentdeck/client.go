@@ -147,10 +147,11 @@ func NewClient(binary, profile, addr, token string) (*Client, error) {
 	}, nil
 }
 
-// env 组装子进程环境：在当前环境之上强制写入 profile。
+// env 组装子进程环境：在当前环境之上强制写入 profile，并去掉 TMUX/TMUX_PANE（见 withoutTmux）。
 func (c *Client) env() []string {
-	out := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
+	base := withoutTmux(os.Environ())
+	out := make([]string, 0, len(base)+1)
+	for _, kv := range base {
 		if strings.HasPrefix(kv, "AGENTDECK_PROFILE=") {
 			continue
 		}

@@ -44,7 +44,7 @@ func (r LaunchRequest) Validate() error {
 	case r.Model != "" && r.ModelNotApplicable:
 		return fmt.Errorf("请求自相矛盾：既声明了工具没有模型，又给了模型 %q", r.Model)
 	}
-	return nil
+	return CheckToolModel(r.Tool, r.ModelNotApplicable)
 }
 
 // LaunchResult 是上游 launch --json 回传的内容。

@@ -142,13 +142,15 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	// 必须拿真实会话号来判。brief 若随 launch 一起送，万一真撞上，
 	// 评审任务就已经进了执行者的会话，撤不回来——独立评审当场被破坏。
 	// 所以先起空的，判完再送。
+	lm, na := launchModel(model)
 	res, err := d.Deck.Launch(ctx, agentdeck.LaunchRequest{
-		ProjectPath: req.ProjectPath,
-		Title:       req.Title,
-		Group:       req.Group,
-		Tool:        ToolOf(model),
-		Model:       model.ID,
-		NoWait:      true,
+		ProjectPath:        req.ProjectPath,
+		Title:              req.Title,
+		Group:              req.Group,
+		Tool:               ToolOf(model),
+		Model:              lm,
+		ModelNotApplicable: na,
+		NoWait:             true,
 	})
 	if err != nil {
 		return refuse(fmt.Errorf("upstream agent-deck 启动评审会话失败：%w", err))

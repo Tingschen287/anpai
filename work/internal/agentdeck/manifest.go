@@ -32,6 +32,37 @@ const UpstreamCommit = "01c011b"
 // 注意它和 SessionFields 不是一套：命名是 snake_case，而且没有 socket 名。
 var CLIJSONFields = []string{"id", "title", "tool", "status", "path", "group", "tmux_session", "profile", "archived"}
 
+// ToolsAcceptingModel 是上游内置、launch 时接受 --model 的工具（n042）。
+//
+// 出处：上游 internal/session/instance.go:9318 SupportsLaunchModel——claude、gemini、opencode、codex，
+// 以及用户在上游配置里声明为与 claude / codex 兼容的自定义工具（Work Deck 看不到上游配置，判断不了后者）。
+// 升级上游时要重新核对这张表。
+var ToolsAcceptingModel = []string{"claude", "codex", "gemini", "opencode"}
+
+// ToolsWithoutModel 是上游内置、根本没有模型可选的工具：给它传 --model，上游 launch 直接失败（n040 终审断点 3）。
+var ToolsWithoutModel = []string{"shell"}
+
+// CheckToolModel 按上游契约核对「这个工具有没有模型」与配置声明是否一致。
+// 已知的两类冲突在派工前就拒绝，并说清楚怎么改；别的自定义工具判断不了，交给上游。
+func CheckToolModel(tool string, modelNotApplicable bool) error {
+	switch {
+	case !modelNotApplicable && contains(ToolsWithoutModel, tool):
+		return fmt.Errorf("工具 %s 没有模型可选，上游 launch 不接受 --model：在配置的这个模型条目里写 \"model_not_applicable\": true", tool)
+	case modelNotApplicable && contains(ToolsAcceptingModel, tool):
+		return fmt.Errorf("工具 %s 有模型可选，却声明了 model_not_applicable：那等于让上游替你挑默认模型，不派。去掉这个声明并写明模型 id", tool)
+	}
+	return nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
 var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait"}
 

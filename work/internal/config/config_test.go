@@ -149,3 +149,32 @@ func TestCapabilityConfigIsValidated(t *testing.T) {
 		t.Error("能力声明要带进档位表")
 	}
 }
+
+// n042：shell 没写 model_not_applicable、或有模型的工具写了它，配置加载就报错并说清楚。
+func TestModelNotApplicableIsCheckedAgainstTheTool(t *testing.T) {
+	base := func(entry string) string {
+		return `{"upstream_binary":"/bin/true","profile":"_t","models":[` + entry + `]}`
+	}
+	for name, c := range map[string]struct {
+		entry string
+		ok    bool
+	}{
+		"shell 声明了":  {`{"id":"sh","tool":"shell","route_class":"economy","model_not_applicable":true}`, true},
+		"shell 没声明":  {`{"id":"sh","tool":"shell","route_class":"economy"}`, false},
+		"claude 声明了": {`{"id":"c","tool":"claude","route_class":"frontier","model_not_applicable":true}`, false},
+		"claude 正常":  {`{"id":"c","tool":"claude","route_class":"frontier"}`, true},
+	} {
+		p := filepath.Join(t.TempDir(), "config.json")
+		os.WriteFile(p, []byte(base(c.entry)), 0o600)
+		cfg, err := Load(p)
+		if (err == nil) != c.ok {
+			t.Errorf("%s：期望 ok=%v，实际 %v", name, c.ok, err)
+		}
+		if c.ok && c.entry[len(c.entry)-6:] == "true}" {
+			tbl, _ := cfg.RouteTable()
+			if m, _ := tbl.Lookup("sh"); !m.NoModel {
+				t.Errorf("%s：NoModel 没传进档位表", name)
+			}
+		}
+	}
+}

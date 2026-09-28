@@ -49,6 +49,8 @@ type Model struct {
 	Class RouteClass
 	// Caps 是配置里显式声明的能力位（yes/no），没写的就是 unknown。绝不从 Tool 推断。
 	Caps map[string]string
+	// NoModel 为真：配置显式声明这个工具没有模型可选，launch 不传 --model（n042）。
+	NoModel bool
 }
 
 // RouteTable 是档位表：哪个模型算哪一档。
@@ -136,6 +138,14 @@ func CheckNoDowngrade(m Model, required RouteClass) error {
 			required, m.ID, m.Class)
 	}
 	return nil
+}
+
+// launchModel 是传给上游 launch 的模型参数：声明了没有模型的，不传 --model。
+func launchModel(m Model) (model string, notApplicable bool) {
+	if m.NoModel {
+		return "", true
+	}
+	return m.ID, false
 }
 
 // ToolOf 返回模型对应的工具名。
