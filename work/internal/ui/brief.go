@@ -62,6 +62,7 @@ func reviewBrief(node projectctl.Node, attempt int) string {
 
 	b.WriteString("约束：\n")
 	b.WriteString("- 不要修改任何代码或交付物，你只评审。\n")
+	fmt.Fprintf(&b, "- 评审报告写到项目根下的 %s（只写这一个文件），owner 记账时要引用它。\n", reviewReportPath(node.ID, attempt))
 	b.WriteString("- 不要读取或复制任何凭据正文。\n")
 	b.WriteString("- 结论只能是 accept 或 rework 之一，写在最后一行，")
 	b.WriteString("格式：`VERDICT: accept` 或 `VERDICT: rework`。\n")

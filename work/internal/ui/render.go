@@ -327,7 +327,7 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 	for _, ln := range wrapText(sc.EnterHint, width) {
 		w("%s", styleDim.Render(ln))
 	}
-	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　H 交还　r 刷新　q 退出"))
+	w("%s", styleDim.Render("↑↓ 选　Enter 详情　Tab 展开已验收　d 派工　a 进入　T 直连　p 预览　i 队列　H 交还　v 结论　r 刷新　q 退出"))
 	// 边界声明不能因为要腾地方就不说：它是这块表盘对人的承诺。
 	w("%s", styleDim.Render("本界面只在派工前经控制器开工（projectctl start），不写验收与其他状态变更。"))
 	return b.String()
@@ -341,6 +341,11 @@ func wrapText(s string, width int) []string {
 	}
 	var out []string
 	for _, para := range strings.Split(s, "\n") {
+		// 以 "$ " 开头的是要复制去终端跑的命令：不折行，否则复制下来是断的（n042）。
+		if strings.HasPrefix(para, "$ ") {
+			out = append(out, para)
+			continue
+		}
 		line, w := "", 0
 		for _, r := range para {
 			rw := 1

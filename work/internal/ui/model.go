@@ -397,6 +397,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginPreview()
 	case "H":
 		return m.beginHandback(), nil
+	case "v":
+		return m.showVerdict(), nil
 	case "i":
 		if !m.queueOn() {
 			m.notice, m.noticeOK = "没有接决策队列（配置目录不可用，见启动时的提示）", false
