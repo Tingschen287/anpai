@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
@@ -103,4 +105,24 @@ func TestReviewWithUnknownAttemptIsRefused(t *testing.T) {
 	if cmd != nil || len(fd.reviews) != 0 || !strings.Contains(m.notice, "不知道是第几次 attempt") {
 		t.Errorf("attempt 未知时不该派评审：%q %+v", m.notice, fd.reviews)
 	}
+}
+
+// 送达未确认：界面不说「已送达」，给出下一步。
+func TestUnconfirmedDeliveryIsFlaggedOnScreen(t *testing.T) {
+	fd := &unconfirmedDispatcher{frontierFD()}
+	m := modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd)
+	m = pressD(m)
+	_, cmd := enterWithReason(t, m, "x")
+	done := cmd().(dispatchDoneMsg)
+	if done.ok || !strings.Contains(done.text, "送达未确认") || strings.Contains(done.text, "已送达") || !strings.Contains(done.text, "按 p 看画面") {
+		t.Errorf("送达未确认要醒目提示并给下一步：%+v", done)
+	}
+}
+
+type unconfirmedDispatcher struct{ *fakeDispatcher }
+
+func (u *unconfirmedDispatcher) Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error) {
+	b, err := u.fakeDispatcher.Dispatch(ctx, req)
+	b.Delivery = binding.DeliveryUnconfirmed
+	return b, err
 }

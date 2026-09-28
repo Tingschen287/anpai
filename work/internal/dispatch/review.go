@@ -180,7 +180,11 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	// 送不进去就不落绑定：绑定意味着「这次 attempt 的评审已经派出」，
 	// 而一个没收到任务的会话不算派出。宁可报错让人看见一个半成品会话，
 	// 也不要账本上多一条其实什么都没发生的「已派评审」。
-	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); err != nil {
+	// 「送达未确认」照样落绑定并记 unconfirmed（n042，理由见 Dispatch）：n040 实测评审会话其实收到并执行了 brief。
+	delivery := binding.DeliveryConfirmed
+	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {
+		delivery = binding.DeliveryUnconfirmed
+	} else if err != nil {
 		return refuse(fmt.Errorf(
 			"评审会话 %s 已经起来了，但 brief 没送进去：%w。"+
 				"这是个半成品会话，Work Deck 不会去停它，也不记这次派评审——"+
@@ -199,12 +203,14 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 		Profile:      res.Profile,
 		DispatchedAt: d.now(),
 		DispatchedBy: req.DispatchedBy,
+		Delivery:     delivery,
 	}
 	if err := d.Store.Put(b); err != nil {
 		return refuse(fmt.Errorf("评审会话 %s 已启动但绑定没存住：%w", res.SessionID, err))
 	}
 
 	out.OK = true
+	out.Delivery = delivery
 	out.SessionID = res.SessionID
 	out.Profile = res.Profile
 	_ = d.appendLog(out)

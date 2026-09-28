@@ -49,6 +49,8 @@ type Outcome struct {
 	SessionID     string    `json:"session_id,omitempty"`
 	DispatchedBy  string    `json:"dispatched_by"`
 	OK            bool      `json:"ok"`
+	// Delivery 是任务文本的送达情况：confirmed 或 unconfirmed（n042）。
+	Delivery string `json:"delivery,omitempty"`
 	// 被拒绝时写明原因。拒绝也要留痕，否则事后看不出守没守规矩。
 	Refusal string `json:"refusal,omitempty"`
 }
@@ -173,7 +175,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 
 	// 任务文本不随 launch 出去（LaunchRequest 没有这个字段）：launch 返回说明写入权已经登记，
 	// 这时才经受仲裁的投递口送。送不进去就不落绑定，和派评审同一个规矩。
-	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); err != nil {
+	// 例外是「送达未确认」（n042）：正文到了画面、上游没确认提交。会话可能已经在跑，丢掉它就成了没人认领的会话，
+	// 所以照样落绑定，记成 unconfirmed，由界面提示 owner 去看。
+	delivery := binding.DeliveryConfirmed
+	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {
+		delivery = binding.DeliveryUnconfirmed
+	} else if err != nil {
 		return refuse(fmt.Errorf(
 			"会话 %s 已经起来了，但任务文本没送进去：%w。"+
 				"这是个半成品会话，Work Deck 不会去停它，也不记这次派工——请手工确认该会话的去向，再重派",
@@ -191,6 +198,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		Profile:      res.Profile,
 		DispatchedAt: d.now(),
 		DispatchedBy: req.DispatchedBy,
+		Delivery:     delivery,
 	}
 	if err := d.Store.Put(b); err != nil {
 		// 会话已经起来了，但绑定没存住。这种半成品必须喊出来，
@@ -199,6 +207,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	}
 
 	out.OK = true
+	out.Delivery = delivery
 	out.SessionID = res.SessionID
 	out.Profile = res.Profile
 	_ = d.appendLog(out)

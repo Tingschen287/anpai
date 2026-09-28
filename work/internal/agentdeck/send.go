@@ -2,6 +2,8 @@ package agentdeck
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -37,10 +39,43 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 	}
 	// 默认行为是等对方的 agent 起来再发，这正是刚 launch 出来的会话需要的；
 	// 不等的话消息可能落在 CLI 还没就绪的窗口里。超时由 Client.Timeout 兜着。
-	_, err = c.execWithStdin(ctx, strings.NewReader(message),
-		"session", "send", sessionID, "--message-file", "-")
-	if err != nil {
-		return fmt.Errorf("向会话 %s 投递消息失败：%w", sessionID, err)
+	out, err := c.execWithStdin(ctx, strings.NewReader(message),
+		"session", "send", sessionID, "--message-file", "-", "--json")
+	if err == nil {
+		return nil
 	}
-	return nil
+	// 上游失败时 --json 的输出里有 delivery 字段（上游 session_cmd.go:3056-3087）。
+	// delivery=typed：正文到了会话画面，但没有证据说明对方接了这一轮——上游按失败退出（issue #1793），
+	// 而 n040 终审实测到它是假阴性：评审会话其实收到并执行了 brief。这种情况单独报出来，
+	// 让派工器不把会话当成没派出去丢掉（n042，n040 终审断点 5）。其余 delivery 仍是投递失败。
+	var rep struct {
+		Delivery string `json:"delivery"`
+		Error    string `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(out, &rep); jsonErr == nil && rep.Delivery == DeliveryTyped {
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: rep.Error}
+	}
+	return fmt.Errorf("向会话 %s 投递消息失败：%w", sessionID, err)
+}
+
+// DeliveryTyped 是上游 session send --json 的 delivery 取值之一：正文到了画面、提交没得到确认。
+const DeliveryTyped = "typed"
+
+// ErrDeliveryUnconfirmed 表示消息到了会话画面，但上游确认不了对方接了这一轮。
+//
+// 它不等于没送到：可能已经在跑（n040 实测），也可能还停在输入框。Work Deck 看画面也分不清这两种，
+// 所以不自动重发、不当成失败丢掉，而是照实记「送达未确认」、交给 owner 去看。
+type ErrDeliveryUnconfirmed struct {
+	SessionID string
+	Detail    string
+}
+
+func (e *ErrDeliveryUnconfirmed) Error() string {
+	return fmt.Sprintf("消息到了会话 %s 的画面，但上游没确认提交（%s）", e.SessionID, e.Detail)
+}
+
+// IsDeliveryUnconfirmed 判断一个错误是不是「送达未确认」。
+func IsDeliveryUnconfirmed(err error) bool {
+	var u *ErrDeliveryUnconfirmed
+	return errors.As(err, &u)
 }

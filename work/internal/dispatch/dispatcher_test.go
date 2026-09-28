@@ -373,3 +373,37 @@ func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
 		t.Errorf("绑定应记配置 id：%q", b.Model)
 	}
 }
+
+// n040 终审断点 5：送达未确认时照样落绑定、记 unconfirmed，不留下无人认领的会话；执行与评审两条路一样。
+func TestUnconfirmedDeliveryStillBindsTheSession(t *testing.T) {
+	fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "exec-sess", Success: true}}
+	d, logPath := newDispatcher(t, fake)
+	fake.sendErr = &agentdeck.ErrDeliveryUnconfirmed{SessionID: "exec-sess", Detail: "typed"}
+	b, err := d.Dispatch(context.Background(), goodRequest())
+	if err != nil {
+		t.Fatalf("送达未确认不该判派工失败：%v", err)
+	}
+	if got, ok := d.Store.Get(b.NodeID, b.Attempt); !ok || got.Delivery != binding.DeliveryUnconfirmed {
+		t.Errorf("应当落绑定并记 unconfirmed：%+v %v", got, ok)
+	}
+	logs := readLog(t, logPath)
+	if last := logs[len(logs)-1]; !last.OK || last.Delivery != binding.DeliveryUnconfirmed {
+		t.Errorf("流水应当记成功且 delivery=unconfirmed：%+v", last)
+	}
+
+	fake.res = agentdeck.LaunchResult{SessionID: "review-sess", Success: true}
+	rb, err := d.DispatchReviewer(context.Background(), goodReview())
+	if err != nil || rb.Delivery != binding.DeliveryUnconfirmed {
+		t.Errorf("评审这条路也应当落绑定并记 unconfirmed：%+v %v", rb, err)
+	}
+
+	// 其余投递失败照旧：不落绑定。
+	fake2 := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "x", Success: true}, sendErr: errors.New("no_evidence")}
+	d2, _ := newDispatcher(t, fake2)
+	if _, err := d2.Dispatch(context.Background(), goodRequest()); err == nil {
+		t.Error("真失败仍应拒绝")
+	}
+	if len(d2.Store.List()) != 0 {
+		t.Error("真失败不该落绑定")
+	}
+}

@@ -35,7 +35,16 @@ type Binding struct {
 
 	DispatchedAt time.Time `json:"dispatched_at"`
 	DispatchedBy string    `json:"dispatched_by"`
+	// Delivery 是任务文本的送达情况（n042）：confirmed，或 unconfirmed——到了会话画面、上游没确认提交，
+	// 要 owner 去看一眼。旧记录没有这个字段，读作空。
+	Delivery string `json:"delivery,omitempty"`
 }
+
+// 任务文本的送达情况。
+const (
+	DeliveryConfirmed   = "confirmed"
+	DeliveryUnconfirmed = "unconfirmed"
+)
 
 // Key 是一次 attempt 的唯一标识。
 func (b Binding) Key() string { return fmt.Sprintf("%s#%d", b.NodeID, b.Attempt) }

@@ -771,6 +771,10 @@ func (m Model) onReasonKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// unconfirmedAdvice 是「送达未确认」时告诉 owner 的下一步（n042）。
+// Work Deck 看画面分不清「已经在跑」与「还停在输入框」，所以不自动重发，交给人看一眼。
+const unconfirmedAdvice = "上游说正文到了会话画面、但没确认提交。按 p 看画面：已经在跑就不用管；还停在输入框，就按 a 进去按回车。"
+
 // confirmDispatch 用挑中的模型真的派一次工。
 func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	node, ok := m.selected()
@@ -819,6 +823,11 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			b, err := d.DispatchReviewer(ctx, rreq)
 			if err != nil {
 				return dispatchDoneMsg{ok: false, text: "派评审被拒：" + err.Error()}
+			}
+			if b.Delivery == binding.DeliveryUnconfirmed {
+				return dispatchDoneMsg{ok: false, text: fmt.Sprintf(
+					"已为 %s attempt %d 派出评审 → 会话 %s（%s / %s），但 brief 送达未确认。%s",
+					node.ID, b.Attempt, b.SessionID, b.Model, b.RouteClass, unconfirmedAdvice)}
 			}
 			return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
 				"已为 %s attempt %d 派出评审 → 会话 %s（%s / %s）",
@@ -871,6 +880,11 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		prefix := ""
 		if started != "" {
 			prefix = started + "；"
+		}
+		if b.Delivery == binding.DeliveryUnconfirmed {
+			return dispatchDoneMsg{ok: false, text: fmt.Sprintf(
+				"%s已派 %s attempt %d → 会话 %s（%s / %s），但执行 brief 送达未确认。%s",
+				prefix, b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass, unconfirmedAdvice)}
 		}
 		return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
 			"%s已派 %s attempt %d → 会话 %s（%s / %s），执行 brief 已送达",

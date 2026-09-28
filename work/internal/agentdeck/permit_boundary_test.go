@@ -145,3 +145,44 @@ func TestSendMessageRefusesBlankText(t *testing.T) {
 		t.Error("空白消息不该调到上游")
 	}
 }
+
+// n040 终审断点 5：上游 session send --json 报 delivery=typed（到了画面、没确认提交）时，
+// adapter 报「送达未确认」，不当成普通失败；typed_not_submitted 等其余失败仍是失败；成功就是成功。
+func TestSendMessageReportsUnconfirmedDeliverySeparately(t *testing.T) {
+	cases := []struct {
+		name, out string
+		code      int
+		unconf    bool
+		ok        bool
+	}{
+		{"typed", `{"success":false,"delivery":"typed","submitted":false,"error":"message reached 'x' but was never confirmed submitted","code":"DELIVERY_FAILED"}`, 1, true, false},
+		{"typed_not_submitted", `{"success":false,"delivery":"typed_not_submitted","submitted":false,"error":"message typed but not submitted","code":"DELIVERY_FAILED"}`, 1, false, false},
+		{"no_evidence", `{"success":false,"delivery":"no_evidence","error":"not delivered"}`, 1, false, false},
+		{"非 JSON", `Error: boom`, 1, false, false},
+		{"成功", `{"success":true,"delivery":"submitted","submitted":true}`, 0, false, true},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		argsFile := filepath.Join(dir, "args")
+		bin := filepath.Join(dir, "agent-deck")
+		script := "#!/bin/sh\necho \"$@\" > \"" + argsFile + "\"\ncat >/dev/null\ncat <<'JSON'\n" + c.out + "\nJSON\nexit " + strconv.Itoa(c.code) + "\n"
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cl, _ := NewClient(bin, "_t", "", "")
+		leases, _ := lease.Open(filepath.Join(dir, "leases.json"))
+		leases.Grant("s1", "测试")
+		p, _ := leases.Automatic("s1")
+		err := cl.SendMessage(t.Context(), p, "s1", "继续")
+		leases.Close()
+		if got := IsDeliveryUnconfirmed(err); got != c.unconf {
+			t.Errorf("%s：送达未确认=%v，期望 %v（%v）", c.name, got, c.unconf, err)
+		}
+		if (err == nil) != c.ok {
+			t.Errorf("%s：成功=%v，期望 %v（%v）", c.name, err == nil, c.ok, err)
+		}
+		if args, _ := os.ReadFile(argsFile); !strings.Contains(string(args), "--json") {
+			t.Errorf("%s：session send 要带 --json 才读得到 delivery：%s", c.name, args)
+		}
+	}
+}

@@ -63,6 +63,13 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// SendFlags 是 Work Deck 会传给 session send 的全部参数（n042 加 --json，用来读 delivery 字段）。
+var SendFlags = []string{"--message-file", "--json"}
+
+// SendDeliveryField 是 session send --json 失败时 Work Deck 读的字段；取值 typed 视为「送达未确认」。
+// 出处：上游 cmd/agent-deck/session_cmd.go:3056-3087、3116-3125。
+const SendDeliveryField = "delivery"
+
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
 var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait"}
 
