@@ -105,6 +105,8 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	b, err := d.Dispatch(context.Background(), Request{
 		NodeID: "e2e_node", Attempt: 1, RequiredClass: Economy,
 		ModelID: "shell", ProjectPath: project, Title: "n036e2e",
+		// shell 会话上中文「继续」送达稳定（ASCII 单词会撞上游 issue #1793 的误报）。
+		Message:      "继续",
 		DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
 	})
 	if err != nil {

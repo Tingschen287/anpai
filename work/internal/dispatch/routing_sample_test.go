@@ -50,7 +50,7 @@ func TestRoutingSampleRecords(t *testing.T) {
 		d.Quota = q
 		d.Deck.(*fakeLauncher).res.SessionID = node + "-sess"
 		_, err := d.Dispatch(context.Background(), Request{
-			NodeID: node, Attempt: 1, RequiredClass: Frontier, ModelID: model, ProjectPath: "/tmp/fixture",
+			NodeID: node, Attempt: 1, RequiredClass: Frontier, ModelID: model, ProjectPath: "/tmp/fixture", Message: "继续",
 			DispatchedBy: "work-deck", ChosenBy: "owner", ChoiceReason: reason,
 		})
 		return err

@@ -789,6 +789,8 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		ModelID:       chosen.ID,
 		ProjectPath:   m.snap.ProjectRoot,
 		Title:         node.ID,
+		// 任务文本：没有它，派出去的就是个空会话（n039 attempt 3 评审）。登记写入权后经仲裁投递。
+		Message:       executorBrief(node, attempt),
 		DispatchedBy:  "work-deck",
 		ChosenBy:      chosenBy,
 		ChoiceReason:  reason,
@@ -802,7 +804,7 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			return dispatchDoneMsg{ok: false, text: "派工被拒：" + err.Error()}
 		}
 		return dispatchDoneMsg{ok: true, text: fmt.Sprintf(
-			"已派 %s attempt %d → 会话 %s（%s / %s）",
+			"已派 %s attempt %d → 会话 %s（%s / %s），执行 brief 已送达",
 			b.NodeID, b.Attempt, b.SessionID, b.Model, b.RouteClass)}
 	}
 }

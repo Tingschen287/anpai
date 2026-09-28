@@ -68,7 +68,7 @@ type Lease struct {
 	PendingHandback *Handback `json:"pending_handback"`
 }
 
-// Event 是一次持有者切换，写进事件文件，一行一条。
+// Event 是一次持有者切换。事件与持有者同存 leases.json，同一次原子落盘（最近 500 条）。
 type Event struct {
 	At        time.Time `json:"at"`
 	SessionID string    `json:"session_id"`

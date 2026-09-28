@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,6 +148,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 			req.NodeID, req.Attempt, existing.SessionID))
 	}
 
+	// 任务文本放在模型与档位检查之后查：那几条拒绝理由更根本，不该被它盖住。
+	if strings.TrimSpace(req.Message) == "" {
+		return refuse(fmt.Errorf("派工缺少任务文本：说不清要执行者做什么，派出去的就只是一个空会话，不派"))
+	}
+
 	if err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason); err != nil {
 		return refuse(err)
 	}
@@ -165,13 +171,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 
 	// 任务文本不随 launch 出去（LaunchRequest 没有这个字段）：launch 返回说明写入权已经登记，
 	// 这时才经受仲裁的投递口送。送不进去就不落绑定，和派评审同一个规矩。
-	if req.Message != "" {
-		if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); err != nil {
-			return refuse(fmt.Errorf(
-				"会话 %s 已经起来了，但任务文本没送进去：%w。"+
-					"这是个半成品会话，Work Deck 不会去停它，也不记这次派工——请手工确认该会话的去向，再重派",
-				res.SessionID, err))
-		}
+	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); err != nil {
+		return refuse(fmt.Errorf(
+			"会话 %s 已经起来了，但任务文本没送进去：%w。"+
+				"这是个半成品会话，Work Deck 不会去停它，也不记这次派工——请手工确认该会话的去向，再重派",
+			res.SessionID, err))
 	}
 
 	b := binding.Binding{

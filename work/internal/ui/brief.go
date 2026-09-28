@@ -7,6 +7,32 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
 
+// executorBrief 写一份执行 brief：派出去的执行会话开工时看到的第一段话。
+//
+// n039 attempt 3 评审指出：界面派执行者时从不带任务文本，起来的会话是空的，界面却说「已派」——
+// 和 reviewBrief 当初要修的是同一个洞。brief 只说节点号、第几次、去哪里读合同、按什么规矩交，
+// 合同全文让执行者自己用 projectctl brief 读，不在这里抄第二份。不放凭据。
+func executorBrief(node projectctl.Node, attempt int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "你是 %s 的执行者，这是第 %d 次 attempt。\n", node.ID, attempt)
+	if node.Title != "" {
+		fmt.Fprintf(&b, "节点：%s。\n", node.Title)
+	}
+	if node.RouteClass != "" {
+		fmt.Fprintf(&b, "节点档位要求：%s。\n", node.RouteClass)
+	}
+	b.WriteString("\n")
+	b.WriteString("开工前：\n")
+	b.WriteString("- 读项目根的 AGENTS.md，按里面的规矩做。\n")
+	fmt.Fprintf(&b, "- 用项目控制器的 brief 命令读 %s 的节点合同（调用方式见 AGENTS.md），逐条对照 acceptance_criteria。\n", node.ID)
+	b.WriteString("\n")
+	b.WriteString("约束：\n")
+	b.WriteString("- 只改节点合同允许的写入范围。\n")
+	b.WriteString("- 不要读取或复制任何凭据正文。\n")
+	b.WriteString("- 做完用 projectctl submit 提交证据；你不能验收自己的产出，评审由另一个会话做。\n")
+	return b.String()
+}
+
 // reviewBrief 写一份评审 brief，就是派出去的那个会话开工时看到的第一段话。
 //
 // 为什么这件事值得一个专门的函数：上一版界面根本没写过这段话——

@@ -83,7 +83,7 @@ func goodRequest() Request {
 	return Request{
 		NodeID: "n099_demo", Attempt: 1, RequiredClass: Frontier,
 		ModelID: "claude-opus-5", ProjectPath: "/tmp/p",
-		Title: "demo", Group: "g", DispatchedBy: "tester", ChosenBy: "owner", ChoiceReason: "测试里指定",
+		Title: "demo", Group: "g", Message: "继续", DispatchedBy: "tester", ChosenBy: "owner", ChoiceReason: "测试里指定",
 	}
 }
 
@@ -328,6 +328,22 @@ func TestRoutingRanksMatchDispatch(t *testing.T) {
 			if d.Candidates[0].MeetsRouteClass != a.Meets(b) {
 				t.Errorf("%s 能否满足 %s：routing 说 %v，dispatch 说 %v", a, b, d.Candidates[0].MeetsRouteClass, a.Meets(b))
 			}
+		}
+	}
+}
+
+// 没有任务文本就不派：派出去的只会是个空会话（n039 attempt 3 评审）。上游一次都不调。
+func TestDispatchWithoutTaskTextIsRefused(t *testing.T) {
+	for _, msg := range []string{"", "  \n"} {
+		fake := &fakeLauncher{res: agentdeck.LaunchResult{SessionID: "s", Success: true}}
+		d, _ := newDispatcher(t, fake)
+		req := goodRequest()
+		req.Message = msg
+		if _, err := d.Dispatch(context.Background(), req); err == nil || !strings.Contains(err.Error(), "缺少任务文本") {
+			t.Errorf("任务文本为 %q 时必须拒绝：%v", msg, err)
+		}
+		if len(fake.calls) != 0 || len(fake.sent) != 0 {
+			t.Errorf("被拒时上游不该被调用：%+v %+v", fake.calls, fake.sent)
 		}
 	}
 }

@@ -28,6 +28,11 @@ func dispatchExecutorFirst(t *testing.T, d *Dispatcher, fake *fakeLauncher, sess
 	if _, err := d.Dispatch(context.Background(), goodRequest()); err != nil {
 		t.Fatalf("先派执行者失败：%v", err)
 	}
+	// 执行者自己的任务文本也经 SendMessage 送（n039 attempt 4）；清掉它，后面只数评审那一次。
+	if len(fake.sent) != 1 || fake.sent[0].SessionID != session {
+		t.Fatalf("执行者的任务文本应当恰好送到 %s 一次：%+v", session, fake.sent)
+	}
+	fake.sent = nil
 }
 
 // 这是本节点最要紧的一条：自己评自己等于没评，而账本上会留下一条

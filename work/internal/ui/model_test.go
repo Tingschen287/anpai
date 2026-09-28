@@ -294,6 +294,9 @@ func TestDispatchHappyPathPassesTheChosenModel(t *testing.T) {
 	if fd.got[0].NodeID != "n1" || fd.got[0].Attempt != 1 {
 		t.Errorf("派工请求不对：%+v", fd.got[0])
 	}
+	if !strings.Contains(fd.got[0].Message, "n1 的执行者") {
+		t.Errorf("执行派工没带任务文本：%q", fd.got[0].Message)
+	}
 	if fd.got[0].ChosenBy != "owner" || fd.got[0].ChoiceReason != "测试 挑贵的那个" {
 		t.Errorf("选择者与理由没传下去：%q %q", fd.got[0].ChosenBy, fd.got[0].ChoiceReason)
 	}
