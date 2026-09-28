@@ -65,7 +65,7 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 	// 而 n040 终审实测到它是假阴性：评审会话其实收到并执行了 brief。这种情况单独报出来，
 	// 让派工器不把会话当成没派出去丢掉（n042，n040 终审断点 5）。其余 delivery 仍是投递失败。
 	if jsonErr == nil && rep.Delivery == DeliveryTyped {
-		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: rep.Error}
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: rep.Error, Reached: true}
 	}
 	return fmt.Errorf("向会话 %s 投递消息失败：%w", sessionID, err)
 }
@@ -73,17 +73,22 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 // DeliveryTyped 是上游 session send --json 的 delivery 取值之一：正文到了画面、提交没得到确认。
 const DeliveryTyped = "typed"
 
-// ErrDeliveryUnconfirmed 表示消息到了会话画面，但上游确认不了对方接了这一轮。
+// ErrDeliveryUnconfirmed 表示上游没能证实对方接到了这条消息。分两种（n042 attempt 3 评审）：
+//   - Reached 为真（delivery=typed）：正文到了会话画面，提交没得到确认。可能已经在跑（n040 实测），也可能还停在输入框。
+//   - Reached 为假（delivery=unverified、回执缺 submitted 或不是 JSON）：连正文到没到画面都没证实。
 //
-// 它不等于没送到：可能已经在跑（n040 实测），也可能还停在输入框。Work Deck 看画面也分不清这两种，
-// 所以不自动重发、不当成失败丢掉，而是照实记「送达未确认」、交给 owner 去看。
+// 两种 Work Deck 都分不清结果，所以不自动重发、不当成失败丢掉，而是照实记「送达未确认」、交给 owner 去看。
 type ErrDeliveryUnconfirmed struct {
 	SessionID string
 	Detail    string
+	Reached   bool
 }
 
 func (e *ErrDeliveryUnconfirmed) Error() string {
-	return fmt.Sprintf("消息到了会话 %s 的画面，但上游没确认提交（%s）", e.SessionID, e.Detail)
+	if e.Reached {
+		return fmt.Sprintf("消息到了会话 %s 的画面，但上游没确认提交（%s）", e.SessionID, e.Detail)
+	}
+	return fmt.Sprintf("上游没证实消息到了会话 %s、也没证实提交（%s）", e.SessionID, e.Detail)
 }
 
 // IsDeliveryUnconfirmed 判断一个错误是不是「送达未确认」。

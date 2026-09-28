@@ -235,7 +235,30 @@ func (s *Store) MarkInFlight(id, option string, now time.Time) error {
 	return nil
 }
 
-// ResolveInFlight 是 owner 预览过会话之后，对一次中断的投递下结论。
+// MarkUnconfirmed 把一次「送达未确认」的投递留在待核状态（n042 attempt 3 评审）：在途标记不清，
+// 条目仍是 open、仍算待拍板，不自动重投；note 说明为什么待核。owner 预览会话后用 ResolveInFlight（K / R）下结论。
+func (s *Store) MarkUnconfirmed(id, note string) (Item, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[id]
+	if !ok {
+		return Item{}, fmt.Errorf("队列里没有条目 %s", id)
+	}
+	if it.Answer == nil || !it.Answer.InFlight {
+		return Item{}, fmt.Errorf("条目 %s 没有在途的投递", id)
+	}
+	prev := it.Answer
+	a := *it.Answer
+	a.Note = note
+	it.Answer = &a
+	if err := s.flushLocked(); err != nil {
+		it.Answer = prev
+		return Item{}, err
+	}
+	return *it, nil
+}
+
+// ResolveInFlight 是 owner 预览过会话之后，对一次中断或送达未确认的投递下结论。
 //
 // received 为真：对方确实收到了，条目标为已回答。为假：没收到，清掉标记，条目回到待拍板，
 // owner 可以照常再选一次选项投递。两种都不发任何消息——要不要再发，由 owner 下一步明确选。
@@ -253,7 +276,7 @@ func (s *Store) ResolveInFlight(id string, received bool, now time.Time) (Item, 
 	if received {
 		a := *it.Answer
 		a.InFlight, a.Delivered = false, true
-		a.Note = "投递中断后，owner 预览确认会话已收到"
+		a.Note = "投递中断或送达未确认后，owner 预览确认会话已收到"
 		it.Answer = &a
 		it.Status = StatusAnswered
 	} else {

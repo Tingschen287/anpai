@@ -266,7 +266,9 @@ func TestIntegrationAnswerReachesTheOriginatingSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !it.Answer.Delivered || it.Status != StatusAnswered {
+	// 对 shell 会话上游总回 unverified（n042）：回答留在待核，由下面读画面核对后按 K 结案。
+	pending := it.Answer != nil && it.Answer.InFlight && strings.Contains(it.Answer.Note, "结果待核")
+	if !pending && (!it.Answer.Delivered || it.Status != StatusAnswered) {
 		t.Fatalf("投递没成功：%+v", it.Answer)
 	}
 	var pane string
@@ -279,6 +281,13 @@ func TestIntegrationAnswerReachesTheOriginatingSession(t *testing.T) {
 	}
 	if !strings.Contains(pane, "继续") {
 		t.Fatalf("会话画面里没看到投递的文字：%q（err=%v）", pane, err)
+	}
+	// 画面核对过了，像 owner 按 K 那样结案。
+	if pending {
+		got, err := s.ResolveInFlight(id, true, now)
+		if err != nil || got.Status != StatusAnswered {
+			t.Fatalf("核对后按 K 应当结案：%+v %v", got, err)
+		}
 	}
 
 	// 别的 profile 的会话不代投。

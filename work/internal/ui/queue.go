@@ -164,7 +164,7 @@ func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		it := items[m.qv.cursor]
 		if it.Answer == nil || !it.Answer.InFlight {
-			m.notice, m.noticeOK = "这一条没有中断的投递，R/K 只用于结案中断的投递", false
+			m.notice, m.noticeOK = "这一条没有待核的投递，R/K 只用于结案中断或送达未确认的投递", false
 			return m, nil
 		}
 		received := msg.String() == "K"
@@ -205,7 +205,11 @@ func (m Model) onQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if it.Answer != nil && it.Answer.InFlight {
-			m.notice, m.noticeOK = "上次投递在途中中断，结果未知；为免对方收到两遍不自动重投。先回主界面用 p 预览那个会话，再按 K（已收到）或 R（没收到，可重答）", false
+			why := "上次投递在途中中断，结果未知"
+			if it.Answer.Note != "" {
+				why = it.Answer.Note
+			}
+			m.notice, m.noticeOK = why+"；为免对方收到两遍不自动重投。先回主界面用 p 预览那个会话，再按 K（已收到）或 R（没收到，可重答）", false
 			return m, nil
 		}
 		if it.Status == queue.StatusResolved {
@@ -355,7 +359,9 @@ func renderQueuePanel(q QueueScreen, width int, w func(string, ...any)) {
 			w("%s", styleDim.Render("  上游记录已不在 export 里（可能被 conductor 取走或过期清掉）"))
 		}
 		if a := it.Answer; a != nil {
-			if a.InFlight {
+			if a.InFlight && a.Note != "" {
+				w("%s", styleAlert.Render("  结果待核："+a.Note+"：不自动重投。预览那个会话后按 K（已收到）或 R（没收到，清标记可重答）"))
+			} else if a.InFlight {
 				w("%s", styleAlert.Render("  上次投递在途中中断，结果未知：不自动重投。预览那个会话后按 K（已收到）或 R（没收到，清标记可重答）"))
 			} else if a.DeliveryError != "" {
 				w("%s", styleAlert.Render("  上次回答投递失败："+a.DeliveryError+"（可以重选）"))

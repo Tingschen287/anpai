@@ -178,10 +178,9 @@ func Respond(ctx context.Context, s *Store, d Deliverer, id, option string, now 
 		}
 		rec := agentdeck.InboxRecord{ChildSessionID: it.Source.SessionID, Profile: it.Source.Profile}
 		if err := d.DeliverAnswer(ctx, rec, opt.Message); agentdeck.IsDeliveryUnconfirmed(err) {
-			// 到了会话画面、上游没确认提交（n042）：算已发出，免得 owner 以为没发、再答一遍让对方收到两次；
-			// 但照实写未确认，请他看一眼。
-			ans.Delivered = true
-			ans.Note = fmt.Sprintf("已向会话 %s 发送「%s」，但上游没确认提交：按 p 看会话画面，停在输入框就进去回车", it.Source.SessionID, opt.Message)
+			// 送达未确认（n042 attempt 3 评审）：不结案，也不当失败——留在待核，在途标记保留，不自动重投，
+			// 免得对方收到两遍；owner 预览会话后按 K（已收到）或 R（没收到，可重答）。
+			return s.MarkUnconfirmed(id, fmt.Sprintf("发送「%s」后%v。结果待核", opt.Message, err))
 		} else if err != nil {
 			ans.DeliveryError = err.Error()
 		} else {

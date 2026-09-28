@@ -824,7 +824,7 @@ func (m Model) onReasonKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // unconfirmedAdvice 是「送达未确认」时告诉 owner 的下一步（n042）。
 // Work Deck 看画面分不清「已经在跑」与「还停在输入框」，所以不自动重发，交给人看一眼。
-const unconfirmedAdvice = "上游说正文到了会话画面、但没确认提交。按 p 看画面：已经在跑就不用管；还停在输入框，就按 a 进去按回车。"
+const unconfirmedAdvice = "上游没证实对方接到了任务文本（可能到了画面没提交，也可能没到）。按 p 看画面：已经在跑就不用管；停在输入框就按 a 进去按回车；画面上没有就按 a 进去手工发。"
 
 // confirmDispatch 用挑中的模型真的派一次工。
 func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
