@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,10 +40,48 @@ type Request struct {
 	// 才调 Start 经 projectctl 开工，拿账本给的 attempt（n044，n043 复审新问题 2）。这时 Attempt 必须留 0。
 	// 这样 launch 失败时 Graph 一点没动，不会留下 running 却没有会话的 attempt。
 	// 为 nil：节点已经 running（补派），Attempt 是账本已有的号。
-	Start func(ctx context.Context) (attempt int, err error)
+	//
+	// Start 返回的错误若没有用 NotStarted 标明「确定没开工」，派工器一律当作结果不明、可能已经开工（n044 attempt 3）。
+	Start func(ctx context.Context) (Started, error)
 	// MessageFor 不为 nil 时，任务文本按最终的 attempt 生成、代替 Message：开工派单要等 start 之后才知道号，
 	// 而执行 brief 第一行就写着第几次 attempt（n044）。
 	MessageFor func(attempt int) string
+}
+
+// Started 是 Graph 开工的回执：账本给的 attempt，与开工事件号（绑定拿它当账本身份；对账确认的开工没有事件号）。
+type Started struct {
+	Attempt int
+	EventID string
+}
+
+// notStarted 标明一次开工确定没写进账本。
+type notStarted struct{ err error }
+
+func (e *notStarted) Error() string { return e.err.Error() }
+func (e *notStarted) Unwrap() error { return e.err }
+
+// NotStarted 包一个开工错误，说明账本确定没开工：刚起的会话停掉就行，节点状态不变。
+func NotStarted(err error) error { return &notStarted{err} }
+
+// IsNotStarted 判断一个开工错误是不是标了「确定没开工」。
+func IsNotStarted(err error) bool {
+	var ns *notStarted
+	return errors.As(err, &ns)
+}
+
+// StartUncertainError 是开工结果不明：控制器可能已经把开工写进账本，只是回执没到（n044 attempt 2 评审 blocker 2）。
+// 派工器照样停掉没拿到任务的会话，但不说「没开工」，而是请 owner 刷新核对。
+type StartUncertainError struct{ Cause error }
+
+func (e *StartUncertainError) Error() string {
+	return fmt.Sprintf("Graph 开工结果不明（%v），可能已经开工：按 r 刷新，节点若是 running，选中它按 d 补派同一个 attempt", e.Cause)
+}
+func (e *StartUncertainError) Unwrap() error { return e.Cause }
+
+// IsStartUncertain 判断一个派工错误是不是开工结果不明。
+func IsStartUncertain(err error) bool {
+	var u *StartUncertainError
+	return errors.As(err, &u)
 }
 
 // messageFor 是 attempt 号为 a 时要送出去的任务文本。
@@ -75,8 +114,8 @@ type Outcome struct {
 	RoutingAt time.Time `json:"routing_at,omitempty"`
 	// SessionStopped 为真：会话起来了却没拿到任务说明，派工器已把它停掉（n044）。
 	SessionStopped bool `json:"session_stopped,omitempty"`
-	// ReplacedSession 是被本次绑定替换掉的旧绑定会话号（n044 attempt 2）：账本刚分配的 attempt 在绑定存储里已有一条，
-	// 那只能是别的账本历史（例如夹具重建）或崩溃留下的。
+	// ReplacedSession 是挪进留档的旧绑定会话号（n044 attempt 3）：账本刚分配的 attempt 在绑定存储里已有一条，
+	// 那只能是别的账本历史（例如夹具重建前）留下的。
 	ReplacedSession string `json:"replaced_session,omitempty"`
 }
 
@@ -228,22 +267,29 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	}
 
 	// 会话起来了、是 agent，这才开工（n044）：开工失败就停掉这个空会话，Graph 那边本来就没动。
-	attempt := req.Attempt
+	attempt, startEvent := req.Attempt, ""
 	if req.Start != nil {
-		a, err := req.Start(ctx)
-		if err != nil {
-			return abandon(fmt.Errorf("Graph 开工失败：%w", err))
+		st, err := req.Start(ctx)
+		switch {
+		case IsNotStarted(err):
+			return abandon(fmt.Errorf("Graph 开工失败（确定没开工，节点状态不变）：%w", err))
+		case err != nil:
+			return abandon(&StartUncertainError{Cause: err})
+		case st.Attempt <= 0:
+			return abandon(&StartUncertainError{Cause: fmt.Errorf("开工回执的 attempt 是 %d", st.Attempt)})
 		}
-		if a <= 0 {
-			return abandon(fmt.Errorf("Graph 开工回执的 attempt 是 %d，对不上账本：请核对节点状态", a))
-		}
-		attempt = a
-		out.Attempt = a
-		// 账本刚分配的 attempt 不可能有合法的旧绑定：start 每次给新号，同一本账里一个号只分配一次（节点已 running 时 start 会失败）。
-		// 所以这条只能来自别的账本历史（例如夹具重建）或崩溃残留：用新会话替换它，旧会话号记进流水。
-		// 上一版停掉新会话、提示按 d 补派，可界面见到绑定就拒绝 d，节点卡在 running（n044 attempt 1 评审 blocker 3）。
-		if existing, ok := d.Store.Get(req.NodeID, attempt); ok {
-			out.ReplacedSession = existing.SessionID
+		attempt, startEvent = st.Attempt, st.EventID
+		out.Attempt = attempt
+		// 账本刚为这个 attempt 开了工，绑定存储里却已有一条：它属于别的账本历史（例如夹具重建前）。同一本账里一个号只分配一次
+		// （节点已 running 时 start 会失败），而写绑定的进程至多一个（写入权记账打开时取排他文件锁，拿不到锁的进程派不了工）。
+		// 旧会话可能还在上游跑，所以不覆盖、不删：挪进留档、点名告诉 owner（n044 attempt 2 评审 blocker 1）。
+		// 挪在送任务之前：之后送任务失败时这个键是空的，节点 running、没有绑定，d 补派走得通。
+		if old, moved, err := d.Store.Supersede(req.NodeID, attempt, res.SessionID,
+			fmt.Sprintf("账本刚为 attempt %d 开工（%s），这条绑定属于别的账本历史", attempt, startEvent), d.now()); err != nil {
+			return abandon(fmt.Errorf("Graph 已开工 attempt %d，绑定存储里有一条旧绑定，挪不出去（%v）：新会话不绑。"+
+				"节点现在是 running：修好绑定存储后按 d 补派", attempt, err))
+		} else if moved {
+			out.ReplacedSession = old.SessionID
 		}
 	}
 
@@ -275,6 +321,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		DispatchedAt: d.now(),
 		DispatchedBy: req.DispatchedBy,
 		Delivery:     delivery,
+		StartEvent:   startEvent,
+		Supersedes:   out.ReplacedSession,
 	}
 	if err := d.Store.Put(b); err != nil {
 		// 会话已经起来了、任务也送了，但绑定没存住。它可能已经在干活，不能停；这种半成品必须喊出来，

@@ -109,8 +109,8 @@ func TestEachAdapterOnlyTouchesItsOwnUpstream(t *testing.T) {
 		// 用上游真实的变量名，不用 AGENTDECK_ 前缀：Work Deck 自己的
 		// WORKDECK_AGENTDECK_TOKEN 也含那个前缀，那是本方配置不是在碰上游。
 		"AGENTDECK_PROFILE": "internal/agentdeck",
-		"/api/sessions":    "internal/agentdeck",
-		"/events/menu":     "internal/agentdeck",
+		"/api/sessions":     "internal/agentdeck",
+		"/events/menu":      "internal/agentdeck",
 	}
 	// exec 只许出现在这两个 adapter 包**内部**。
 	//
@@ -211,7 +211,11 @@ func TestStartIsTheOnlyWriteAndRunsOnlyStart(t *testing.T) {
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "args")
 	script := filepath.Join(dir, "fake.py")
+	// 开工前 Start 先跑一次 verify-chain 记下事件数（n044 attempt 3），假控制器照样应答。
 	os.WriteFile(script, []byte(`import sys, json
+if "verify-chain" in sys.argv:
+    print(json.dumps({"ok": True, "result": {"chain_ok": True, "events": 5}}))
+    sys.exit(0)
 open(sys.argv[0].replace("fake.py","args"),"w").write("\n".join(sys.argv[1:]))
 print(json.dumps({"ok": True, "result": {"node_id": sys.argv[4], "state": "running", "attempt": 3, "event_id": "evt_x"}}))
 `), 0o644)
@@ -233,7 +237,7 @@ print(json.dumps({"ok": True, "result": {"node_id": sys.argv[4], "state": "runni
 func TestStartRejectsAMismatchedReceipt(t *testing.T) {
 	for name, result := range map[string]string{
 		"attempt 为 0": `{"node_id": "n1", "state": "running", "attempt": 0, "event_id": "e"}`,
-		"节点号不对":      `{"node_id": "n2", "state": "running", "attempt": 1, "event_id": "e"}`,
+		"节点号不对":       `{"node_id": "n2", "state": "running", "attempt": 1, "event_id": "e"}`,
 	} {
 		dir := t.TempDir()
 		script := filepath.Join(dir, "fake.py")
@@ -253,5 +257,24 @@ func TestStartDistrustsOkWithANonZeroExit(t *testing.T) {
 	_, err := NewClient(dir, script).Start(context.Background(), StartRequest{NodeID: "n1", Actor: "a", Role: "r", RouteClass: "frontier", Model: "m", Reason: "why"})
 	if err == nil || !strings.Contains(err.Error(), "进程退出失败") {
 		t.Errorf("ok 回执配非零退出应当报错：%v", err)
+	}
+}
+
+// n044 attempt 3：开工前核对不了账本就不开工——开工出岔子时没法对账。控制器的 start 一次都不调，报确定没开工。
+func TestStartRefusesWhenTheLedgerCannotBeCheckedFirst(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.py")
+	os.WriteFile(script, []byte(`import sys
+if "start" in sys.argv:
+    open(sys.argv[0].replace("fake.py","started"),"w").write("x")
+sys.exit(1)
+`), 0o644)
+	_, err := NewClient(dir, script).Start(context.Background(), StartRequest{NodeID: "n1", Actor: "a", Role: "r", RouteClass: "frontier", Model: "m", Reason: "why"})
+	var ns *ErrStartNotStarted
+	if !errors.As(err, &ns) || !strings.Contains(err.Error(), "开工前核对不了账本") {
+		t.Errorf("开工前核对不了账本应当不开工：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "started")); !os.IsNotExist(err) {
+		t.Error("核对不了账本时不该调 start")
 	}
 }

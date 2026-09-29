@@ -51,11 +51,22 @@ func TestReadyNodeStartsInGraphAndUsesTheLedgerAttempt(t *testing.T) {
 func TestStartFailureStopsDispatchAndDispatchFailureSaysHowToRecover(t *testing.T) {
 	fd := frontierFD()
 	m := modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd)
-	m = m.WithStarter(&fakeStarter{err: errors.New("预算用满")})
+	m = m.WithStarter(&fakeStarter{err: &projectctl.ErrStartNotStarted{Cause: errors.New("预算用满")}})
 	m = pressD(m)
 	_, cmd := enterWithReason(t, m, "x")
-	if done := cmd().(dispatchDoneMsg); done.ok || !strings.Contains(done.text, "Graph 开工失败") || len(fd.got) != 0 {
-		t.Errorf("开工失败时不该派：%+v %+v", done, fd.got)
+	if done := cmd().(dispatchDoneMsg); done.ok || !strings.Contains(done.text, "确定没开工") || len(fd.got) != 0 {
+		t.Errorf("确定没开工时不该派：%+v %+v", done, fd.got)
+	}
+
+	// 开工结果不明（例如子进程超时）：不说「被拒」，说可能已开工、怎么核对（n044 attempt 2 评审 blocker 2）。
+	fdU := frontierFD()
+	m = modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fdU)
+	m = m.WithStarter(&fakeStarter{err: errors.New("子进程超时")})
+	m = pressD(m)
+	_, cmd = enterWithReason(t, m, "x")
+	if done := cmd().(dispatchDoneMsg); done.ok || strings.Contains(done.text, "派工被拒") || !strings.Contains(done.text, "派工没成") ||
+		!strings.Contains(done.text, "可能已经开工") || len(fdU.got) != 0 {
+		t.Errorf("开工结果不明要照实说：%+v", done)
 	}
 
 	fd2 := frontierFD()
@@ -192,4 +203,24 @@ func TestObserveRightAfterDispatchWithoutWaitingForRefresh(t *testing.T) {
 	if len(m.overlays) != 0 {
 		t.Errorf("快照追上后覆盖应当撤掉：%v", m.overlays)
 	}
+}
+
+// 派工顶替了旧绑定（账本重建前留下的）：回执点名旧会话，提醒 owner 它可能还在跑（n044 attempt 2 评审 blocker 1）。
+func TestSupersededBindingIsCalledOutOnScreen(t *testing.T) {
+	fd := &supersedingDispatcher{frontierFD()}
+	m := modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd)
+	m = pressD(m)
+	_, cmd := enterWithReason(t, m, "x")
+	done := cmd().(dispatchDoneMsg)
+	if !done.ok || !strings.Contains(done.text, "s-old") || !strings.Contains(done.text, "已挪进留档") {
+		t.Errorf("顶替旧绑定要在回执里点名：%+v", done)
+	}
+}
+
+type supersedingDispatcher struct{ *fakeDispatcher }
+
+func (s *supersedingDispatcher) Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error) {
+	b, err := s.fakeDispatcher.Dispatch(ctx, req)
+	b.Supersedes = "s-old"
+	return b, err
 }

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -970,14 +971,22 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 		started, startedAttempt := "", 0
 		if needStart {
 			req.Attempt = 0
-			req.Start = func(ctx context.Context) (int, error) {
+			req.Start = func(ctx context.Context) (dispatch.Started, error) {
 				res, err := starter.Start(ctx, start)
 				if err != nil {
-					return 0, err
+					// 控制器说得清「确定没开工」的才这样标；别的错误派工器一律当结果不明（n044 attempt 3）。
+					var ns *projectctl.ErrStartNotStarted
+					if errors.As(err, &ns) {
+						return dispatch.Started{}, dispatch.NotStarted(err)
+					}
+					return dispatch.Started{}, err
 				}
 				startedAttempt = res.Attempt
 				started = fmt.Sprintf("Graph 已开工 attempt %d（%s）", res.Attempt, res.EventID)
-				return res.Attempt, nil
+				if res.Reconciled {
+					started = fmt.Sprintf("Graph 已开工 attempt %d（回执没拿到，对账确认）", res.Attempt)
+				}
+				return dispatch.Started{Attempt: res.Attempt, EventID: res.EventID}, nil
 			}
 		}
 		b, err := d.Dispatch(ctx, req)
@@ -986,11 +995,18 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 				return dispatchDoneMsg{ok: false, text: started + "，但派工没成：" + err.Error(),
 					nodeID: node.ID, attempt: startedAttempt, started: true}
 			}
+			if dispatch.IsStartUncertain(err) {
+				// 开工结果不明：不说「被拒」，节点可能已经 running（n044 attempt 2 评审 blocker 2）。
+				return dispatchDoneMsg{ok: false, text: "派工没成：" + err.Error()}
+			}
 			return dispatchDoneMsg{ok: false, text: "派工被拒：" + err.Error()}
 		}
 		prefix := ""
 		if started != "" {
 			prefix = started + "；"
+		}
+		if b.Supersedes != "" {
+			prefix += fmt.Sprintf("注意：绑定存储里这个 attempt 原有一条旧绑定（会话 %s，属于别的账本历史），已挪进留档、没删，它若还在跑请手工处理；", b.Supersedes)
 		}
 		if b.Delivery == binding.DeliveryUnconfirmed {
 			return dispatchDoneMsg{ok: false, text: fmt.Sprintf(

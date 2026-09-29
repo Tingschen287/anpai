@@ -129,9 +129,13 @@ func (f *fakeDispatcher) Dispatch(ctx context.Context, req dispatch.Request) (bi
 	if req.Start != nil {
 		a, err := req.Start(ctx)
 		if err != nil {
-			return binding.Binding{}, fmt.Errorf("Graph 开工失败：%w。刚起的会话 sess-x 没拿到任务说明，已停掉", err)
+			// 同真派工器：标了 NotStarted 的是确定没开工，别的一律是结果不明。
+			if !dispatch.IsNotStarted(err) {
+				return binding.Binding{}, &dispatch.StartUncertainError{Cause: err}
+			}
+			return binding.Binding{}, fmt.Errorf("Graph 开工失败（确定没开工）：%w。刚起的会话 sess-x 没拿到任务说明，已停掉", err)
 		}
-		req.Attempt = a
+		req.Attempt = a.Attempt
 	}
 	if req.MessageFor != nil {
 		req.Message = req.MessageFor(req.Attempt)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # n042 最小可用修复的阳性对照：逐条改坏修复，对应测试必须变红，跑完原样还原。
-# n044 跟着代码改了两处锚点（开工改由派工器在 launch 之后调；任务文本按最终 attempt 生成），对照的意思不变。
+# n044 跟着代码改了三处锚点（开工改由派工器在 launch 之后调；任务文本按最终 attempt 生成；Start 出岔子先对账），对照的意思不变。
 # 改坏后编译不过的不算变红。真实二进制的对照要设 WORKDECK_AGENTDECK_BIN，没设就算没红（不假装跑过）。
 # 用法：在 work/ 下 python3 scripts/mvp-positive-control.py
 import os, subprocess, sys
@@ -55,8 +55,8 @@ cases = [
   "(?m)^[\\\\s•*>`-]*VERDICT:", "(?m)^.*VERDICT:",
   "./internal/ui/", "TestOnlyAStandaloneVerdictLineCounts"),
  ("4 ok 回执配非零退出也信", "internal/projectctl/client.go",
-  "\tif runErr != nil {\n\t\treturn StartResult{}, fmt.Errorf(\"projectctl start 回执说成功",
-  "\tif runErr != nil && false {\n\t\treturn StartResult{}, fmt.Errorf(\"projectctl start 回执说成功",
+  "\tif runErr != nil {\n\t\treturn reconcile(fmt.Errorf(\"projectctl start 回执说成功",
+  "\tif runErr != nil && false {\n\t\treturn reconcile(fmt.Errorf(\"projectctl start 回执说成功",
   "./internal/projectctl/", "TestStartDistrustsOkWithANonZeroExit"),
  ("5 上游成功退出就算送达（不看 submitted）", "internal/agentdeck/send.go",
   "\t\tif jsonErr == nil && rep.Submitted != nil && *rep.Submitted {", "\t\tif true {",

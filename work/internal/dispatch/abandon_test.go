@@ -45,9 +45,9 @@ func (l *seqLauncher) Abandon(ctx context.Context, sessionID string) error {
 func startRequest(l *seqLauncher, attempt int, startErr error) Request {
 	req := goodRequest()
 	req.Attempt = 0
-	req.Start = func(context.Context) (int, error) {
+	req.Start = func(context.Context) (Started, error) {
 		l.seq = append(l.seq, "start")
-		return attempt, startErr
+		return Started{Attempt: attempt, EventID: "evt_test"}, startErr
 	}
 	return req
 }
@@ -98,13 +98,23 @@ func TestLaunchFailureNeverStartsTheGraph(t *testing.T) {
 	}
 }
 
-// start 失败：停掉刚起的空会话，任务不送、不落绑定。
+// start 确定没开工：停掉刚起的空会话，任务不送、不落绑定，说清节点状态不变。
+// 结果不明（没标 NotStarted 的错误）：同样停掉空会话，但不说没开工，请 owner 刷新核对（n044 attempt 2 评审 blocker 2）。
 func TestStartFailureStopsTheFreshSession(t *testing.T) {
 	l := &seqLauncher{res: agentLaunch("s1")}
+	d, _ := newDispatcher(t, l)
+	_, err := d.Dispatch(context.Background(), startRequest(l, 0, NotStarted(errors.New("控制器拒绝开工"))))
+	if err == nil || !strings.Contains(err.Error(), "确定没开工") || !strings.Contains(err.Error(), "已停掉") || IsStartUncertain(err) {
+		t.Fatalf("确定没开工时应当拒绝，并说明会话已停：%v", err)
+	}
+	assertSeq(t, l, "launch", "start", "abandon s1")
+
+	l = &seqLauncher{res: agentLaunch("s1")}
 	d, logPath := newDispatcher(t, l)
-	_, err := d.Dispatch(context.Background(), startRequest(l, 0, errors.New("控制器拒绝开工")))
-	if err == nil || !strings.Contains(err.Error(), "Graph 开工失败") || !strings.Contains(err.Error(), "已停掉") {
-		t.Fatalf("start 失败应当拒绝，并说明会话已停：%v", err)
+	_, err = d.Dispatch(context.Background(), startRequest(l, 0, errors.New("子进程超时")))
+	if err == nil || !IsStartUncertain(err) || !strings.Contains(err.Error(), "可能已经开工") || !strings.Contains(err.Error(), "按 d 补派") ||
+		strings.Contains(err.Error(), "确定没开工") || !strings.Contains(err.Error(), "已停掉") {
+		t.Fatalf("结果不明时不能说没开工，要说可能已开工、怎么核对：%v", err)
 	}
 	assertSeq(t, l, "launch", "start", "abandon s1")
 	if len(d.Store.List()) != 0 {
@@ -120,7 +130,7 @@ func TestStartFailureStopsTheFreshSession(t *testing.T) {
 func TestAbandonFailureIsReported(t *testing.T) {
 	l := &seqLauncher{res: agentLaunch("s1"), abandonErr: errors.New("有人连着")}
 	d, logPath := newDispatcher(t, l)
-	_, err := d.Dispatch(context.Background(), startRequest(l, 0, errors.New("控制器拒绝开工")))
+	_, err := d.Dispatch(context.Background(), startRequest(l, 0, NotStarted(errors.New("控制器拒绝开工"))))
 	if err == nil || !strings.Contains(err.Error(), "也没停掉") || !strings.Contains(err.Error(), "有人连着") {
 		t.Fatalf("停不掉要说清楚：%v", err)
 	}
@@ -167,12 +177,17 @@ func TestStartDispatchRefusesAPrefilledAttempt(t *testing.T) {
 	assertSeq(t, l)
 }
 
-// 绑定存储里已有账本刚分配的 attempt（例如夹具重建后留下的旧绑定）：用新会话替换，旧会话号记进流水；
-// 不停新会话、不留下 running 却绑着旧会话的节点（n044 attempt 1 评审 blocker 3）。
-func TestStaleBindingForTheStartedAttemptIsReplaced(t *testing.T) {
+func staleBinding() binding.Binding {
+	return binding.Binding{NodeID: "n099_demo", Attempt: 2, SessionID: "s-old", Tool: "claude", Model: "claude-opus-5",
+		RouteClass: "frontier", ProjectPath: "/tmp/p", Profile: "_t", DispatchedBy: "earlier", StartEvent: "evt_old_ledger"}
+}
+
+// 绑定存储里已有账本刚分配的 attempt（例如夹具重建前留下的旧绑定）：不覆盖、不删，挪进留档；新会话绑上，
+// 绑定与流水都点名被顶替的旧会话（n044 attempt 2 评审 blocker 1：旧会话可能还在跑，owner 要找得到它）。
+func TestStaleBindingForTheStartedAttemptIsSupersededNotLost(t *testing.T) {
 	l := &seqLauncher{res: agentLaunch("s-new")}
 	d, logPath := newDispatcher(t, l)
-	if err := d.Store.Put(binding.Binding{NodeID: "n099_demo", Attempt: 2, SessionID: "s-old", Tool: "claude", Model: "claude-opus-5", RouteClass: "frontier", ProjectPath: "/tmp/p", Profile: "_t", DispatchedBy: "earlier"}); err != nil {
+	if err := d.Store.Put(staleBinding()); err != nil {
 		t.Fatal(err)
 	}
 	b, err := d.Dispatch(context.Background(), startRequest(l, 2, nil))
@@ -180,12 +195,43 @@ func TestStaleBindingForTheStartedAttemptIsReplaced(t *testing.T) {
 		t.Fatalf("旧绑定不该挡住这次派工：%v", err)
 	}
 	assertSeq(t, l, "launch", "start", "send s-new")
-	if got, _ := d.Store.Get("n099_demo", 2); got.SessionID != "s-new" || b.SessionID != "s-new" {
-		t.Errorf("绑定应当换成新会话：%+v", got)
+	if got, _ := d.Store.Get("n099_demo", 2); got.SessionID != "s-new" || got.StartEvent != "evt_test" || got.Supersedes != "s-old" || b.Supersedes != "s-old" {
+		t.Errorf("绑定应当换成新会话、带账本身份、点名被顶替的旧会话：%+v", got)
+	}
+	sup := d.Store.SupersededList()
+	if len(sup) != 1 || sup[0].SessionID != "s-old" || sup[0].StartEvent != "evt_old_ledger" || sup[0].By != "s-new" {
+		t.Errorf("旧绑定应当原样挪进留档：%+v", sup)
 	}
 	logs := readLog(t, logPath)
 	if last := logs[len(logs)-1]; !last.OK || last.ReplacedSession != "s-old" {
-		t.Errorf("流水应当记下被替换的旧会话：%+v", last)
+		t.Errorf("流水应当记下被顶替的旧会话：%+v", last)
+	}
+}
+
+// 旧绑定在送任务之前就挪走：之后送任务失败，这个键是空的——节点 running、没有绑定，界面的 d 补派走得通，
+// 不会因为旧绑定还占着键而被拒（n044 attempt 2 评审 blocker 1 的后半）。
+func TestStaleBindingIsMovedBeforeSendSoRedispatchStaysPossible(t *testing.T) {
+	l := &seqLauncher{res: agentLaunch("s-new"), sendErr: errors.New("send_failed")}
+	d, _ := newDispatcher(t, l)
+	if err := d.Store.Put(staleBinding()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dispatch(context.Background(), startRequest(l, 2, nil)); err == nil || !strings.Contains(err.Error(), "按 d 补派") {
+		t.Fatalf("送任务失败应当拒绝并说明怎么补派：%v", err)
+	}
+	if _, ok := d.Store.Get("n099_demo", 2); ok {
+		t.Error("旧绑定不该还占着这个键：界面会因此拒绝补派")
+	}
+	if sup := d.Store.SupersededList(); len(sup) != 1 || sup[0].SessionID != "s-old" {
+		t.Errorf("旧绑定应当在留档里：%+v", sup)
+	}
+	// 补派同一个 attempt（不再开工）照常能派。
+	l.sendErr = nil
+	l.res = agentLaunch("s-retry")
+	req := goodRequest()
+	req.Attempt = 2
+	if b, err := d.Dispatch(context.Background(), req); err != nil || b.SessionID != "s-retry" {
+		t.Errorf("补派应当成功：%+v %v", b, err)
 	}
 }
 
@@ -196,9 +242,9 @@ func TestStartTimeoutStillStopsTheFreshSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	req := goodRequest()
 	req.Attempt = 0
-	req.Start = func(context.Context) (int, error) {
+	req.Start = func(context.Context) (Started, error) {
 		cancel() // 模拟整次派工的 context 在 start 期间到期
-		return 0, ctx.Err()
+		return Started{}, ctx.Err()
 	}
 	_, err := d.Dispatch(ctx, req)
 	if err == nil || !strings.Contains(err.Error(), "已停掉") {
@@ -324,7 +370,7 @@ func TestStartDispatchBuildsTheBriefWithTheLedgerAttempt(t *testing.T) {
 	d, _ := newDispatcher(t, fake)
 	req := goodRequest()
 	req.Attempt, req.Message = 0, ""
-	req.Start = func(context.Context) (int, error) { return 5, nil }
+	req.Start = func(context.Context) (Started, error) { return Started{Attempt: 5, EventID: "evt_5"}, nil }
 	req.MessageFor = func(a int) string { return "第 " + string(rune('0'+a)) + " 次 attempt" }
 	b, err := d.Dispatch(context.Background(), req)
 	if err != nil {

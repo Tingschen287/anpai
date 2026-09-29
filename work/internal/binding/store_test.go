@@ -54,11 +54,11 @@ func TestIncompleteBindingIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]func(Binding) Binding{
-		"没有节点号":     func(b Binding) Binding { b.NodeID = ""; return b },
+		"没有节点号":      func(b Binding) Binding { b.NodeID = ""; return b },
 		"attempt 非正": func(b Binding) Binding { b.Attempt = 0; return b },
-		"没有会话号":     func(b Binding) Binding { b.SessionID = ""; return b },
-		"没有模型":      func(b Binding) Binding { b.Model = ""; return b },
-		"没有 route":  func(b Binding) Binding { b.RouteClass = ""; return b },
+		"没有会话号":      func(b Binding) Binding { b.SessionID = ""; return b },
+		"没有模型":       func(b Binding) Binding { b.Model = ""; return b },
+		"没有 route":   func(b Binding) Binding { b.RouteClass = ""; return b },
 	}
 	for name, mutate := range cases {
 		if err := s.Put(mutate(sample())); err == nil {
@@ -126,5 +126,36 @@ func TestBySessionFindsTheBinding(t *testing.T) {
 	}
 	if _, ok := s.BySession("不存在"); ok {
 		t.Error("不存在的会话号不该查到东西")
+	}
+}
+
+// n044 attempt 3：挪进留档的旧绑定经得起重开，且原键腾空。
+func TestSupersededBindingsSurviveReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := Binding{NodeID: "n1", Attempt: 2, SessionID: "s-old", Model: "m", RouteClass: "frontier", StartEvent: "evt_a"}
+	if err := s.Put(old); err != nil {
+		t.Fatal(err)
+	}
+	got, moved, err := s.Supersede("n1", 2, "s-new", "账本重建", time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC))
+	if err != nil || !moved || got.SessionID != "s-old" {
+		t.Fatalf("应当挪出旧绑定：%+v %v %v", got, moved, err)
+	}
+	if _, _, err := s.Supersede("n1", 3, "x", "没有这条", time.Now()); err != nil {
+		t.Errorf("没有这条绑定时不该报错：%v", err)
+	}
+	re, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := re.Get("n1", 2); ok {
+		t.Error("原键应当腾空")
+	}
+	sup := re.SupersededList()
+	if len(sup) != 1 || sup[0].SessionID != "s-old" || sup[0].StartEvent != "evt_a" || sup[0].By != "s-new" || sup[0].Reason != "账本重建" {
+		t.Errorf("留档应当原样留住：%+v", sup)
 	}
 }

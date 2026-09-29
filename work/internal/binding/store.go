@@ -38,6 +38,21 @@ type Binding struct {
 	// Delivery 是任务文本的送达情况（n042）：confirmed，或 unconfirmed——到了会话画面、上游没确认提交，
 	// 要 owner 去看一眼。旧记录没有这个字段，读作空。
 	Delivery string `json:"delivery,omitempty"`
+	// StartEvent 是这次 attempt 在账本里的开工事件号（n044 attempt 3），给绑定一个账本身份：
+	// 键只有「节点 + attempt」，账本重建后号会复用。对账确认的开工、补派、评审绑定没有它。
+	StartEvent string `json:"start_event,omitempty"`
+	// Supersedes 是这条绑定顶替掉的旧绑定会话号（旧记录挪进了留档，见 Superseded）。
+	Supersedes string `json:"supersedes,omitempty"`
+}
+
+// Superseded 是一条被挪出的旧绑定（n044 attempt 3）：账本刚为同一个 attempt 开了工，这条属于别的账本历史。
+// 不删，挪到这里留档：旧会话可能还在上游跑，owner 要找得到它。
+type Superseded struct {
+	Binding
+	SupersededAt time.Time `json:"superseded_at"`
+	// By 是顶替它的新会话号，Reason 是挪出的原因。
+	By     string `json:"by"`
+	Reason string `json:"reason"`
 }
 
 // 任务文本的送达情况。
@@ -68,8 +83,9 @@ func (b Binding) Validate() error {
 
 // file 是落盘格式。带版本号，将来改结构时好辨认。
 type file struct {
-	Version  int       `json:"version"`
-	Bindings []Binding `json:"bindings"`
+	Version    int          `json:"version"`
+	Bindings   []Binding    `json:"bindings"`
+	Superseded []Superseded `json:"superseded,omitempty"`
 }
 
 const currentVersion = 1
@@ -78,8 +94,9 @@ const currentVersion = 1
 type Store struct {
 	path string
 
-	mu    sync.Mutex
-	items map[string]Binding
+	mu         sync.Mutex
+	items      map[string]Binding
+	superseded []Superseded
 }
 
 // Open 打开或新建一个存储。文件不存在时给一个空的，不报错。
@@ -103,7 +120,35 @@ func Open(path string) (*Store, error) {
 	for _, b := range f.Bindings {
 		s.items[b.Key()] = b
 	}
+	s.superseded = f.Superseded
 	return s, nil
+}
+
+// Supersede 把某个 attempt 的现有绑定挪进留档，腾出这个键（n044 attempt 3）。没有这条绑定就什么都不做。
+// 挪出与落盘是一步：落盘失败时内存也不变。
+func (s *Store) Supersede(nodeID string, attempt int, by, reason string, at time.Time) (Binding, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := fmt.Sprintf("%s#%d", nodeID, attempt)
+	old, ok := s.items[key]
+	if !ok {
+		return Binding{}, false, nil
+	}
+	delete(s.items, key)
+	s.superseded = append(s.superseded, Superseded{Binding: old, SupersededAt: at, By: by, Reason: reason})
+	if err := s.flushLocked(); err != nil {
+		s.items[key] = old
+		s.superseded = s.superseded[:len(s.superseded)-1]
+		return Binding{}, false, err
+	}
+	return old, true, nil
+}
+
+// SupersededList 返回留档的旧绑定，按挪出的先后。
+func (s *Store) SupersededList() []Superseded {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Superseded(nil), s.superseded...)
 }
 
 // Put 写入一条绑定并立即落盘。
@@ -157,7 +202,7 @@ func (s *Store) BySession(sessionID string) (Binding, bool) {
 // flushLocked 原子落盘：先写同目录的临时文件，再改名顶上。
 // 调用方必须已经持有锁。
 func (s *Store) flushLocked() error {
-	f := file{Version: currentVersion, Bindings: make([]Binding, 0, len(s.items))}
+	f := file{Version: currentVersion, Bindings: make([]Binding, 0, len(s.items)), Superseded: s.superseded}
 	for _, b := range s.items {
 		f.Bindings = append(f.Bindings, b)
 	}

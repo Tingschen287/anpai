@@ -130,7 +130,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	_, err = d.Dispatch(context.Background(), Request{
 		NodeID: "e2e_bash", RequiredClass: Economy, ModelID: "bash", ProjectPath: project, Title: "n036e2e-bash",
 		Message: "继续", DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
-		Start: func(context.Context) (int, error) { starts++; return 1, nil },
+		Start: func(context.Context) (Started, error) { starts++; return Started{Attempt: 1, EventID: "evt_it"}, nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "已停掉") || !strings.Contains(err.Error(), "Graph 没有开工") {
 		t.Fatalf("伪装的 shell 应当被停掉并说明 Graph 没动：%v", err)
@@ -174,7 +174,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	_, err = d.Dispatch(context.Background(), Request{
 		NodeID: "e2e_customsh", RequiredClass: Economy, ModelID: "custom-shell", ProjectPath: project, Title: "n036e2e-customsh",
 		Message: "继续", DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
-		Start: func(context.Context) (int, error) { starts++; return 1, nil },
+		Start: func(context.Context) (Started, error) { starts++; return Started{Attempt: 1, EventID: "evt_it"}, nil },
 	})
 	if err == nil || !strings.Contains(err.Error(), "shell 解释器") || !strings.Contains(err.Error(), "已停掉") || starts != 0 {
 		t.Fatalf("命令是 bash 的自定义工具应当被认出、停掉、不开工：%v starts=%d", err, starts)
@@ -194,9 +194,11 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	_, err = d.Dispatch(context.Background(), Request{
 		NodeID: "e2e_startfail", RequiredClass: Economy, ModelID: "agent", ProjectPath: project, Title: "n036e2e-startfail",
 		Message: "继续", DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
-		Start: func(context.Context) (int, error) { return 0, fmt.Errorf("控制器拒绝开工") },
+		Start: func(context.Context) (Started, error) {
+			return Started{}, NotStarted(fmt.Errorf("控制器拒绝开工"))
+		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "Graph 开工失败") || !strings.Contains(err.Error(), "已停掉") {
+	if err == nil || !strings.Contains(err.Error(), "确定没开工") || !strings.Contains(err.Error(), "已停掉") {
 		t.Fatalf("开工失败应当停掉刚起的会话：%v", err)
 	}
 	sfLog := readLog(t, logPath)
@@ -220,7 +222,10 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 		ModelID: "agent", ProjectPath: project, Title: "n036e2e",
 		MessageFor:   func(a int) string { return fmt.Sprintf("继续第%d次", a) },
 		DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
-		Start: func(context.Context) (int, error) { order = append(order, "start"); return 1, nil },
+		Start: func(context.Context) (Started, error) {
+			order = append(order, "start")
+			return Started{Attempt: 1, EventID: "evt_it"}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("真实派工失败：%v", err)
