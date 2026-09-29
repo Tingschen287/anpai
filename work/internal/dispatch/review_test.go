@@ -248,7 +248,7 @@ func TestReviewWithoutABriefIsRefused(t *testing.T) {
 	}
 }
 
-// brief 送不进去就不算派出：不落绑定，并明确报告那个半成品会话。
+// brief 送不进去就不算派出：不落绑定，停掉那个没拿到 brief 的评审会话，并在拒绝信息里说清楚（n044）。
 func TestBriefDeliveryFailureLeavesNoBinding(t *testing.T) {
 	fake := &fakeLauncher{}
 	d, _ := newDispatcher(t, fake)
@@ -260,8 +260,11 @@ func TestBriefDeliveryFailureLeavesNoBinding(t *testing.T) {
 	if err == nil {
 		t.Fatal("brief 送不进去必须报错")
 	}
-	if !strings.Contains(err.Error(), "半成品会话") {
+	if !strings.Contains(err.Error(), "没拿到任务说明，已停掉") {
 		t.Errorf("没说清出了什么事：%v", err)
+	}
+	if len(fake.abandoned) != 1 || fake.abandoned[0] != "review-sess" {
+		t.Errorf("应当只停掉刚起的评审会话：%v", fake.abandoned)
 	}
 	if !strings.Contains(err.Error(), "review-sess") {
 		t.Errorf("拒绝信息里没给出那个会话号，人没法收拾：%v", err)

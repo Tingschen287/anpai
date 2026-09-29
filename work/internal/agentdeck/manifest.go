@@ -1,6 +1,9 @@
 package agentdeck
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // 本文件是 Work Deck 对 upstream agent-deck 依赖的机器可读清单：子命令白名单在 client.go，
 // 这里列 launch 的参数、HTTP 端点、部分输出字段、环境变量、各命令的副作用与 tmux 约定。
@@ -52,6 +55,70 @@ func CheckToolModel(tool string, modelNotApplicable bool) error {
 		return fmt.Errorf("工具 %s 有模型可选，却声明了 model_not_applicable：那等于让上游替你挑默认模型，不派。去掉这个声明并写明模型 id", tool)
 	}
 	return nil
+}
+
+// ToolsWithoutTaskText 是不是 agent 的上游工具：任务说明送进去，会被当成命令逐行执行（n043 复审新问题 1，
+// 夹具上实测满屏 command not found；说明里若有能执行的行，就真的执行了）。
+//
+// 出处：上游对认不出的命令一律按 shell 处理（internal/session/toolregistry.go:415 MatchTool），
+// launch --json 回执的 tool 字段就是上游认定的结果（cmd/agent-deck/launch_cmd.go:766）。
+// 所以只核配置里的工具名不够：配成 bash 照样起一个 shell。派工器在 launch 之后再按回执核一次（CheckLaunchedTakesTaskText）。
+var ToolsWithoutTaskText = []string{"shell"}
+
+// CheckTakesTaskText 核对配置里的工具能不能接任务说明。launch 之前调，不行就不起会话。
+func CheckTakesTaskText(tool string) error {
+	if contains(ToolsWithoutTaskText, tool) {
+		return fmt.Errorf("工具 %s 不是 agent：它会把任务说明当命令逐行执行（n043 复审实测），不派。"+
+			"Graph 任务要派给 claude、codex 这类 agent，或上游配置里声明的自定义 agent 工具", tool)
+	}
+	return nil
+}
+
+// CheckLaunchedTakesTaskText 按 launch 回执核对上游实际起的是什么工具。回执没写工具，同样不信。
+func CheckLaunchedTakesTaskText(res LaunchResult) error {
+	if strings.TrimSpace(res.Tool) == "" {
+		return fmt.Errorf("上游 launch 回执没写会话是哪种工具，确认不了它是 agent，任务说明不送")
+	}
+	if contains(ToolsWithoutTaskText, res.Tool) {
+		return fmt.Errorf("上游把命令 %q 起成了 %s 会话：它不是 agent，会把任务说明当命令执行，任务说明不送", res.Command, res.Tool)
+	}
+	return nil
+}
+
+// CodexTrust 说明上游 launch 某个工具时会不会改写 owner 的 Codex 全局配置（n043 owner 验收补充发现）。
+type CodexTrust int
+
+const (
+	// CodexTrustNo：上游内置、与 codex 不兼容的工具，不写。
+	CodexTrustNo CodexTrust = iota
+	// CodexTrustYes：一定会写。
+	CodexTrustYes
+	// CodexTrustMaybe：自定义工具。上游配置若声明它与 codex 兼容、或命令本身是 codex，就会写；Work Deck 看不到上游配置。
+	CodexTrustMaybe
+)
+
+// CodexTrustPath 是上游写 trust 的文件（CODEX_HOME 未设时的默认位置）。
+const CodexTrustPath = "~/.codex/config.toml"
+
+// BuiltinTools 是上游内置的全部工具（internal/session/builtins.go:56-76）。升级上游时要重新核对。
+var BuiltinTools = []string{"claude", "opencode", "gemini", "codex", "pi", "copilot", "crush", "cursor",
+	"hermes", "deepseek", "aider", "shell"}
+
+// CheckCodexTrust 判断 launch 这个工具会不会把工作目录写进 Codex 的 trust 列表。
+//
+// 出处：上游 launch Codex 兼容工具前调 preAcceptCodexWorkspaceTrust（internal/session/codex_trust.go:119-137），
+// 判据是 IsCodexCompatible（internal/session/userconfig.go:3542：工具名是 codex，或自定义工具声明 compatible_with=codex、
+// 命令本身是 codex）。写法是把整份 config.toml 解码再重新编码写回（codex_trust.go:62-104），原文件的注释与排版不保留。
+// 写失败时上游只记一条 warning，照样 launch。
+func CheckCodexTrust(tool string) CodexTrust {
+	switch {
+	case tool == "codex":
+		return CodexTrustYes
+	case contains(BuiltinTools, tool):
+		return CodexTrustNo
+	default:
+		return CodexTrustMaybe
+	}
 }
 
 func contains(list []string, s string) bool {
@@ -509,6 +576,42 @@ var SideEffects = map[string]SideEffect{
 				Within: "handleSessionSend",
 			}},
 		}},
+	},
+	// session stop 是 n044 加的：只停 Work Deck 本次刚起、还没收到任务说明的会话（dispatch 包的 abandon）。
+	"session stop": {
+		Claims: []Claim{
+			{
+				// 杀掉会话的 tmux 会话；上游存储里的会话记录留着，状态变成 stopped。
+				// 入口是 handleSessionStop 里的 inst.Kill()（cmd/agent-deck/session_cmd.go:402），真正动手的是下面这一行。
+				Effect: Effect{Kind: EffectCalls, Target: "i.tmuxSession.Kill"},
+				Evidence: []Evidence{{
+					Path:   "internal/session/instance.go",
+					Line:   8397,
+					Anchor: "i.tmuxSession.Kill()",
+					Within: "killInternal",
+				}},
+			},
+			{
+				// 同组若设了并发上限且有排队的会话，停一个会顺带起一个排队的。
+				Effect: Effect{Kind: EffectCalls, Target: "drainGroupQueue"},
+				Evidence: []Evidence{{
+					Path:   "cmd/agent-deck/session_cmd.go",
+					Line:   411,
+					Anchor: "drainGroupQueue(inst.GroupPath, instances, groups)",
+					Within: "handleSessionStop",
+				}},
+			},
+			{
+				// 停完把会话状态写回上游存储。
+				Effect: Effect{Kind: EffectCalls, Target: "saveSessionData"},
+				Evidence: []Evidence{{
+					Path:   "cmd/agent-deck/session_cmd.go",
+					Line:   414,
+					Anchor: "saveSessionData(storage, instances, groups)",
+					Within: "handleSessionStop",
+				}},
+			},
+		},
 	},
 	// inbox 的两条在上游 main 里早于 profile 加载就分派出去了（cmd/agent-deck/main.go:417
 	// 早于 :518 的 NewStorageWithProfile），所以 SharedStorageInit 对它们不成立，各自写清楚。

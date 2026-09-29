@@ -54,6 +54,9 @@ type Screen struct {
 	// AskingReason 为真：挑中的不是推荐，正在写理由；Reason 是已输入的内容。
 	AskingReason bool
 	Reason       string
+	// AskingTrust 为真：派出前要 owner 确认上游会改他的 Codex 全局配置（n044）；TrustWarning 是那段说明。
+	AskingTrust  bool
+	TrustWarning string
 	// 上一次动作的结果，成败都显示。
 	Notice   string
 	NoticeOK bool
@@ -255,7 +258,12 @@ func renderWith(s projectctl.Snapshot, width int, sc Screen) string {
 			w("  %s", styleDim.Render("能力要求："+capsRequirement(r)))
 			w("  %s", styleDim.Render("额度依据："+r.QuotaBasis))
 		}
-		if sc.AskingReason && sc.Pick >= 0 && sc.Pick < len(sc.Candidates) {
+		if sc.AskingTrust {
+			for _, ln := range wrapText(sc.TrustWarning, width-4) {
+				w("  %s", styleAlert.Render(ln))
+			}
+			w("  %s", styleDim.Render("按 y 确认派出，Esc 回去重挑"))
+		} else if sc.AskingReason && sc.Pick >= 0 && sc.Pick < len(sc.Candidates) {
 			id := sc.Candidates[sc.Pick].ID
 			ask := "这次没有推荐，写一句为什么选 " + id + "（会记进路由审计）："
 			if r := sc.Routing; r != nil && r.Recommended != "" {

@@ -25,6 +25,11 @@ type fakeLauncher struct {
 	sent []sentMessage
 	// sendErr 让投递失败。
 	sendErr error
+	// abandoned 记下派工器停掉的会话（n044）；abandonErr 让停会话失败。
+	abandoned  []string
+	abandonErr error
+	// keepResTool 为真时回执原样返回；否则回执没写工具就照上游的做法填上请求的工具。
+	keepResTool bool
 }
 
 // sentMessage 是一次投递。测试靠它确认评审会话真的收到了 brief。
@@ -38,7 +43,16 @@ func (f *fakeLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) 
 	if f.err != nil {
 		return agentdeck.LaunchResult{}, f.err
 	}
-	return f.res, nil
+	res := f.res
+	if res.Tool == "" && !f.keepResTool {
+		res.Tool = req.Tool
+	}
+	return res, nil
+}
+
+func (f *fakeLauncher) Abandon(ctx context.Context, sessionID string) error {
+	f.abandoned = append(f.abandoned, sessionID)
+	return f.abandonErr
 }
 
 func (f *fakeLauncher) SendMessage(ctx context.Context, sessionID, message string) error {
@@ -349,8 +363,9 @@ func TestDispatchWithoutTaskTextIsRefused(t *testing.T) {
 }
 
 // n042：配置声明没有模型的条目，派工时不给上游传 --model；绑定仍记配置里的 id。
+// n044 起 shell 不接任务，这里换成一个没有模型可选的自定义 agent 工具。
 func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
-	tbl, err := NewRouteTable([]Model{{ID: "shell-fixture", Tool: "shell", Class: Frontier, NoModel: true}})
+	tbl, err := NewRouteTable([]Model{{ID: "custom-agent", Tool: "n044agent", Class: Frontier, NoModel: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +373,7 @@ func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
 	d, _ := newDispatcher(t, fake)
 	d.Table = tbl
 	req := goodRequest()
-	req.ModelID = "shell-fixture"
+	req.ModelID = "custom-agent"
 	b, err := d.Dispatch(context.Background(), req)
 	if err != nil {
 		t.Fatalf("没有模型的工具应当能派：%v", err)
@@ -369,7 +384,7 @@ func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
 	if err := fake.calls[0].Validate(); err != nil {
 		t.Errorf("派工器造出的 launch 请求应当能过 adapter 校验：%v", err)
 	}
-	if b.Model != "shell-fixture" {
+	if b.Model != "custom-agent" {
 		t.Errorf("绑定应记配置 id：%q", b.Model)
 	}
 }

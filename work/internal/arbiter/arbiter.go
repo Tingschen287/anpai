@@ -1,7 +1,8 @@
 // Package arbiter 把 adapter 的投递接到写入权记账上。
 //
 // adapter 的 SendMessage / DeliverAnswer 要一张 lease.Permit，本包负责去记账那里拿：
-//   - Deck 给派工器用：launch 成功就为新会话登记 Work Deck 写入权；投递 brief 用「自动」许可。
+//   - Deck 给派工器用：launch 成功就为新会话登记 Work Deck 写入权；投递 brief 用「自动」许可；
+//     刚起却没拿到任务说明的会话，用同一张许可停掉（n044）。
 //   - Deliverer 给决策队列用：owner 按 y 确认的回答用「手动」许可。
 //
 // 本包不自己判断能不能投，判断全在 lease 里；本包只决定用哪一种许可。
@@ -57,27 +58,53 @@ func (d Deck) SendMessage(ctx context.Context, sessionID, message string) error 
 	if d.Leases == nil {
 		return fmt.Errorf("没有写入权记账，不投递")
 	}
+	p, err := d.automaticPermit(ctx, sessionID, "不自动投递")
+	if err != nil {
+		return err
+	}
+	return d.Client.SendMessage(ctx, p, sessionID, message)
+}
+
+// Abandon 停掉派工器刚起、却没拿到任务说明的会话（n044）。
+//
+// 和自动投递同一道闸：要 Work Deck 持有写入权，还要查过此刻没人连着。有人连着就不停，
+// 并按 owner 接管登记——那个会话已经有人在用了，停掉它等于替人动手。
+// 停掉之后写入权记账里那一条照旧留着：会话已经不在了，留着的登记不会再放行任何投递。
+func (d Deck) Abandon(ctx context.Context, sessionID string) error {
+	if d.Leases == nil {
+		return fmt.Errorf("没有写入权记账，不停会话")
+	}
+	p, err := d.automaticPermit(ctx, sessionID, "不停会话")
+	if err != nil {
+		return err
+	}
+	return d.Client.StopSession(ctx, p, sessionID)
+}
+
+// automaticPermit 是自动投递与停会话共用的闸：签「自动」许可，再探测有没有人不经 Work Deck 连着。
+// verb 是拒绝时的开头（「不自动投递」「不停会话」）。
+func (d Deck) automaticPermit(ctx context.Context, sessionID, verb string) (lease.Permit, error) {
 	p, err := d.Leases.Automatic(sessionID)
 	if err != nil {
-		return fmt.Errorf("不自动投递：%w", err)
+		return lease.Permit{}, fmt.Errorf("%s：%w", verb, err)
 	}
 	// 记账只知道经 Work Deck 的接管。别人直接进入会话，tmux 上会多一个客户端：
-	// 查到有人连着就按 owner 接管处理（登记，此后要 owner 确认交还才恢复）；查不了也不投。
+	// 查到有人连着就按 owner 接管处理（登记，此后要 owner 确认交还才恢复）；查不了也不动。
 	if d.Clients == nil {
-		return fmt.Errorf("不自动投递：没有接入探测，确认不了此刻没人在会话 %s 里", sessionID)
+		return lease.Permit{}, fmt.Errorf("%s：没有接入探测，确认不了此刻没人在会话 %s 里", verb, sessionID)
 	}
 	n, err := d.Clients.AttachedClients(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("不自动投递：查不了有没有人连着会话 %s（%v）", sessionID, err)
+		return lease.Permit{}, fmt.Errorf("%s：查不了有没有人连着会话 %s（%v）", verb, sessionID, err)
 	}
 	if n > 0 {
 		reason := fmt.Sprintf("检测到 %d 个 tmux 客户端连着会话（不经 Work Deck 的接管）", n)
 		if terr := d.Leases.ExternalTakeover(sessionID, n); terr != nil {
-			return fmt.Errorf("不自动投递：%s；登记接管也失败：%v", reason, terr)
+			return lease.Permit{}, fmt.Errorf("%s：%s；登记接管也失败：%v", verb, reason, terr)
 		}
-		return fmt.Errorf("不自动投递：%s，已按 owner 接管登记，要你确认交还后才恢复", reason)
+		return lease.Permit{}, fmt.Errorf("%s：%s，已按 owner 接管登记，要你确认交还后才恢复", verb, reason)
 	}
-	return d.Client.SendMessage(ctx, p, sessionID, message)
+	return p, nil
 }
 
 // Deliverer 实现 queue.Deliverer。

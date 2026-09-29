@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -66,6 +67,10 @@ type Model struct {
 	// askingReason 为真：挑中的不是推荐（或这次没有推荐），正在等你写理由。reason 是已输入的内容。
 	askingReason bool
 	reason       string
+	// askingTrust 为真：挑中的工具在 launch 前会改 owner 的 Codex 全局配置，正在等 owner 按 y 确认（n044）。
+	// trustWarning 是摆给他看的那段话。
+	askingTrust  bool
+	trustWarning string
 	// 上一次动作的结果，直接显示给人看，成功失败都显示。
 	notice   string
 	noticeOK bool
@@ -381,6 +386,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch m.mode {
 	case ModePickModel:
+		if m.askingTrust {
+			return m.onTrustKey(msg)
+		}
 		if m.askingReason {
 			return m.onReasonKey(msg)
 		}
@@ -406,7 +414,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.askingReason, m.reason = true, ""
 				return m, nil
 			}
-			return m.confirmDispatch()
+			return m.proceedDispatch()
 		}
 		return m, nil
 	}
@@ -806,7 +814,7 @@ func (m Model) onReasonKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notice, m.noticeOK = "理由不能为空：写一句为什么选它，或按 Esc 回去重挑", false
 			return m, nil
 		}
-		return m.confirmDispatch()
+		return m.proceedDispatch()
 	case tea.KeyBackspace:
 		if r := []rune(m.reason); len(r) > 0 {
 			m.reason = string(r[:len(r)-1])
@@ -819,6 +827,51 @@ func (m Model) onReasonKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.reason += string(msg.Runes)
 		return m, nil
 	}
+	return m, nil
+}
+
+// proceedDispatch 是挑好模型（要理由的已写完理由）之后的最后一关：挑中的工具在 launch 前会改 owner 的
+// Codex 全局配置时，先把这件事摆出来，等 owner 按 y（n043 owner 验收补充发现）。其余直接派。
+func (m Model) proceedDispatch() (tea.Model, tea.Cmd) {
+	if m.pick >= 0 && m.pick < len(m.candidates) {
+		if w := codexTrustWarning(m.candidates[m.pick], m.snap.ProjectRoot); w != "" {
+			m.askingReason = false
+			m.askingTrust, m.trustWarning = true, w
+			return m, nil
+		}
+	}
+	return m.confirmDispatch()
+}
+
+// codexTrustWarning 是派这个模型之前要 owner 知道的那件事；上游不会改 Codex 配置时为空。
+func codexTrustWarning(c dispatch.Model, projectRoot string) string {
+	switch agentdeck.CheckCodexTrust(c.Tool) {
+	case agentdeck.CodexTrustYes:
+		return fmt.Sprintf("upstream agent-deck 启动 %s 前，会把工作目录 %s 写进 %s 的 trust 列表。"+
+			"这改的是你的 Codex 全局配置，而且上游是把整份文件解码再重新写回，原文件的注释与排版不保留。",
+			c.Tool, projectRoot, agentdeck.CodexTrustPath)
+	case agentdeck.CodexTrustMaybe:
+		return fmt.Sprintf("工具 %s 是自定义工具：上游配置若声明它与 codex 兼容（或它的命令就是 codex），"+
+			"launch 前会把工作目录 %s 写进 %s 的 trust 列表，并整份重写那个文件。Work Deck 看不到上游配置，判断不了。",
+			c.Tool, projectRoot, agentdeck.CodexTrustPath)
+	}
+	return ""
+}
+
+// onTrustKey 是确认 Codex trust 写入那一步：y 派出，Esc / n 回去重挑，别的键不派。
+func (m Model) onTrustKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "y":
+		m.askingTrust, m.trustWarning = false, ""
+		return m.confirmDispatch()
+	case "esc", "n":
+		m.askingTrust, m.trustWarning, m.reason = false, "", ""
+		m.notice, m.noticeOK = "没派：回到挑模型", false
+		return m, nil
+	}
+	m.notice, m.noticeOK = "按 y 确认派出，或按 Esc 回去重挑", false
 	return m, nil
 }
 
@@ -839,7 +892,7 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	m.askingReason, m.reason = false, ""
 	attempt, hasAttempt := node.Attempt.Get()
 	state, _ := node.State.Get()
-	// 开工与否：ready / rework 由 projectctl start 给 attempt；其余状态用账本已有的 attempt。
+	// 开工与否：ready / rework 由 projectctl start 给 attempt（派工器在会话起来之后调，n044）；其余状态用账本已有的 attempt。
 	// 不知道 attempt 就不派——不再默认成 1（n040 终审断点 4：恢复过的节点会与账本错配）。
 	needStart := !m.pickingReviewer && (state == projectctl.StateReady || state == projectctl.StateRework)
 	if !needStart && !hasAttempt {
@@ -898,16 +951,6 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		started, startedAttempt := "", 0
-		if needStart {
-			res, err := starter.Start(ctx, start)
-			if err != nil {
-				return dispatchDoneMsg{ok: false, text: "Graph 开工失败，不派：" + err.Error()}
-			}
-			attempt = res.Attempt
-			startedAttempt = res.Attempt
-			started = fmt.Sprintf("Graph 已开工 attempt %d（%s）", res.Attempt, res.EventID)
-		}
 		req := dispatch.Request{
 			NodeID:        node.ID,
 			Attempt:       attempt,
@@ -916,16 +959,31 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			ProjectPath:   m.snap.ProjectRoot,
 			Title:         node.ID,
 			// 任务文本：没有它，派出去的就是个空会话（n039 attempt 3 评审）。登记写入权后经仲裁投递。
-			Message:      executorBrief(node, attempt),
+			// 按最终的 attempt 生成：开工派单要等 start 之后才知道号（n044）。
+			MessageFor:   func(a int) string { return executorBrief(node, a) },
 			DispatchedBy: "work-deck",
 			ChosenBy:     chosenBy,
 			ChoiceReason: reason,
 		}
+		// 开工交给派工器在会话起来之后调（n044，n043 复审新问题 2）：launch 失败时 Graph 一点不动。
+		// 这里记下开工拿到的号：派工后面几步失败时，节点已经 running，界面要照实显示。
+		started, startedAttempt := "", 0
+		if needStart {
+			req.Attempt = 0
+			req.Start = func(ctx context.Context) (int, error) {
+				res, err := starter.Start(ctx, start)
+				if err != nil {
+					return 0, err
+				}
+				startedAttempt = res.Attempt
+				started = fmt.Sprintf("Graph 已开工 attempt %d（%s）", res.Attempt, res.EventID)
+				return res.Attempt, nil
+			}
+		}
 		b, err := d.Dispatch(ctx, req)
 		if err != nil {
-			if started != "" {
-				return dispatchDoneMsg{ok: false, text: started + "，但派工没成：" + err.Error() +
-					"。节点现在是 running，修好后选中它按 d 补派同一个 attempt",
+			if startedAttempt > 0 {
+				return dispatchDoneMsg{ok: false, text: started + "，但派工没成：" + err.Error(),
 					nodeID: node.ID, attempt: startedAttempt, started: true}
 			}
 			return dispatchDoneMsg{ok: false, text: "派工被拒：" + err.Error()}
@@ -958,6 +1016,8 @@ func (m Model) View() string {
 		PickingReviewer: m.pickingReviewer,
 		AskingReason:    m.askingReason,
 		Reason:          m.reason,
+		AskingTrust:     m.askingTrust,
+		TrustWarning:    m.trustWarning,
 		Candidates:      m.candidates,
 		Routing:         m.routing,
 		Pick:            m.pick,

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/binding"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
@@ -25,15 +24,22 @@ import (
 //
 // 它只记下被要求启动什么，并按预设返回会话号；除此之外什么都不做。
 type recordingLauncher struct {
-	next    string
-	calls   []agentdeck.LaunchRequest
-	sent    [][2]string
-	sendErr error
+	next      string
+	calls     []agentdeck.LaunchRequest
+	sent      [][2]string
+	sendErr   error
+	abandoned []string
 }
 
 func (l *recordingLauncher) Launch(ctx context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
 	l.calls = append(l.calls, req)
-	return agentdeck.LaunchResult{SessionID: l.next, Success: true}, nil
+	return agentdeck.LaunchResult{SessionID: l.next, Success: true, Tool: req.Tool}, nil
+}
+
+// Abandon 记下被停掉的会话（n044）。
+func (l *recordingLauncher) Abandon(ctx context.Context, sessionID string) error {
+	l.abandoned = append(l.abandoned, sessionID)
+	return nil
 }
 
 // SendMessage 记下 brief 投给了谁、投了什么。

@@ -64,7 +64,7 @@ func reviewBrief(node projectctl.Node, attempt int) string {
 	b.WriteString("- 不要修改任何代码或交付物，你只评审。\n")
 	fmt.Fprintf(&b, "- 评审报告写到项目根下的 %s（只写这一个文件），owner 记账时要引用它。\n", reviewReportPath(node.ID, attempt))
 	b.WriteString("- 不要读取或复制任何凭据正文。\n")
-	b.WriteString("- 结论只能是 accept 或 rework 之一，写在最后一行，")
+	b.WriteString("- 结论只能是 accept 或 rework 之一，写在报告文件的最后一行（owner 按报告记账，不看会话画面），")
 	// 格式说明里故意不出现「VERDICT: 结论词」的原样：brief 本身会留在评审会话画面上，
 	// 写出原样示例，按 v 时就会被当成结论（n042 attempt 1 评审 blocker 2）。
 	b.WriteString("格式：这一行只写三样东西——大写的 VERDICT、紧跟一个英文冒号和一个空格、再写 accept 或 rework，前后不加别的字。\n")

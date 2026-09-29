@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 写入仲裁与能力路由的阳性对照（n039）：逐条改坏实现，对应测试必须变红，跑完原样还原。
 # 改坏后编译不过的不算变红。用法：python3 scripts/arbitration-positive-control.py（在 work/ 下）
+# n044 跟着代码改了三处锚点（任务文本按最终 attempt 生成：MessageFor / messageFor），改坏的意思不变。
 import os, subprocess, sys
 W = os.environ.get('W') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env = dict(os.environ, PATH=os.path.expanduser('~/.local/go/bin') + ':' + os.environ['PATH'])
@@ -99,10 +100,10 @@ cases = [
   "\tif req.NoWait {", "\targs = append(args, \"-m\", req.Title)\n\tif req.NoWait {",
   "./internal/dispatch/", "TestTaskTextNeverLeavesWhenThisGrantFails"),
  ("界面派执行者不带 brief", "internal/ui/model.go",
-  "\t\t\tMessage:      executorBrief(node, attempt),\n", "",
+  "\t\t\tMessageFor:   func(a int) string { return executorBrief(node, a) },\n", "",
   "./internal/ui/", "TestUIExecutorDispatchDeliversTheBriefToUpstream"),
  ("派工器接受空任务文本", "internal/dispatch/dispatcher.go",
-  "\tif strings.TrimSpace(req.Message) == \"\" {", "\tif strings.TrimSpace(req.Message) == \"\" && false {",
+  "\tif strings.TrimSpace(req.messageFor(req.Attempt)) == \"\" {", "\tif strings.TrimSpace(req.messageFor(req.Attempt)) == \"\" && false {",
   "./internal/dispatch/", "TestDispatchWithoutTaskTextIsRefused"),
  ("评审入口放过纯空白 brief", "internal/dispatch/review.go",
   "\tcase strings.TrimSpace(req.Message) == \"\":", "\tcase strings.TrimSpace(req.Message) == \"\" && req.Message == \"\":",
@@ -111,7 +112,7 @@ cases = [
   "\tif strings.TrimSpace(message) == \"\" {", "\tif message == \"\" {",
   "./internal/agentdeck/", "TestSendMessageRefusesBlankText"),
  ("任务文本不经仲裁直接投", "internal/dispatch/dispatcher.go",
-  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {",
+  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.messageFor(attempt)); agentdeck.IsDeliveryUnconfirmed(err) {",
   "\tif err := error(nil); agentdeck.IsDeliveryUnconfirmed(err) {",
   "./internal/dispatch/", "TestTaskTextGoesThroughTheArbiterAfterTheGrant"),
  ("能力按工具名推断", "internal/routing/routing.go",

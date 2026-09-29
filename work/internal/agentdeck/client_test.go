@@ -136,7 +136,7 @@ func TestManifestSubcommandsMatchAllowList(t *testing.T) {
 	// 让「多放行一条上游命令」成为一个必须被看见的改动，而不是顺手加上去的。
 	if !reflect.DeepEqual(Subcommands, []string{
 		"launch", "web", "list", "session attach", "session output", "session send",
-		"inbox export", "inbox writer-status",
+		"session stop", "inbox export", "inbox writer-status",
 	}) {
 		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
 	}
@@ -324,8 +324,8 @@ func TestDangerousSessionSubcommandsAreRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// session stop 自 n044 起在白名单里（只停派工器刚起、没拿到任务说明的会话，且要许可），不在这张表里了。
 	dangerous := [][]string{
-		{"session", "stop", "x"},
 		{"session", "remove", "x"},
 		{"session", "restart", "x"},
 		{"session", "cleanup"},
@@ -372,7 +372,7 @@ func TestInboxOnlyAllowsNonConsumingReads(t *testing.T) {
 	}
 }
 
-// 允许的那两条要真的能过白名单这一关。
+// 允许的那几条要真的能过白名单这一关。
 func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
 	if !isAllowedSubcommand("session", "attach") {
 		t.Error("session attach 应当被允许")
@@ -383,8 +383,13 @@ func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
 	if isAllowedSubcommand("session") {
 		t.Error("光一个 session 不该被允许：那会把 stop/remove 一起放行")
 	}
-	if isAllowedSubcommand("session", "stop") {
-		t.Error("session stop 不该被允许")
+	if !isAllowedSubcommand("session", "stop") {
+		t.Error("session stop 应当被允许（n044）")
+	}
+	for _, sub := range []string{"remove", "restart", "archive", "kill"} {
+		if isAllowedSubcommand("session", sub) {
+			t.Errorf("session %s 不该被允许：加 stop 不等于放开 session 底下别的命令", sub)
+		}
 	}
 }
 

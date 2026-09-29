@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # n042 最小可用修复的阳性对照：逐条改坏修复，对应测试必须变红，跑完原样还原。
+# n044 跟着代码改了两处锚点（开工改由派工器在 launch 之后调；任务文本按最终 attempt 生成），对照的意思不变。
 # 改坏后编译不过的不算变红。真实二进制的对照要设 WORKDECK_AGENTDECK_BIN，没设就算没红（不假装跑过）。
 # 用法：在 work/ 下 python3 scripts/mvp-positive-control.py
 import os, subprocess, sys
@@ -23,8 +24,8 @@ cases = [
   "\treturn CheckToolModel(r.Tool, r.ModelNotApplicable)", "\treturn nil",
   "./internal/agentdeck/", "TestToolModelContractIsCheckedBeforeLaunch"),
  ("4 不开工，照旧默认 attempt", "internal/ui/model.go",
-  "\t\tif needStart {\n\t\t\tres, err := starter.Start(ctx, start)",
-  "\t\tif needStart && false {\n\t\t\tres, err := starter.Start(ctx, start)",
+  "\t\tif needStart {\n\t\t\treq.Attempt = 0\n\t\t\treq.Start = func",
+  "\t\tif needStart && false {\n\t\t\treq.Attempt = 0\n\t\t\treq.Start = func",
   "./internal/ui/", "TestReadyNodeStartsInGraphAndUsesTheLedgerAttempt"),
  ("4 未知 attempt 也派", "internal/ui/model.go",
   "\tif !needStart && !hasAttempt {", "\tif false && !needStart && !hasAttempt {",
@@ -36,8 +37,8 @@ cases = [
   "rep.Delivery == DeliveryTyped {", "rep.Delivery == \"never\" {",
   "./internal/agentdeck/", "TestSendMessageReportsUnconfirmedDeliverySeparately"),
  ("5 送达未确认当失败丢掉", "internal/dispatch/dispatcher.go",
-  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {",
-  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); false && agentdeck.IsDeliveryUnconfirmed(err) {",
+  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.messageFor(attempt)); agentdeck.IsDeliveryUnconfirmed(err) {",
+  "\tif err := d.Deck.SendMessage(ctx, res.SessionID, req.messageFor(attempt)); false && agentdeck.IsDeliveryUnconfirmed(err) {",
   "./internal/dispatch/", "TestUnconfirmedDeliveryStillBindsTheSession"),
  ("5 界面把送达未确认说成已送达", "internal/ui/model.go",
   "\t\tif b.Delivery == binding.DeliveryUnconfirmed {\n\t\t\treturn dispatchDoneMsg{ok: false, text: fmt.Sprintf(\n\t\t\t\t\"%s已派",

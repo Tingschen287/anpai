@@ -62,8 +62,13 @@ import (
 //
 // inbox 只放两条非消费式读取（n038）：export 读全机记录不删任何东西，writer-status 问
 // notify-daemon 在不在。drain 与裸 `inbox <id>` 都会消费记录，和 conductor 抢，一律拒绝。
+//
+// `session stop` 是 n044 加的，只有一个用处：派工器刚起的会话没拿到任务说明（Graph 开工失败、投递失败、
+// 上游起成了 shell）时把它停掉，不留一个没人认领的会话。它要一张写入权许可（StopSession），
+// 所以 owner 接管着、或探测到有人连着的会话一律不停。remove / restart / archive / fork / set 仍不在清单里。
+// 上游 stop 会杀掉该会话的 tmux 会话；本包自己仍不拼任何 tmux kill 命令（TestAdapterMayAttachButNeverSendsKeysOrKills）。
 var Subcommands = []string{"launch", "web", "list", "session attach", "session output", "session send",
-	"inbox export", "inbox writer-status"}
+	"session stop", "inbox export", "inbox writer-status"}
 
 // isAllowedSubcommand 按整条命令路径匹配。
 //

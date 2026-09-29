@@ -47,7 +47,7 @@ func TestReadyNodeStartsInGraphAndUsesTheLedgerAttempt(t *testing.T) {
 	}
 }
 
-// 开工失败就不派；开工成功、派工失败要说清楚节点已经 running、可以补派。
+// 开工失败就不派；上游起不来时 Graph 不动；开工成功、之后失败要说清楚节点已经 running、可以补派（n044）。
 func TestStartFailureStopsDispatchAndDispatchFailureSaysHowToRecover(t *testing.T) {
 	fd := frontierFD()
 	m := modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd)
@@ -60,11 +60,24 @@ func TestStartFailureStopsDispatchAndDispatchFailureSaysHowToRecover(t *testing.
 
 	fd2 := frontierFD()
 	fd2.err = errors.New("上游挂了")
+	st2 := &fakeStarter{attempt: 2}
 	m = modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd2)
+	m = m.WithStarter(st2)
 	m = pressD(m)
 	_, cmd = enterWithReason(t, m, "x")
-	if done := cmd().(dispatchDoneMsg); done.ok || !strings.Contains(done.text, "running") || !strings.Contains(done.text, "补派") {
-		t.Errorf("开工后派工失败要说明怎么补：%+v", done)
+	if done := cmd().(dispatchDoneMsg); done.ok || done.started || strings.Contains(done.text, "Graph 已开工") || len(st2.got) != 0 {
+		t.Errorf("上游起不来时不该开工，界面也不该说开工了：%+v starts=%d", done, len(st2.got))
+	}
+
+	fd3 := frontierFD()
+	fd3.errAfterStart = errors.New("任务文本没送进去")
+	m = modelWithDispatcher(t, []projectctl.Node{nodeWith("n1", projectctl.StateReady, "frontier")}, fd3)
+	m = m.WithStarter(&fakeStarter{attempt: 2})
+	m = pressD(m)
+	_, cmd = enterWithReason(t, m, "x")
+	done := cmd().(dispatchDoneMsg)
+	if done.ok || !done.started || done.attempt != 2 || !strings.Contains(done.text, "Graph 已开工 attempt 2") {
+		t.Errorf("开工之后失败要照实显示节点已 running（attempt 2）：%+v", done)
 	}
 }
 

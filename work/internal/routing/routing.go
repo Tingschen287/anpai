@@ -93,16 +93,19 @@ type Factor struct {
 
 // Decision 是一次派单的审计记录。
 type Decision struct {
-	At                 time.Time `json:"at"`
-	NodeID             string    `json:"node_id"`
-	Attempt            int       `json:"attempt"`
-	Purpose            string    `json:"purpose"`
-	RequiredClass      string    `json:"required_route_class"`
-	RequiredCaps       []string  `json:"required_capabilities"`
-	RequiredCapsSource string    `json:"required_capabilities_source"`
-	Candidates         []Factor  `json:"candidates"`
-	Recommended        string    `json:"recommended"`
-	Reason             string    `json:"reason"`
+	At      time.Time `json:"at"`
+	NodeID  string    `json:"node_id"`
+	Attempt int       `json:"attempt"`
+	// AttemptPending 为真：要开工的派单，写这条记录时账本还没分配 attempt（Attempt 为 0）。
+	// 号要等上游会话起来、projectctl start 之后才有，见派工流水里 routing_at 等于本条 at 的那一行（n044）。
+	AttemptPending     bool     `json:"attempt_pending,omitempty"`
+	Purpose            string   `json:"purpose"`
+	RequiredClass      string   `json:"required_route_class"`
+	RequiredCaps       []string `json:"required_capabilities"`
+	RequiredCapsSource string   `json:"required_capabilities_source"`
+	Candidates         []Factor `json:"candidates"`
+	Recommended        string   `json:"recommended"`
+	Reason             string   `json:"reason"`
 	// Escalated 为真：没有能自动推荐的候选，交给 owner 挑。
 	Escalated bool     `json:"escalated_to_owner"`
 	Unknowns  []string `json:"unknowns"`

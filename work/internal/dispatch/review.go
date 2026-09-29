@@ -124,6 +124,10 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	if err := CheckNoDowngrade(model, req.RequiredClass); err != nil {
 		return refuse(fmt.Errorf("评审不得降档：%w", err))
 	}
+	// 不是 agent 的工具当不了评审（n043 复审新问题 1）：它会把 brief 当命令执行。
+	if err := agentdeck.CheckTakesTaskText(ToolOf(model)); err != nil {
+		return refuse(err)
+	}
 
 	key := ReviewerKey(req.NodeID)
 	if existing, ok := d.Store.Get(key, req.Attempt); ok {
@@ -132,9 +136,11 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	}
 
 	// 起会话之前先算路由并写审计记录：说不清为什么派给这个模型，就不派。
-	if err := d.routeAndRecord(req.NodeID, req.Attempt, "reviewer", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason); err != nil {
+	routedAt, err := d.routeAndRecord(req.NodeID, req.Attempt, "reviewer", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason)
+	if err != nil {
 		return refuse(err)
 	}
+	out.RoutingAt = routedAt
 
 	// 第一步：起一个空会话。brief **不**随它出去。
 	//
@@ -155,6 +161,8 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	if err != nil {
 		return refuse(fmt.Errorf("upstream agent-deck 启动评审会话失败：%w", err))
 	}
+	out.SessionID = res.SessionID
+	out.Profile = res.Profile
 
 	// 评审会话不能和执行会话是同一个。
 	//
@@ -165,7 +173,7 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 	//
 	// 此刻那个会话还是空的，brief 没送。所以撞上的后果只是多了一个没收到任务的
 	// 会话，绑定不会落，评审也不会真的在执行者的会话里跑起来。
-	// 本包的白名单不含 stop，那个空会话收不回来——拒绝信息里把会话号给全，
+	// 撞上的是执行者正在用的会话，派工器不停它（停了等于替执行者动手）——拒绝信息里把会话号给全，
 	// 让人能手工处理。
 	if executorSession != "" && res.SessionID == executorSession {
 		return refuse(fmt.Errorf(
@@ -175,21 +183,23 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 			res.SessionID))
 	}
 
+	// 上游把命令起成了 shell：它不是 agent，会把 brief 当命令执行。这是评审自己刚起的会话，停掉（n044）。
+	if err := agentdeck.CheckLaunchedTakesTaskText(res); err != nil {
+		return refuse(d.abandon(ctx, &out, res.SessionID, err))
+	}
+
 	// 第三步：会话号核验过了，这才把 brief 送进去。
 	//
 	// 送不进去就不落绑定：绑定意味着「这次 attempt 的评审已经派出」，
-	// 而一个没收到任务的会话不算派出。宁可报错让人看见一个半成品会话，
-	// 也不要账本上多一条其实什么都没发生的「已派评审」。
+	// 而一个没收到任务的会话不算派出。那个会话是评审自己刚起的空会话，停掉它（n044），
+	// 不要账本上多一条其实什么都没发生的「已派评审」，也不留一个没人认领的会话。
 	// 「送达未确认」照样落绑定并记 unconfirmed（n042，理由见 Dispatch）：n040 实测评审会话其实收到并执行了 brief。
 	delivery := binding.DeliveryConfirmed
 	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {
 		delivery = binding.DeliveryUnconfirmed
 	} else if err != nil {
-		return refuse(fmt.Errorf(
-			"评审会话 %s 已经起来了，但 brief 没送进去：%w。"+
-				"这是个半成品会话，Work Deck 不会去停它，也不记这次派评审——"+
-				"请手工确认该会话的去向，再重派",
-			res.SessionID, err))
+		return refuse(d.abandon(ctx, &out, res.SessionID,
+			fmt.Errorf("评审 brief 没送进会话 %s：%w。这次派评审不记，可以重派", res.SessionID, err)))
 	}
 
 	b := binding.Binding{
@@ -211,8 +221,6 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 
 	out.OK = true
 	out.Delivery = delivery
-	out.SessionID = res.SessionID
-	out.Profile = res.Profile
 	_ = d.appendLog(out)
 	return b, nil
 }

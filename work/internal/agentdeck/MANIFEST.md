@@ -20,13 +20,30 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
 | `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话 | `--message-file -`（文本走标准输入，不进 argv）、`--json`（n042，读失败时的 `delivery` 字段） |
+| `session stop` | 停掉派工器刚起、却没拿到任务说明的会话（n044） | 只带会话号与 `--json` |
 | `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
 | `inbox export` | 决策队列：非消费式读全机 completion/transition 记录（n038） | `--json` |
 | `inbox writer-status` | 决策队列：读 export 之前自检 notify-daemon 在不在（n038） | `--json` |
 
 - 白名单在 `client.go` 的 `Subcommands`。清单之外的子命令，adapter 拒绝执行（`ErrSubcommandNotAllowed`）。
 - **白名单精确到第二级。** 只写 `session` 会把 `session stop`、`remove` 等一并放行。
-  `TestDangerousSessionSubcommandsAreRefused` 逐条确认 `session` 底下 8 个危险子命令被拒。
+  `TestDangerousSessionSubcommandsAreRefused` 逐条确认 `session` 底下 7 个危险子命令被拒（n044 起 `stop` 不在其中）。
+- **n044：`session stop`**。只有一个用处：派工器刚起的会话没拿到任务说明时（Graph 开工失败、任务送不进去、上游起成了 shell）把它停掉，
+  不留一个没人认领的会话。`StopSession` 和 `SendMessage` 一样要一张 `lease.Permit`，arbiter 的 `Abandon` 签许可前同样探测 `list-clients`：
+  owner 接管着、有人连着、探测失败时一律不停。`TestSessionStopOnlyRunsInStopSessionAfterAPermit` 核对包内停会话的上游调用只有这一处且先核许可。
+  派工器不对执行者的会话调它（评审撞上执行会话时不停）。上游 stop 杀掉会话的 tmux 会话，存储里的记录留着；
+  实测 `list --json` 对停掉的自定义工具会话报 `stopped`，对停掉的 shell 会话报 `unknown`，所以判「停没停」看 tmux 会话还在不在。
+  本包自己仍不拼任何 tmux kill 命令。停掉之后写入权记账里那一条照旧留着：会话已经不在了，那条登记不会再放行任何投递。
+- **n044：不是 agent 的工具不接任务说明**（`ToolsWithoutTaskText`：`shell`）。任务说明送进 shell 会被当成命令逐行执行（n043 复审实测满屏
+  `command not found`）。上游对认不出的命令一律按 shell 处理（`internal/session/toolregistry.go:415` `MatchTool`），实测 `launch -c bash --json` 的
+  `tool` 是 `shell`、自定义工具 `-c n044agent` 的 `tool` 是 `n044agent`。所以派工器核两次：launch 前按配置的工具名（`CheckTakesTaskText`），
+  launch 后按回执的 `tool` 字段（`CheckLaunchedTakesTaskText`；回执没写工具同样不信），后者不过就停掉会话。
+- **n044：launch Codex 兼容工具会改 owner 的 Codex 全局配置**。上游 launch 前调 `preAcceptCodexWorkspaceTrust`（`internal/session/codex_trust.go:119-137`），
+  判据 `IsCodexCompatible`（`internal/session/userconfig.go:3542`：工具名是 codex，或自定义工具声明 `compatible_with = "codex"`、命令本身是 codex），
+  把工作目录写进 `~/.codex/config.toml`（`CODEX_HOME` 未设时）的 `projects.<目录>.trust_level = "trusted"`。写法是整份解码再重新编码写回
+  （`codex_trust.go:62-104`），原文件的注释与排版不保留；写失败上游只记 warning、照样 launch。n040 终审在 owner 的真实配置里留下过一条夹具目录的
+  trust 条目（n043 验收时发现并删除）。Work Deck 不改上游，只在派出前把这件事摆给 owner、按 y 才派（`CheckCodexTrust`：codex 一定写，上游内置的
+  其他工具不写，认不出的自定义工具说「可能」；内置工具表 `BuiltinTools` 出自 `internal/session/builtins.go:56-76`，升级上游要重核）。
 - `web` 在白名单里，但**发布代码不启动它**：Work Deck 连配置项 `upstream_addr` 指向的现成服务。
   只有集成测试用它起服务（`integration_test.go`），上表的参数就是测试用的那几个。
 - `list` 直接读上游存储，不经 headless 服务。服务的菜单缓存看不见刚 launch 的会话，`list` 看得见（见第 7 节）。
@@ -83,6 +100,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `session attach` | 给目标 tmux 会话加一个 attached client；启动 badge watcher，`os.MkdirAll` 建 badge 更新目录 | `cmd/agent-deck/session_cmd.go:1370` · `handleSessionAttach`<br>`internal/tmux/badge_update.go:125` · `WatchBadgeUpdates` |
 | `session output` | `-pane` 分支调 `PreviewFull`，最终由 `CaptureFullHistory` 跑 `capture-pane` 取画面 | `cmd/agent-deck/session_cmd.go:4409` · `handleSessionOutput`<br>`internal/tmux/tmux.go:3689` · `CaptureFullHistory` |
 | `session send` | `executeSend` 把文本投进目标会话，对方当成输入处理 | `cmd/agent-deck/session_cmd.go:2894` · `handleSessionSend` |
+| `session stop` | 杀掉会话的 tmux 会话、存储里记录留着；同组有排队的会话时 `drainGroupQueue` 会顺带起一个；`saveSessionData` 写回状态 | `internal/session/instance.go:8397` · `killInternal`<br>`cmd/agent-deck/session_cmd.go:411`、`414` · `handleSessionStop` |
 | `inbox export` | 读三处记录取并集，不删不截断；但记录里出现的每个 profile 都会被 `NewStorageWithProfile` 打开，没有就建 `state.db` | `cmd/agent-deck/inbox_cmd.go:423` · `runInboxExport`<br>`internal/session/inbox_export.go:151` · `dropSuppressedChildren` |
 | `inbox writer-status` | 只读 notify-daemon 的心跳文件 | `cmd/agent-deck/inbox_cmd.go:466` · `runInboxWriterStatus`<br>`internal/session/notify_heartbeat.go:74` · `ReadWriterStatus` |
 
@@ -159,6 +177,7 @@ internal/session/last_activity_persist.go:124   db.WriteLastActivityAt(...)
 `title`、`group`、`path`、`model_id`、`model_version`、`error`、`code`
 
 其中 `session_id` 是绑定的关键。上游只在模型 ID 非空时才带 `model_id` 与 `model_version`。
+`tool` 是上游认定的工具（`cmd/agent-deck/launch_cmd.go:766`），n044 起派工器靠它认出「起出来其实是 shell」的会话。
 
 **注意**：上游派工失败时**退出码可能仍是 0**，真正的结论在 `success` 字段上，
 原因在 `error` 与 `code` 里。只看退出码会把失败当成功。实测例：
@@ -297,6 +316,13 @@ adapter 的 `prepareNested`（`nested.go`）在检测到自己处于 tmux 内时
 从子进程环境中去掉，强制嵌套。捕获证据见交付物 `nested-tmux-capture.md`。
 
 前缀键在嵌套下会被外层先截获，真人需要按两次。这一点在进入**之前**提示，因为进去之后看不到 Work Deck 的界面。
+
+**上游的 `ctrl+q`（n044）。** 上游会话状态栏写着 `ctrl+q detach`：上游在默认 tmux server 的 root 表绑了
+`C-q if-shell -F "#{m:agentdeck_*,#{session_name}}" detach-client ''`（`internal/tmux/tmux.go:2505`、`6682-6700`），整台 server 生效。
+所以退出提示看外层是哪台 server（`NestingAdvice` 按 `$TMUX` 的 socket 名判断）：外层就是默认 server 时 `C-q` 先被外层按这条绑定处理、
+外层会话名不是 `agentdeck_*` 就吞掉（n037 真机），只能按两次前缀键再按 d；外层是别的 server 时外层不认 `C-q`，`ctrl+q` 可用（n043 复审实测）；
+不在 tmux 里时 `ctrl+q` 可用。n043 复审在私有 server 上用 `send-keys` 发 `C-b C-b d` 时 `d` 进了 Bash：`send-keys` 绕过外层客户端直接把键交给内层，
+和真人按键不是一回事。
 
 ### 不发按键
 

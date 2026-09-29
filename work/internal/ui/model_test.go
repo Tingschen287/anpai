@@ -83,7 +83,10 @@ type fakeDispatcher struct {
 	cands   []dispatch.Model
 	got     []dispatch.Request
 	reviews []dispatch.ReviewRequest
-	err     error
+	// err 是上游起不来：真派工器这时不开工（n044）。
+	err error
+	// errAfterStart 是开工之后才失败（例如任务文本送不进去）：节点已经 running。
+	errAfterStart error
 }
 
 func (f *fakeDispatcher) Candidates(required dispatch.RouteClass) []dispatch.Model {
@@ -117,10 +120,25 @@ func (f *fakeDispatcher) DispatchReviewer(ctx context.Context, req dispatch.Revi
 	}, nil
 }
 
+// Dispatch 照真派工器的顺序走（n044）：上游起不来就不开工；起来了才调 Start 拿 attempt；
+// 任务文本按最终的 attempt 生成。got 记的是走到投递那一步的请求（Attempt、Message 已是最终值）。
 func (f *fakeDispatcher) Dispatch(ctx context.Context, req dispatch.Request) (binding.Binding, error) {
-	f.got = append(f.got, req)
 	if f.err != nil {
 		return binding.Binding{}, f.err
+	}
+	if req.Start != nil {
+		a, err := req.Start(ctx)
+		if err != nil {
+			return binding.Binding{}, fmt.Errorf("Graph 开工失败：%w。刚起的会话 sess-x 没拿到任务说明，已停掉", err)
+		}
+		req.Attempt = a
+	}
+	if req.MessageFor != nil {
+		req.Message = req.MessageFor(req.Attempt)
+	}
+	f.got = append(f.got, req)
+	if f.errAfterStart != nil {
+		return binding.Binding{}, f.errAfterStart
 	}
 	return binding.Binding{
 		NodeID: req.NodeID, Attempt: req.Attempt, SessionID: "sess-x",

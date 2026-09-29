@@ -111,3 +111,40 @@ func TestLaunchRefusedWhileLedgerIsBroken(t *testing.T) {
 		t.Errorf("记账停用时上游 launch 不该被调用：%v", got)
 	}
 }
+
+// 停会话与自动投递同一道闸（n044）：Work Deck 持有且没人连着才停；有人连着就不停、按接管登记；
+// owner 接管着的会话签不出许可，停不了。
+func TestAbandonStopsOnlyAnUnattachedSessionWorkDeckHolds(t *testing.T) {
+	d, leases, sent := grantedDeck(t, fakeProbe{n: 1})
+	ctx := context.Background()
+	if err := d.Abandon(ctx, "sess-1"); err == nil || !strings.Contains(err.Error(), "不停会话") {
+		t.Fatalf("有客户端连着必须不停：%v", err)
+	}
+	if l, _ := leases.Get("sess-1"); l.Holder != lease.HolderOwner {
+		t.Errorf("连着的客户端应当按 owner 接管登记：%+v", l)
+	}
+	if got := sentLines(t, sent+".stop"); len(got) != 0 {
+		t.Fatalf("有人连着时上游不该收到 stop：%v", got)
+	}
+
+	for name, probe := range map[string]ClientProbe{"探测失败": fakeProbe{err: errors.New("tmux 不答")}, "没接探测器": nil} {
+		d2, _, sent2 := grantedDeck(t, probe)
+		if err := d2.Abandon(ctx, "sess-1"); err == nil {
+			t.Errorf("%s：必须不停", name)
+		}
+		if got := sentLines(t, sent2+".stop"); len(got) != 0 {
+			t.Errorf("%s：上游不该收到 stop：%v", name, got)
+		}
+	}
+
+	d3, _, sent3 := grantedDeck(t, fakeProbe{n: 0})
+	if err := d3.Abandon(ctx, "sess-1"); err != nil {
+		t.Fatalf("Work Deck 持有且没人连着，应当能停：%v", err)
+	}
+	if got := sentLines(t, sent3+".stop"); len(got) != 1 || got[0] != "stop sess-1" {
+		t.Errorf("上游应当恰好收到一次 stop sess-1：%v", got)
+	}
+	if err := (Deck{Client: d3.Client, Clients: fakeProbe{}}).Abandon(ctx, "sess-1"); err == nil {
+		t.Error("没有写入权记账时不该停")
+	}
+}

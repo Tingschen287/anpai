@@ -34,6 +34,23 @@ type Request struct {
 	// ChosenBy 是挑模型的人，ChoiceReason 是他写的理由；没采纳推荐时理由必填（见 routing.Choose）。
 	ChosenBy     string
 	ChoiceReason string
+
+	// Start 不为 nil：节点还没在 Graph 开工（ready / rework）。派工器先起会话、核过它是 agent，
+	// 才调 Start 经 projectctl 开工，拿账本给的 attempt（n044，n043 复审新问题 2）。这时 Attempt 必须留 0。
+	// 这样 launch 失败时 Graph 一点没动，不会留下 running 却没有会话的 attempt。
+	// 为 nil：节点已经 running（补派），Attempt 是账本已有的号。
+	Start func(ctx context.Context) (attempt int, err error)
+	// MessageFor 不为 nil 时，任务文本按最终的 attempt 生成、代替 Message：开工派单要等 start 之后才知道号，
+	// 而执行 brief 第一行就写着第几次 attempt（n044）。
+	MessageFor func(attempt int) string
+}
+
+// messageFor 是 attempt 号为 a 时要送出去的任务文本。
+func (r Request) messageFor(a int) string {
+	if r.MessageFor != nil {
+		return r.MessageFor(a)
+	}
+	return r.Message
 }
 
 // Outcome 是一次派工尝试的结果，无论成没成都记一条。
@@ -53,6 +70,11 @@ type Outcome struct {
 	Delivery string `json:"delivery,omitempty"`
 	// 被拒绝时写明原因。拒绝也要留痕，否则事后看不出守没守规矩。
 	Refusal string `json:"refusal,omitempty"`
+	// RoutingAt 是这次派单那条路由审计记录的时间（n044）：要开工的派单写路由记录时 attempt 还没分配，
+	// 两份记录靠它对上。
+	RoutingAt time.Time `json:"routing_at,omitempty"`
+	// SessionStopped 为真：会话起来了却没拿到任务说明，派工器已把它停掉（n044）。
+	SessionStopped bool `json:"session_stopped,omitempty"`
 }
 
 // Launcher 是派工器用到的那一点点上游能力。
@@ -67,6 +89,9 @@ type Launcher interface {
 	// 正在用的那个」必须拿真实会话号来判。所以 brief 不能随 Launch 出去，
 	// 得等判完了再送。
 	SendMessage(ctx context.Context, sessionID, message string) error
+	// Abandon 停掉本次刚起、却没拿到任务说明的会话（n044）。派工器只对自己刚起的会话调它，
+	// 不对执行者的会话调；有人连着时实现方不停。
+	Abandon(ctx context.Context, sessionID string) error
 }
 
 // Dispatcher 把一个节点派成一个真实会话。
@@ -120,8 +145,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	switch {
 	case req.NodeID == "":
 		return refuse(fmt.Errorf("派工缺少节点号"))
-	case req.Attempt <= 0:
+	case req.Start == nil && req.Attempt <= 0:
 		return refuse(fmt.Errorf("派工的 attempt 必须是正数，拿到的是 %d", req.Attempt))
+	case req.Start != nil && req.Attempt != 0:
+		return refuse(fmt.Errorf("要开工的派工不许预填 attempt（拿到 %d）：attempt 由 projectctl start 在会话起来之后给", req.Attempt))
 	case req.ModelID == "":
 		return refuse(fmt.Errorf("派工缺少模型 ID：模型未知时拒绝派工，不猜默认值"))
 	case req.ProjectPath == "":
@@ -142,22 +169,30 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	if err := CheckNoDowngrade(model, req.RequiredClass); err != nil {
 		return refuse(err)
 	}
+	// 不是 agent 的工具不接任务说明（n043 复审新问题 1）：launch 之前按配置核一次，launch 之后按回执再核一次。
+	if err := agentdeck.CheckTakesTaskText(ToolOf(model)); err != nil {
+		return refuse(err)
+	}
 
 	// 同一次 attempt 已经派过就不再派。重复派工会让一个 attempt 对上两个会话，
-	// 之后没人说得清哪个才算数。
-	if existing, ok := d.Store.Get(req.NodeID, req.Attempt); ok {
-		return refuse(fmt.Errorf("%s 的 attempt %d 已经绑在会话 %s 上，不重复派工",
-			req.NodeID, req.Attempt, existing.SessionID))
+	// 之后没人说得清哪个才算数。要开工的派单此刻还没有 attempt，等开工拿到号再查。
+	if req.Start == nil {
+		if existing, ok := d.Store.Get(req.NodeID, req.Attempt); ok {
+			return refuse(fmt.Errorf("%s 的 attempt %d 已经绑在会话 %s 上，不重复派工",
+				req.NodeID, req.Attempt, existing.SessionID))
+		}
 	}
 
 	// 任务文本放在模型与档位检查之后查：那几条拒绝理由更根本，不该被它盖住。
-	if strings.TrimSpace(req.Message) == "" {
+	if strings.TrimSpace(req.messageFor(req.Attempt)) == "" {
 		return refuse(fmt.Errorf("派工缺少任务文本：说不清要执行者做什么，派出去的就只是一个空会话，不派"))
 	}
 
-	if err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason); err != nil {
+	routedAt, err := d.routeAndRecord(req.NodeID, req.Attempt, "executor", req.RequiredClass, req.ModelID, req.DispatchedBy, req.ChosenBy, req.ChoiceReason)
+	if err != nil {
 		return refuse(err)
 	}
+	out.RoutingAt = routedAt
 
 	lm, na := launchModel(model)
 	res, err := d.Deck.Launch(ctx, agentdeck.LaunchRequest{
@@ -170,26 +205,62 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		NoWait:             true,
 	})
 	if err != nil {
+		if req.Start != nil {
+			return refuse(fmt.Errorf("upstream agent-deck 启动会话失败：%w。Graph 没有开工，节点状态不变", err))
+		}
 		return refuse(fmt.Errorf("upstream agent-deck 启动会话失败：%w", err))
+	}
+	out.SessionID = res.SessionID
+	out.Profile = res.Profile
+	abandon := func(cause error) (binding.Binding, error) {
+		return refuse(d.abandon(ctx, &out, res.SessionID, cause))
+	}
+
+	// 上游把命令起成了 shell（比如配置写的是 bash），任务说明会被当命令执行：停掉，Graph 不开工。
+	if err := agentdeck.CheckLaunchedTakesTaskText(res); err != nil {
+		if req.Start != nil {
+			err = fmt.Errorf("%w。Graph 没有开工，节点状态不变", err)
+		}
+		return abandon(err)
+	}
+
+	// 会话起来了、是 agent，这才开工（n044）：开工失败就停掉这个空会话，Graph 那边本来就没动。
+	attempt := req.Attempt
+	if req.Start != nil {
+		a, err := req.Start(ctx)
+		if err != nil {
+			return abandon(fmt.Errorf("Graph 开工失败：%w", err))
+		}
+		if a <= 0 {
+			return abandon(fmt.Errorf("Graph 开工回执的 attempt 是 %d，对不上账本：请核对节点状态", a))
+		}
+		attempt = a
+		out.Attempt = a
+		if existing, ok := d.Store.Get(req.NodeID, attempt); ok {
+			return abandon(fmt.Errorf("Graph 已开工 attempt %d，但绑定存储里已经有这个 attempt 的旧绑定（会话 %s），新会话不绑。"+
+				"节点现在是 running：先核对绑定存储，再按 d 补派", attempt, existing.SessionID))
+		}
 	}
 
 	// 任务文本不随 launch 出去（LaunchRequest 没有这个字段）：launch 返回说明写入权已经登记，
-	// 这时才经受仲裁的投递口送。送不进去就不落绑定，和派评审同一个规矩。
-	// 例外是「送达未确认」（n042）：正文到了画面、上游没确认提交。会话可能已经在跑，丢掉它就成了没人认领的会话，
+	// 这时才经受仲裁的投递口送。
+	// 「送达未确认」（n042）：正文可能到了画面、上游没确认提交。会话可能已经在跑，丢掉它就成了没人认领的会话，
 	// 所以照样落绑定，记成 unconfirmed，由界面提示 owner 去看。
+	// 其余投递失败：会话没拿到任务，停掉它，不落绑定（n044；此前留着一个没人认领的半成品会话）。
 	delivery := binding.DeliveryConfirmed
-	if err := d.Deck.SendMessage(ctx, res.SessionID, req.Message); agentdeck.IsDeliveryUnconfirmed(err) {
+	if err := d.Deck.SendMessage(ctx, res.SessionID, req.messageFor(attempt)); agentdeck.IsDeliveryUnconfirmed(err) {
 		delivery = binding.DeliveryUnconfirmed
 	} else if err != nil {
-		return refuse(fmt.Errorf(
-			"会话 %s 已经起来了，但任务文本没送进去：%w。"+
-				"这是个半成品会话，Work Deck 不会去停它，也不记这次派工——请手工确认该会话的去向，再重派",
-			res.SessionID, err))
+		cause := fmt.Errorf("任务文本没送进会话 %s：%w", res.SessionID, err)
+		if req.Start != nil {
+			cause = fmt.Errorf("Graph 已开工 attempt %d，但%w。节点现在是 running、没有绑定会话：修好后选中它按 d 补派同一个 attempt", attempt, cause)
+		}
+		return abandon(cause)
 	}
 
 	b := binding.Binding{
 		NodeID:       req.NodeID,
-		Attempt:      req.Attempt,
+		Attempt:      attempt,
 		SessionID:    res.SessionID,
 		Tool:         ToolOf(model),
 		Model:        model.ID,
@@ -201,17 +272,25 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		Delivery:     delivery,
 	}
 	if err := d.Store.Put(b); err != nil {
-		// 会话已经起来了，但绑定没存住。这种半成品必须喊出来，
+		// 会话已经起来了、任务也送了，但绑定没存住。它可能已经在干活，不能停；这种半成品必须喊出来，
 		// 否则界面上会出现一个没人认领的会话。
-		return refuse(fmt.Errorf("会话 %s 已启动但绑定没存住：%w", res.SessionID, err))
+		return refuse(fmt.Errorf("会话 %s 已启动、任务文本已送，但绑定没存住：%w。请手工登记或停掉它", res.SessionID, err))
 	}
 
 	out.OK = true
 	out.Delivery = delivery
-	out.SessionID = res.SessionID
-	out.Profile = res.Profile
 	_ = d.appendLog(out)
 	return b, nil
+}
+
+// abandon 停掉一个刚起、没拿到任务说明的会话，把结果并进拒绝理由（n044）。
+// 停不掉（有人连着、探测失败、上游报错）就照实说，请人手工处理。
+func (d *Dispatcher) abandon(ctx context.Context, out *Outcome, sessionID string, cause error) error {
+	if err := d.Deck.Abandon(ctx, sessionID); err != nil {
+		return fmt.Errorf("%w。刚起的会话 %s 没拿到任务说明，也没停掉（%v）：请手工确认它的去向", cause, sessionID, err)
+	}
+	out.SessionStopped = true
+	return fmt.Errorf("%w。刚起的会话 %s 没拿到任务说明，已停掉", cause, sessionID)
 }
 
 // appendLog 往派工流水里追加一行。
@@ -262,18 +341,20 @@ func (d *Dispatcher) Route(nodeID string, attempt int, purpose string, required 
 
 // routeAndRecord 在真正起会话之前算路由、核 owner 选的模型是否可选、写审计记录。
 // 任何一步不成就返回错误，调用方据此拒绝派单：说不清为什么派给它，就不派。
-func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, required RouteClass, modelID, by, chosenBy, reason string) error {
+// attempt 为 0 表示要开工的派单，号还没分配（n044）：记录里标 attempt_pending，靠返回的时间和派工流水对上。
+func (d *Dispatcher) routeAndRecord(nodeID string, attempt int, purpose string, required RouteClass, modelID, by, chosenBy, reason string) (time.Time, error) {
 	if d.RoutingLog == "" {
-		return fmt.Errorf("没有配置路由审计记录，不派单")
+		return time.Time{}, fmt.Errorf("没有配置路由审计记录，不派单")
 	}
 	dec := d.Route(nodeID, attempt, purpose, required)
+	dec.AttemptPending = attempt == 0
 	// 选择者由选择入口提供（界面填 owner），by 是派工记账身份，两者分开记。
 	dec.DispatchedBy = by
 	if err := dec.Choose(modelID, chosenBy, reason); err != nil {
-		return fmt.Errorf("路由拒绝：%w", err)
+		return time.Time{}, fmt.Errorf("路由拒绝：%w", err)
 	}
 	if err := routing.Append(d.RoutingLog, dec); err != nil {
-		return fmt.Errorf("路由审计记录写不进去，不派单：%w", err)
+		return time.Time{}, fmt.Errorf("路由审计记录写不进去，不派单：%w", err)
 	}
-	return nil
+	return dec.At, nil
 }

@@ -25,8 +25,9 @@ func TestUIExecutorDispatchDeliversTheBriefToUpstream(t *testing.T) {
 	bin := filepath.Join(dir, "agent-deck")
 	script := `#!/bin/sh
 case "$1" in
-  launch) echo "launch $*" >> "$FAKE_SENT.launch"; echo '{"success":true,"session_id":"exec-sess","id":"exec-sess"}' ;;
-  session) if [ "$2" = "send" ]; then printf 'to=%s\n' "$3" >> "$FAKE_SENT"; cat >> "$FAKE_SENT"; echo '{"success":true,"delivery":"submitted","submitted":true}'; fi ;;
+  launch) echo "launch $*" >> "$FAKE_SENT.launch"; echo '{"success":true,"session_id":"exec-sess","id":"exec-sess","tool":"claude"}' ;;
+  session) if [ "$2" = "send" ]; then printf 'to=%s\n' "$3" >> "$FAKE_SENT"; cat >> "$FAKE_SENT"; echo '{"success":true,"delivery":"submitted","submitted":true}';
+           elif [ "$2" = "stop" ]; then echo "stop $3" >> "$FAKE_SENT.stop"; echo '{"success":true}'; fi ;;
 esac
 `
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
