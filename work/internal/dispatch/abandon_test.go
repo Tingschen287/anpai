@@ -167,21 +167,64 @@ func TestStartDispatchRefusesAPrefilledAttempt(t *testing.T) {
 	assertSeq(t, l)
 }
 
-// 绑定存储里已有账本刚分配的 attempt（例如夹具重建后留下的旧绑定）：不覆盖，停掉新会话。
-func TestStaleBindingForTheStartedAttemptIsNotOverwritten(t *testing.T) {
+// 绑定存储里已有账本刚分配的 attempt（例如夹具重建后留下的旧绑定）：用新会话替换，旧会话号记进流水；
+// 不停新会话、不留下 running 却绑着旧会话的节点（n044 attempt 1 评审 blocker 3）。
+func TestStaleBindingForTheStartedAttemptIsReplaced(t *testing.T) {
 	l := &seqLauncher{res: agentLaunch("s-new")}
-	d, _ := newDispatcher(t, l)
+	d, logPath := newDispatcher(t, l)
 	if err := d.Store.Put(binding.Binding{NodeID: "n099_demo", Attempt: 2, SessionID: "s-old", Tool: "claude", Model: "claude-opus-5", RouteClass: "frontier", ProjectPath: "/tmp/p", Profile: "_t", DispatchedBy: "earlier"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := d.Dispatch(context.Background(), startRequest(l, 2, nil))
-	if err == nil || !strings.Contains(err.Error(), "旧绑定") || !strings.Contains(err.Error(), "s-old") {
-		t.Fatalf("应当拒绝并点名旧绑定：%v", err)
+	b, err := d.Dispatch(context.Background(), startRequest(l, 2, nil))
+	if err != nil {
+		t.Fatalf("旧绑定不该挡住这次派工：%v", err)
 	}
-	assertSeq(t, l, "launch", "start", "abandon s-new")
-	if got, _ := d.Store.Get("n099_demo", 2); got.SessionID != "s-old" {
-		t.Errorf("旧绑定不该被覆盖：%+v", got)
+	assertSeq(t, l, "launch", "start", "send s-new")
+	if got, _ := d.Store.Get("n099_demo", 2); got.SessionID != "s-new" || b.SessionID != "s-new" {
+		t.Errorf("绑定应当换成新会话：%+v", got)
 	}
+	logs := readLog(t, logPath)
+	if last := logs[len(logs)-1]; !last.OK || last.ReplacedSession != "s-old" {
+		t.Errorf("流水应当记下被替换的旧会话：%+v", last)
+	}
+}
+
+// start 超时（调用方的 context 已取消）：停会话另起 context，照样停得掉（n044 attempt 1 评审 blocker 2）。
+func TestStartTimeoutStillStopsTheFreshSession(t *testing.T) {
+	l := &ctxSeqLauncher{seqLauncher: seqLauncher{res: agentLaunch("s1")}}
+	d, logPath := newDispatcher(t, l)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := goodRequest()
+	req.Attempt = 0
+	req.Start = func(context.Context) (int, error) {
+		cancel() // 模拟整次派工的 context 在 start 期间到期
+		return 0, ctx.Err()
+	}
+	_, err := d.Dispatch(ctx, req)
+	if err == nil || !strings.Contains(err.Error(), "已停掉") {
+		t.Fatalf("start 超时也应当停掉刚起的会话：%v", err)
+	}
+	if l.abandonCtxErr != nil {
+		t.Errorf("停会话拿到的是已取消的 context：%v", l.abandonCtxErr)
+	}
+	logs := readLog(t, logPath)
+	if last := logs[len(logs)-1]; !last.SessionStopped {
+		t.Errorf("流水应当记成已停：%+v", last)
+	}
+}
+
+// ctxSeqLauncher 额外记下停会话时 context 的状态；停会话时若 context 已取消，像真实探测一样失败。
+type ctxSeqLauncher struct {
+	seqLauncher
+	abandonCtxErr error
+}
+
+func (l *ctxSeqLauncher) Abandon(ctx context.Context, sessionID string) error {
+	l.abandonCtxErr = ctx.Err()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return l.seqLauncher.Abandon(ctx, sessionID)
 }
 
 // 路由记录写在起会话之前，那时还没有 attempt：标 attempt_pending，派工流水用 routing_at 对上它。
@@ -235,8 +278,9 @@ func TestShellIsRefusedBeforeAnythingHappens(t *testing.T) {
 }
 
 // 配成 bash 的会话，上游起出来是 shell：launch 之后按回执拒，停掉它，Graph 不开工、任务不送。
+// 这里故意把 bash 声明成 agent（配错了），才走得到 launch 之后那一道。
 func TestDisguisedShellIsStoppedBeforeStart(t *testing.T) {
-	tbl, err := NewRouteTable([]Model{{ID: "bash", Tool: "bash", Class: Frontier, NoModel: true}})
+	tbl, err := NewRouteTable([]Model{{ID: "bash", Tool: "bash", Class: Frontier, NoModel: true, DeclaredAgent: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,4 +333,40 @@ func TestStartDispatchBuildsTheBriefWithTheLedgerAttempt(t *testing.T) {
 	if b.Attempt != 5 || len(fake.sent) != 1 || fake.sent[0].Message != "第 5 次 attempt" {
 		t.Errorf("任务文本应当按 attempt 5 生成：%+v %+v", b, fake.sent)
 	}
+}
+
+// n044 attempt 1 评审 blocker 1：自定义工具没在配置里声明 agent 就不派，一个会话都不起；
+// 声明了、但上游起的实际命令是 bash（上游回执写的是自定义名字），launch 之后认出来，停掉，Graph 不开工。
+func TestCustomToolNeedsAnAgentDeclarationAndARealAgentCommand(t *testing.T) {
+	tbl, err := NewRouteTable([]Model{
+		{ID: "undeclared", Tool: "n044sh", Class: Frontier, NoModel: true},
+		{ID: "declared", Tool: "n044sh", Class: Frontier, NoModel: true, DeclaredAgent: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &seqLauncher{res: agentdeck.LaunchResult{SessionID: "s1", Success: true, Tool: "n044sh", Command: "n044sh", ResolvedCommand: "bash"}}
+	d, _ := newDispatcher(t, l)
+	d.Table = tbl
+	req := startRequest(l, 2, nil)
+	req.ModelID = "undeclared"
+	if _, err := d.Dispatch(context.Background(), req); err == nil || !strings.Contains(err.Error(), "没声明") {
+		t.Fatalf("没声明 agent 的自定义工具应当拒在起会话之前：%v", err)
+	}
+	assertSeq(t, l)
+
+	req = startRequest(l, 2, nil)
+	req.ModelID = "declared"
+	if _, err := d.Dispatch(context.Background(), req); err == nil || !strings.Contains(err.Error(), "shell 解释器") || !strings.Contains(err.Error(), "已停掉") {
+		t.Fatalf("实际命令是 bash 的会话应当停掉：%v", err)
+	}
+	assertSeq(t, l, "launch", "abandon s1")
+
+	l.seq = nil
+	rev := goodReview()
+	rev.ModelID, rev.IndependentRequired = "declared", false
+	if _, err := d.DispatchReviewer(context.Background(), rev); err == nil || !strings.Contains(err.Error(), "shell 解释器") {
+		t.Fatalf("评审这条路同样要认出来：%v", err)
+	}
+	assertSeq(t, l, "launch", "abandon s1")
 }

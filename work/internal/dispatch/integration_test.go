@@ -56,7 +56,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cfgHome, "agent-deck"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cfgHome, "agent-deck", "config.toml"), []byte("[tools.n044agent]\ncommand = \"cat\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgHome, "agent-deck", "config.toml"), []byte("[tools.n044agent]\ncommand = \"cat\"\n\n[tools.n044sh]\ncommand = \"bash\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", cfgHome)
@@ -77,9 +77,12 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	tbl, err := NewRouteTable([]Model{
 		{ID: "shell", Tool: "shell", Class: Economy, NoModel: true},
 		{ID: "pretend-frontier", Tool: "shell", Class: Frontier, NoModel: true},
-		// 配成 bash 的会话，上游起出来是 shell：派工器要按 launch 回执认出来（n044）。
-		{ID: "bash", Tool: "bash", Class: Economy, NoModel: true},
-		{ID: "agent", Tool: "n044agent", Class: Economy, NoModel: true},
+		// 配成 bash 的会话，上游起出来是 shell：派工器要按 launch 回执认出来（n044）。故意声明成 agent，才走得到那一道。
+		{ID: "bash", Tool: "bash", Class: Economy, NoModel: true, DeclaredAgent: true},
+		// 自定义工具 n044sh 的命令是 bash：上游回执写的是 n044sh，实际命令暴露它是 shell（n044 attempt 1 评审 blocker 1）。
+		{ID: "custom-shell", Tool: "n044sh", Class: Economy, NoModel: true, DeclaredAgent: true},
+		{ID: "undeclared", Tool: "n044agent", Class: Economy, NoModel: true},
+		{ID: "agent", Tool: "n044agent", Class: Economy, NoModel: true, DeclaredAgent: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +99,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 先试四次必须被拒的，确认拒绝路径在真实链路上同样生效，而且都拒在起会话之前。
+	// 先试五次必须被拒的，确认拒绝路径在真实链路上同样生效，而且都拒在起会话之前。
 	refusals := []struct {
 		name string
 		req  Request
@@ -106,6 +109,7 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 		{"降档", Request{NodeID: "e2e", Attempt: 1, RequiredClass: Frontier, ModelID: "shell", ProjectPath: project}, "拒绝降档"},
 		{"route 未知", Request{NodeID: "e2e", Attempt: 1, RequiredClass: RouteClass("瞎写的档"), ModelID: "shell", ProjectPath: project}, "不认识"},
 		{"shell 不接任务", Request{NodeID: "e2e", Attempt: 1, RequiredClass: Economy, ModelID: "shell", ProjectPath: project, Message: "继续"}, "不是 agent"},
+		{"自定义工具没声明 agent", Request{NodeID: "e2e", Attempt: 1, RequiredClass: Economy, ModelID: "undeclared", ProjectPath: project, Message: "继续"}, "没声明"},
 	}
 	for _, c := range refusals {
 		if _, err := d.Dispatch(context.Background(), c.req); err == nil {
@@ -163,6 +167,27 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("上游存储里找不到被停掉的会话 %s", stopped.SessionID)
+	}
+
+	// 自定义工具的命令是 bash：上游回执写 n044sh，实际命令是 bash。认出来，真的停掉，不开工。
+	starts = 0
+	_, err = d.Dispatch(context.Background(), Request{
+		NodeID: "e2e_customsh", RequiredClass: Economy, ModelID: "custom-shell", ProjectPath: project, Title: "n036e2e-customsh",
+		Message: "继续", DispatchedBy: "integration-test", ChosenBy: "owner", ChoiceReason: "测试里指定",
+		Start: func(context.Context) (int, error) { starts++; return 1, nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "shell 解释器") || !strings.Contains(err.Error(), "已停掉") || starts != 0 {
+		t.Fatalf("命令是 bash 的自定义工具应当被认出、停掉、不开工：%v starts=%d", err, starts)
+	}
+	csLog := readLog(t, logPath)
+	if cs := csLog[len(csLog)-1]; !cs.SessionStopped {
+		t.Fatalf("流水应当记下被停掉的会话：%+v", cs)
+	} else if listed, err := client.ListSessions(context.Background()); err == nil {
+		for _, s := range listed {
+			if s.ID == cs.SessionID && exec.Command("tmux", "has-session", "-t", "="+s.TmuxSession).Run() == nil {
+				t.Errorf("命令是 bash 的会话 %s 的 tmux 会话还在", s.ID)
+			}
+		}
 	}
 
 	// Graph 开工失败：真起来的 agent 会话没拿到任务，真的停掉；任务不送、不落绑定。
@@ -237,14 +262,14 @@ func TestIntegrationEndToEndDispatchAgainstRealUpstream(t *testing.T) {
 		t.Error("重复派工应当被拒绝")
 	}
 
-	// 派工流水要记全：四条拒绝 + 一条停掉的伪装 shell + 一条开工失败 + 一条成功 + 一条重复拒绝。
+	// 派工流水要记全：五条拒绝 + 两条停掉的 shell（伪装、自定义命令）+ 一条开工失败 + 一条成功 + 一条重复拒绝。
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 8 {
-		t.Errorf("派工流水应有 8 行，实际 %d 行", len(lines))
+	if len(lines) != 10 {
+		t.Errorf("派工流水应有 10 行，实际 %d 行", len(lines))
 	}
 	if !strings.Contains(string(data), b.SessionID) {
 		t.Error("流水里没有成功那次的会话号")

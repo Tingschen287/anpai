@@ -70,6 +70,10 @@ func TestVerdictIsShownWithACopyableReviewCommand(t *testing.T) {
 	if !strings.Contains(m.notice, "这不是验收事实") {
 		t.Errorf("提示行也要说这不是验收事实：%q", m.notice)
 	}
+	// 界面不知道 owner 核没核对，命令理由不能预先替他写「已核对」（n044 attempt 1 评审次要项）。
+	if strings.Contains(m.detail, "已核对") {
+		t.Errorf("记账命令理由不该预先声称已核对：\n%s", m.detail)
+	}
 	if len(st.got) != 0 || len(fd.got) != 0 || len(fd.reviews) != 0 {
 		t.Error("按 v 不该开工或派工")
 	}

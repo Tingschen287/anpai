@@ -51,6 +51,8 @@ type Model struct {
 	Caps map[string]string
 	// NoModel 为真：配置显式声明这个工具没有模型可选，launch 不传 --model（n042）。
 	NoModel bool
+	// DeclaredAgent 为真：配置显式声明这个自定义工具是 agent，能接任务说明（n044）。
+	DeclaredAgent bool
 }
 
 // RouteTable 是档位表：哪个模型算哪一档。

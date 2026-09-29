@@ -178,3 +178,24 @@ func TestModelNotApplicableIsCheckedAgainstTheTool(t *testing.T) {
 		}
 	}
 }
+
+// n044：自定义工具显式声明 agent 才派；声明要传进档位表；shell 不能声明。
+func TestAgentDeclarationIsLoadedAndShellCannotClaimIt(t *testing.T) {
+	base := func(entry string) string {
+		return `{"upstream_binary":"/bin/true","profile":"_t","models":[` + entry + `]}`
+	}
+	p := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(p, []byte(base(`{"id":"grok-4","tool":"grok","route_class":"frontier","agent":true}`)), 0o600)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("声明了 agent 的自定义工具应当能加载：%v", err)
+	}
+	tbl, _ := cfg.RouteTable()
+	if m, _ := tbl.Lookup("grok-4"); !m.DeclaredAgent {
+		t.Error("agent 声明没传进档位表")
+	}
+	os.WriteFile(p, []byte(base(`{"id":"sh","tool":"shell","route_class":"economy","model_not_applicable":true,"agent":true}`)), 0o600)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "不能声明") {
+		t.Errorf("shell 声明 agent 应当报错：%v", err)
+	}
+}

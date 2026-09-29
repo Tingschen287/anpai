@@ -21,6 +21,10 @@ func (c *Client) StopSession(ctx context.Context, p lease.Permit, sessionID stri
 		return fmt.Errorf("不停会话：%w", err)
 	}
 	defer release()
+	// 只收 Work Deck 自己的自动许可：停会话是派工器收拾自己刚起的空会话，不是 owner 的回答（n044 attempt 1 评审次要项）。
+	if p.Kind() != lease.KindAutomatic {
+		return fmt.Errorf("不停会话：停会话只接受 Work Deck 的自动许可，拿到的是 %q", p.Kind())
+	}
 	if _, err := c.exec(ctx, "session", "stop", sessionID, "--json"); err != nil {
 		return fmt.Errorf("停会话 %s 失败：%w", sessionID, err)
 	}

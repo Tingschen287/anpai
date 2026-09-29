@@ -131,6 +131,19 @@ func TestStopSessionRunsSessionStopOnlyWithAPermit(t *testing.T) {
 		t.Errorf("上游参数应当正好是 session stop s1 --json，实际 %q", got)
 	}
 
+	// 手动许可（owner 的回答）不能拿来停会话。
+	mp, err := leases.Manual("s1")
+	if err != nil {
+		t.Fatalf("前提：Work Deck 持有的会话签得出手动许可：%v", err)
+	}
+	os.Remove(argsFile)
+	if err := c.StopSession(t.Context(), mp, "s1"); err == nil || !strings.Contains(err.Error(), "只接受 Work Deck 的自动许可") {
+		t.Errorf("手动许可应当被拒：%v", err)
+	}
+	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+		t.Error("手动许可被拒时上游不该被调用")
+	}
+
 	if err := leases.OwnerTakeover("s1", "测试"); err != nil {
 		t.Fatal(err)
 	}
@@ -140,14 +153,30 @@ func TestStopSessionRunsSessionStopOnlyWithAPermit(t *testing.T) {
 }
 
 // shell 不接任务说明；配置里的名字与 launch 回执两处都核（n043 复审新问题 1）。
+// 自定义工具要在配置里声明 agent: true 才派；launch 后实际命令是 shell 解释器的一律不送（n044 attempt 1 评审 blocker 1）。
 func TestToolsThatAreNotAgentsGetNoTaskText(t *testing.T) {
-	if err := CheckTakesTaskText("shell"); err == nil || !strings.Contains(err.Error(), "不是 agent") {
-		t.Errorf("shell 应当被拒：%v", err)
+	if err := CheckTakesTaskText("shell", true); err == nil || !strings.Contains(err.Error(), "不是 agent") {
+		t.Errorf("shell 声明了也应当被拒：%v", err)
 	}
-	for _, tool := range []string{"claude", "codex", "n044agent"} {
-		if err := CheckTakesTaskText(tool); err != nil {
-			t.Errorf("%s 不该在 launch 前被拒：%v", tool, err)
+	for _, tool := range []string{"claude", "codex", "gemini", "aider"} {
+		if err := CheckTakesTaskText(tool, false); err != nil {
+			t.Errorf("上游内置的 agent %s 不该在 launch 前被拒：%v", tool, err)
 		}
+	}
+	if err := CheckTakesTaskText("n044agent", false); err == nil || !strings.Contains(err.Error(), "没声明") {
+		t.Errorf("没声明 agent 的自定义工具应当被拒：%v", err)
+	}
+	if err := CheckTakesTaskText("n044agent", true); err != nil {
+		t.Errorf("声明了 agent 的自定义工具不该在 launch 前被拒：%v", err)
+	}
+	// 自定义工具的命令是 shell 解释器：上游回执写的是自定义名字，但实际命令暴露了它。
+	for _, cmd := range []string{"bash", "/bin/sh -l", "env -i FOO=1 zsh", "/usr/bin/env bash"} {
+		if err := CheckLaunchedTakesTaskText(LaunchResult{Tool: "n044sh", Command: "n044sh", ResolvedCommand: cmd}); err == nil || !strings.Contains(err.Error(), "shell 解释器") {
+			t.Errorf("实际命令 %q 应当被认成 shell：%v", cmd, err)
+		}
+	}
+	if err := CheckLaunchedTakesTaskText(LaunchResult{Tool: "n044sh", Command: "bash"}); err == nil {
+		t.Error("回执没给 resolved_command 时按 command 核")
 	}
 	// 配成 bash 的会话，上游回执写的是 shell（实测 launch -c bash --json 的 tool 字段）。
 	if err := CheckLaunchedTakesTaskText(LaunchResult{Tool: "shell", Command: "bash"}); err == nil || !strings.Contains(err.Error(), "bash") {
@@ -156,7 +185,7 @@ func TestToolsThatAreNotAgentsGetNoTaskText(t *testing.T) {
 	if err := CheckLaunchedTakesTaskText(LaunchResult{Command: "x"}); err == nil {
 		t.Error("回执没写工具时不该信")
 	}
-	if err := CheckLaunchedTakesTaskText(LaunchResult{Tool: "n044agent", Command: "n044agent"}); err != nil {
+	if err := CheckLaunchedTakesTaskText(LaunchResult{Tool: "n044agent", Command: "n044agent", ResolvedCommand: "cat"}); err != nil {
 		t.Errorf("自定义 agent 工具不该被拒：%v", err)
 	}
 }

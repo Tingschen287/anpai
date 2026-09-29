@@ -75,6 +75,9 @@ type Outcome struct {
 	RoutingAt time.Time `json:"routing_at,omitempty"`
 	// SessionStopped 为真：会话起来了却没拿到任务说明，派工器已把它停掉（n044）。
 	SessionStopped bool `json:"session_stopped,omitempty"`
+	// ReplacedSession 是被本次绑定替换掉的旧绑定会话号（n044 attempt 2）：账本刚分配的 attempt 在绑定存储里已有一条，
+	// 那只能是别的账本历史（例如夹具重建）或崩溃留下的。
+	ReplacedSession string `json:"replaced_session,omitempty"`
 }
 
 // Launcher 是派工器用到的那一点点上游能力。
@@ -170,7 +173,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		return refuse(err)
 	}
 	// 不是 agent 的工具不接任务说明（n043 复审新问题 1）：launch 之前按配置核一次，launch 之后按回执再核一次。
-	if err := agentdeck.CheckTakesTaskText(ToolOf(model)); err != nil {
+	if err := agentdeck.CheckTakesTaskText(ToolOf(model), model.DeclaredAgent); err != nil {
 		return refuse(err)
 	}
 
@@ -236,9 +239,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 		}
 		attempt = a
 		out.Attempt = a
+		// 账本刚分配的 attempt 不可能有合法的旧绑定：start 每次给新号，同一本账里一个号只分配一次（节点已 running 时 start 会失败）。
+		// 所以这条只能来自别的账本历史（例如夹具重建）或崩溃残留：用新会话替换它，旧会话号记进流水。
+		// 上一版停掉新会话、提示按 d 补派，可界面见到绑定就拒绝 d，节点卡在 running（n044 attempt 1 评审 blocker 3）。
 		if existing, ok := d.Store.Get(req.NodeID, attempt); ok {
-			return abandon(fmt.Errorf("Graph 已开工 attempt %d，但绑定存储里已经有这个 attempt 的旧绑定（会话 %s），新会话不绑。"+
-				"节点现在是 running：先核对绑定存储，再按 d 补派", attempt, existing.SessionID))
+			out.ReplacedSession = existing.SessionID
 		}
 	}
 
@@ -283,10 +288,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req Request) (binding.Binding
 	return b, nil
 }
 
+// abandonTimeout 是停一个会话最多等多久（探测有没有人连着 + 上游 session stop）。
+const abandonTimeout = 30 * time.Second
+
 // abandon 停掉一个刚起、没拿到任务说明的会话，把结果并进拒绝理由（n044）。
 // 停不掉（有人连着、探测失败、上游报错）就照实说，请人手工处理。
+//
+// 停会话另起一个 context：调用方的 context 可能正是因为超时才让 start 失败，拿它去停，
+// 探测和 session stop 一步都跑不了（n044 attempt 1 评审 blocker 2）。
 func (d *Dispatcher) abandon(ctx context.Context, out *Outcome, sessionID string, cause error) error {
-	if err := d.Deck.Abandon(ctx, sessionID); err != nil {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonTimeout)
+	defer cancel()
+	if err := d.Deck.Abandon(sctx, sessionID); err != nil {
 		return fmt.Errorf("%w。刚起的会话 %s 没拿到任务说明，也没停掉（%v）：请手工确认它的去向", cause, sessionID, err)
 	}
 	out.SessionStopped = true

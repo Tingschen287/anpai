@@ -67,7 +67,7 @@ func reviewCommand(script string, node projectctl.Node, attempt int, b binding.B
 		"--route-class", or(b.RouteClass, "<route_class>"),
 		"--model", or(b.Model, "<model>"),
 		"--report", shq(reviewReportPath(node.ID, attempt)),
-		"--reason", shq(fmt.Sprintf("评审会话 %s 的报告（sha256 %s）结论 VERDICT: %s；owner 已核对报告", b.SessionID, reportSHA, verdict)),
+		"--reason", shq(fmt.Sprintf("评审会话 %s 的报告（sha256 %s）结论 VERDICT: %s；由 owner 核对报告后运行本命令记账", b.SessionID, reportSHA, verdict)),
 	}, " ")
 }
 

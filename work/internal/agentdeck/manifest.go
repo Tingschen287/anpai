@@ -2,6 +2,7 @@ package agentdeck
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -65,16 +66,32 @@ func CheckToolModel(tool string, modelNotApplicable bool) error {
 // 所以只核配置里的工具名不够：配成 bash 照样起一个 shell。派工器在 launch 之后再按回执核一次（CheckLaunchedTakesTaskText）。
 var ToolsWithoutTaskText = []string{"shell"}
 
+// ShellInterpreters 是上游认作交互式 shell 的进程名（照抄上游 internal/session/userconfig.go:3555 isShellBinary）。
+// 自定义工具的命令若是其中之一，它就是一个 shell，只是换了名字（n044 attempt 1 评审 blocker 1）。
+var ShellInterpreters = []string{"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "nushell", "pwsh", "powershell"}
+
 // CheckTakesTaskText 核对配置里的工具能不能接任务说明。launch 之前调，不行就不起会话。
-func CheckTakesTaskText(tool string) error {
-	if contains(ToolsWithoutTaskText, tool) {
+//
+// 只放行两类：上游内置的 agent 工具（BuiltinTools 去掉 shell），以及配置里显式声明 agent: true 的自定义工具。
+// 自定义工具的命令写在上游配置里，Work Deck 看不到，从名字推断不了它是不是 agent——
+// 上一版只拒名字叫 shell 的，在上游配置里声明一个命令是 bash 的自定义工具就绕过去了（n044 attempt 1 评审 blocker 1）。
+// 声明 agent: true 等于 owner 担保这个工具会把任务说明当任务读；launch 之后还会按回执核一次实际命令。
+func CheckTakesTaskText(tool string, declaredAgent bool) error {
+	switch {
+	case contains(ToolsWithoutTaskText, tool):
 		return fmt.Errorf("工具 %s 不是 agent：它会把任务说明当命令逐行执行（n043 复审实测），不派。"+
-			"Graph 任务要派给 claude、codex 这类 agent，或上游配置里声明的自定义 agent 工具", tool)
+			"Graph 任务要派给 claude、codex 这类 agent，或配置里声明 agent: true 的自定义 agent 工具", tool)
+	case contains(BuiltinTools, tool):
+		return nil
+	case !declaredAgent:
+		return fmt.Errorf("工具 %s 不是上游内置的 agent，配置里也没声明 \"agent\": true：它的命令写在上游配置里，"+
+			"Work Deck 看不到，确认不了它会把任务说明当任务读（命令若是 bash 之类，说明会被当命令执行），不派", tool)
 	}
 	return nil
 }
 
-// CheckLaunchedTakesTaskText 按 launch 回执核对上游实际起的是什么工具。回执没写工具，同样不信。
+// CheckLaunchedTakesTaskText 按 launch 回执核对上游实际起的是什么：回执没写工具不信；上游认成 shell 不送；
+// 实际命令（resolved_command，没有就看 command）是 shell 解释器也不送。
 func CheckLaunchedTakesTaskText(res LaunchResult) error {
 	if strings.TrimSpace(res.Tool) == "" {
 		return fmt.Errorf("上游 launch 回执没写会话是哪种工具，确认不了它是 agent，任务说明不送")
@@ -82,7 +99,31 @@ func CheckLaunchedTakesTaskText(res LaunchResult) error {
 	if contains(ToolsWithoutTaskText, res.Tool) {
 		return fmt.Errorf("上游把命令 %q 起成了 %s 会话：它不是 agent，会把任务说明当命令执行，任务说明不送", res.Command, res.Tool)
 	}
+	cmd := res.ResolvedCommand
+	if strings.TrimSpace(cmd) == "" {
+		cmd = res.Command
+	}
+	if bin := commandBinary(cmd); contains(ShellInterpreters, bin) {
+		return fmt.Errorf("上游起的工具 %s 实际命令是 %q：%s 是 shell 解释器，会把任务说明当命令执行，任务说明不送", res.Tool, cmd, bin)
+	}
 	return nil
+}
+
+// commandBinary 取一条命令真正执行的程序名：去掉路径；env 开头的跳过它的选项与变量赋值。
+// 只认得这种常见写法；包一层别的启动器（script、python -c 等）认不出，那时靠配置里的 agent 声明担保。
+func commandBinary(cmd string) string {
+	fields := strings.Fields(cmd)
+	for i := 0; i < len(fields); i++ {
+		base := strings.ToLower(filepath.Base(fields[i]))
+		if base == "env" {
+			for i+1 < len(fields) && (strings.HasPrefix(fields[i+1], "-") || strings.Contains(fields[i+1], "=")) {
+				i++
+			}
+			continue
+		}
+		return base
+	}
+	return ""
 }
 
 // CodexTrust 说明上游 launch 某个工具时会不会改写 owner 的 Codex 全局配置（n043 owner 验收补充发现）。

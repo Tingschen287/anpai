@@ -125,7 +125,7 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, req ReviewRequest) (b
 		return refuse(fmt.Errorf("评审不得降档：%w", err))
 	}
 	// 不是 agent 的工具当不了评审（n043 复审新问题 1）：它会把 brief 当命令执行。
-	if err := agentdeck.CheckTakesTaskText(ToolOf(model)); err != nil {
+	if err := agentdeck.CheckTakesTaskText(ToolOf(model), model.DeclaredAgent); err != nil {
 		return refuse(err)
 	}
 

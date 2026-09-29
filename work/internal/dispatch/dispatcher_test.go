@@ -365,7 +365,7 @@ func TestDispatchWithoutTaskTextIsRefused(t *testing.T) {
 // n042：配置声明没有模型的条目，派工时不给上游传 --model；绑定仍记配置里的 id。
 // n044 起 shell 不接任务，这里换成一个没有模型可选的自定义 agent 工具。
 func TestNoModelEntryLaunchesWithoutAModelFlag(t *testing.T) {
-	tbl, err := NewRouteTable([]Model{{ID: "custom-agent", Tool: "n044agent", Class: Frontier, NoModel: true}})
+	tbl, err := NewRouteTable([]Model{{ID: "custom-agent", Tool: "n044agent", Class: Frontier, NoModel: true, DeclaredAgent: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/dispatch"
@@ -42,6 +43,9 @@ type ModelEntry struct {
 	// ModelNotApplicable 显式声明这个工具没有模型可选（例如 shell）：派工时不给上游传 --model，
 	// id 只用来在档位表、绑定与审计里认它（n042）。不写就是有模型，id 原样作为 --model 传给上游。
 	ModelNotApplicable bool `json:"model_not_applicable"`
+	// Agent 显式声明这个自定义工具是 agent，能接任务说明（n044）。上游内置的 agent 工具不必写；
+	// 自定义工具的命令在上游配置里，Work Deck 看不到，不写就不派。shell 不能声明。
+	Agent bool `json:"agent"`
 }
 
 // TokenEnv 是存放上游 token 的环境变量名。
@@ -102,6 +106,9 @@ func (c *Config) Validate() error {
 		if err := agentdeck.CheckToolModel(m.Tool, m.ModelNotApplicable); err != nil {
 			return fmt.Errorf("模型 %s：%w", m.ID, err)
 		}
+		if m.Agent && slices.Contains(agentdeck.ToolsWithoutTaskText, m.Tool) {
+			return fmt.Errorf("模型 %s：工具 %s 不是 agent，不能声明 \"agent\": true", m.ID, m.Tool)
+		}
 	}
 	for node, caps := range c.NodeCapabilities {
 		if err := routing.ValidateRequired(caps); err != nil {
@@ -117,7 +124,7 @@ func (c *Config) RouteTable() (*dispatch.RouteTable, error) {
 	for _, m := range c.Models {
 		models = append(models, dispatch.Model{
 			ID: m.ID, Tool: m.Tool, Class: dispatch.RouteClass(m.Class), Caps: m.Capabilities,
-			NoModel: m.ModelNotApplicable,
+			NoModel: m.ModelNotApplicable, DeclaredAgent: m.Agent,
 		})
 	}
 	return dispatch.NewRouteTable(models)

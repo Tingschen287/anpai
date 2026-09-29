@@ -30,14 +30,18 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
   `TestDangerousSessionSubcommandsAreRefused` 逐条确认 `session` 底下 7 个危险子命令被拒（n044 起 `stop` 不在其中）。
 - **n044：`session stop`**。只有一个用处：派工器刚起的会话没拿到任务说明时（Graph 开工失败、任务送不进去、上游起成了 shell）把它停掉，
   不留一个没人认领的会话。`StopSession` 和 `SendMessage` 一样要一张 `lease.Permit`，arbiter 的 `Abandon` 签许可前同样探测 `list-clients`：
-  owner 接管着、有人连着、探测失败时一律不停。`TestSessionStopOnlyRunsInStopSessionAfterAPermit` 核对包内停会话的上游调用只有这一处且先核许可。
+  owner 接管着、有人连着、探测失败时一律不停；`StopSession` 只收自动许可（owner 回答用的手动许可不行）。
+  停会话另起一个 30 秒的 context：调用方的 context 可能正因超时才让 start 失败（n044 attempt 1 评审 blocker 2）。`TestSessionStopOnlyRunsInStopSessionAfterAPermit` 核对包内停会话的上游调用只有这一处且先核许可。
   派工器不对执行者的会话调它（评审撞上执行会话时不停）。上游 stop 杀掉会话的 tmux 会话，存储里的记录留着；
   实测 `list --json` 对停掉的自定义工具会话报 `stopped`，对停掉的 shell 会话报 `unknown`，所以判「停没停」看 tmux 会话还在不在。
   本包自己仍不拼任何 tmux kill 命令。停掉之后写入权记账里那一条照旧留着：会话已经不在了，那条登记不会再放行任何投递。
 - **n044：不是 agent 的工具不接任务说明**（`ToolsWithoutTaskText`：`shell`）。任务说明送进 shell 会被当成命令逐行执行（n043 复审实测满屏
   `command not found`）。上游对认不出的命令一律按 shell 处理（`internal/session/toolregistry.go:415` `MatchTool`），实测 `launch -c bash --json` 的
-  `tool` 是 `shell`、自定义工具 `-c n044agent` 的 `tool` 是 `n044agent`。所以派工器核两次：launch 前按配置的工具名（`CheckTakesTaskText`），
-  launch 后按回执的 `tool` 字段（`CheckLaunchedTakesTaskText`；回执没写工具同样不信），后者不过就停掉会话。
+  `tool` 是 `shell`；上游配置里注册的自定义工具，回执的 `tool` 是自定义名字、`resolved_command` 是它的实际命令（`-c n044agent` → `cat`，`-c n044sh` → `bash`）。
+  所以派工器核两次。launch 前（`CheckTakesTaskText`）：shell 拒；上游内置的 agent 工具（`BuiltinTools` 去掉 shell）放行；自定义工具要配置里写 `"agent": true`
+  才放行——它的命令在上游配置里，Work Deck 看不到（n044 attempt 1 评审 blocker 1：只拒名字叫 shell 的，注册一个命令是 bash 的自定义工具就绕过了）。
+  launch 后（`CheckLaunchedTakesTaskText`）：回执没写工具不信；`tool` 是 shell 不送；实际命令的程序名（去路径、跳过 `env` 的选项与赋值）在
+  `ShellInterpreters`（照抄上游 `internal/session/userconfig.go:3555` `isShellBinary`）里也不送，不过就停掉会话。包一层别的启动器认不出，靠 `agent` 声明担保。
 - **n044：launch Codex 兼容工具会改 owner 的 Codex 全局配置**。上游 launch 前调 `preAcceptCodexWorkspaceTrust`（`internal/session/codex_trust.go:119-137`），
   判据 `IsCodexCompatible`（`internal/session/userconfig.go:3542`：工具名是 codex，或自定义工具声明 `compatible_with = "codex"`、命令本身是 codex），
   把工作目录写进 `~/.codex/config.toml`（`CODEX_HOME` 未设时）的 `projects.<目录>.trust_level = "trusted"`。写法是整份解码再重新编码写回
