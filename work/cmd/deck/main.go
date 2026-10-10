@@ -50,6 +50,8 @@ func main() {
 		layoutCmd(os.Args[2:])
 	case "sidebar", "tabs":
 		ui(dirs, os.Args[1], os.Args[2:])
+	case "settings":
+		settings(dirs, os.Args[2:])
 	case "panel":
 		panel(dirs, os.Args[2:])
 	case "whoami":
@@ -134,6 +136,24 @@ func ui(dirs deckstore.Dirs, which string, args []string) {
 		err = deckui.RunTabs(api, *layoutSock)
 	}
 	if err != nil {
+		fail("%v", err)
+	}
+}
+
+// settings：agent 设置界面（布局里按 F9）；-check 只读自查设置文件（升级前用，不需要 deckd）。
+func settings(dirs deckstore.Dirs, args []string) {
+	fs := flag.NewFlagSet("settings", flag.ExitOnError)
+	check := fs.Bool("check", false, "只读检查 "+dirs.Config+" 下的设置文件，不写任何东西")
+	socketFlags(fs)
+	fs.Parse(args)
+	if *check {
+		if err := deckstore.CheckSettings(dirs.Config); err != nil {
+			fail("设置有问题：%v", err)
+		}
+		fmt.Println("设置没有问题：" + dirs.Config)
+		return
+	}
+	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: deckclient.New(deckd.SocketPath(dirs))}); err != nil {
 		fail("%v", err)
 	}
 }

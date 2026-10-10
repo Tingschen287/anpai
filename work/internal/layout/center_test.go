@@ -79,9 +79,9 @@ func waitOps(t *testing.T, s *script, n int) []string {
 // 首次连上 resync；Ctrl-Q（正常断开）后 reset；连不上之后 resync。
 func TestCenterLoopChoosesOpByHowTheClientEnded(t *testing.T) {
 	s := &script{now: time.Unix(0, 0), runs: []run{
-		{lasts: time.Minute},                         // 首次，owner 用了一会儿后按 Ctrl-Q
-		{lasts: time.Minute, err: errors.New("lost")}, // 第二次，连接出错
-		{lasts: time.Minute},                         // 第三次
+		{lasts: time.Minute},                                                         // 首次，owner 用了一会儿后按 Ctrl-Q
+		{lasts: time.Minute, err: errors.New("lost")},                                // 第二次，连接出错
+		{lasts: time.Minute},                                                         // 第三次
 		{start: errors.New("x")}, {start: errors.New("x")}, {start: errors.New("x")}, // 之后连续起不来
 	}, answers: []bool{false}}
 	s.loop().Run()

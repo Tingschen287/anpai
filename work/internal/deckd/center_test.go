@@ -75,7 +75,7 @@ func attachIdle(agent string) string {
 // 中间窗格进程本身就是 client，或 client 是它的子进程（deck center 的情形），都要认得出。
 func TestTmuxCenterFindsClientDirectlyOrThroughParent(t *testing.T) {
 	for name, cmd := range map[string]func(string) string{
-		"直接":   attachIdle,
+		"直接":  attachIdle,
 		"隔一层": func(a string) string { return "sh -c '" + attachIdle(a) + "; sleep 600'" },
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -196,4 +196,3 @@ func TestPIDReuseDuringResolutionIsDetected(t *testing.T) {
 		t.Fatalf("pid 复用应报错，却判成了 %+v", p)
 	}
 }
-

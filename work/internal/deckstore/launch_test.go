@@ -103,14 +103,14 @@ func TestLaunchFingerprintIsRequiredAndRequestIDIsUnique(t *testing.T) {
 		t.Fatal("同一请求 id 预留了两次")
 	}
 	for name, change := range map[string]func(*Session){
-		"无请求 id":   func(y *Session) { y.RequestID = "" },
-		"请求 id 含空格": func(y *Session) { y.RequestID = "a b" },
-		"相对目录":     func(y *Session) { y.Dir = "proj" },
-		"不规整目录":    func(y *Session) { y.Dir = "/tmp/proj/../x" },
-		"目录含控制符":   func(y *Session) { y.Dir = "/tmp/\x1b[2Jx" },
+		"无请求 id":         func(y *Session) { y.RequestID = "" },
+		"请求 id 含空格":      func(y *Session) { y.RequestID = "a b" },
+		"相对目录":           func(y *Session) { y.Dir = "proj" },
+		"不规整目录":          func(y *Session) { y.Dir = "/tmp/proj/../x" },
+		"目录含控制符":         func(y *Session) { y.Dir = "/tmp/\x1b[2Jx" },
 		"目录超过 scope 值上限": func(y *Session) { y.Dir = "/tmp/" + strings.Repeat("d", maxScopeValue) },
-		"任务哈希大写":   func(y *Session) { y.TaskSHA256 = strings.Repeat("A", 64) },
-		"参数哈希过短":   func(y *Session) { y.ArgsSHA256 = "abc" },
+		"任务哈希大写":         func(y *Session) { y.TaskSHA256 = strings.Repeat("A", 64) },
+		"参数哈希过短":         func(y *Session) { y.ArgsSHA256 = "abc" },
 	} {
 		y := sub(Economy)
 		change(&y)

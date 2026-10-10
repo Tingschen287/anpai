@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrBroken 表示存储曾经写失败，已停止接受写入。
@@ -686,6 +687,26 @@ func checkIDs(x Session) error {
 // maxScopeValue 是批准范围里单个值的最大字节数（决定的 scope 与启动请求的工作目录共用）。
 const maxScopeValue = 300
 
+// CheckPath 是项目目录与工作目录的校验（n049，承接 n050 评审建议）：规整的绝对路径、合法 UTF-8、
+// 不超过 scope 值上限（目录会原样进批准范围），且不含任何控制字符——包括 Clean 会保留的换行与制表符、DEL 与 C1。
+func CheckPath(p string) error {
+	if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return fmt.Errorf("须是规整的绝对路径：%q", Clean(p, 120))
+	}
+	if len(p) > maxScopeValue {
+		return fmt.Errorf("超过 %d 字节（%d）：目录会原样写进批准范围，请换短一点的路径", maxScopeValue, len(p))
+	}
+	if !utf8.ValidString(p) {
+		return fmt.Errorf("不是合法的 UTF-8")
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return fmt.Errorf("含控制字符（U+%04X）：%q", r, Clean(p, 120))
+		}
+	}
+	return nil
+}
+
 var (
 	requestRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 	sha256Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -697,8 +718,8 @@ func checkLaunch(x Session) error {
 		return fmt.Errorf("启动请求 id 缺失或不合格（只许字母数字与 ._:-，最长 64）")
 	}
 	// 目录会原样进批准范围（scope），所以长度上限与 scope 的值一致：否则长目录能预留，却申请不了对应的例外（评审 A3 建议 S1）
-	if !filepath.IsAbs(x.Dir) || filepath.Clean(x.Dir) != x.Dir || len(x.Dir) > maxScopeValue || Clean(x.Dir, 0) != x.Dir {
-		return fmt.Errorf("工作目录须是规整的绝对路径，最长 %d 字节：%q", maxScopeValue, Clean(x.Dir, 200))
+	if err := CheckPath(x.Dir); err != nil {
+		return fmt.Errorf("工作目录 %w", err)
 	}
 	if !sha256Re.MatchString(x.TaskSHA256) || !sha256Re.MatchString(x.ArgsSHA256) {
 		return fmt.Errorf("任务与启动参数的 sha256 须是 64 位小写十六进制")

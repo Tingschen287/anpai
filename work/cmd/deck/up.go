@@ -146,7 +146,9 @@ func center(dirs deckstore.Dirs, args []string) {
 				return err
 			}, nil
 		},
-		Announce: func(op string, pid int) { announce(client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid) },
+		Announce: func(op string, pid int) {
+			announce(client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid)
+		},
 		Pause: func(reason string) bool {
 			fmt.Print("\x1b[2J\x1b[H")
 			fmt.Printf("\n  %s\n\n  检查 agent-deck 的 tmux server（%s）后按回车重试，输入 q 回车退出。\n", reason, *agentSock)

@@ -37,9 +37,15 @@ func contains(xs []string, x string) bool {
 func Openable(x SessionInfo) bool { return x.AgentDeckID != "" && x.TmuxSession != "" }
 
 // IsOpen、IsFocus、IsTaken、IsPending 按 viewstate 的状态判断（它统一用 agent-deck 会话 id）。
-func (d Data) IsOpen(x SessionInfo) bool    { return x.AgentDeckID != "" && contains(d.View.Open, x.AgentDeckID) }
-func (d Data) IsFocus(x SessionInfo) bool   { return x.AgentDeckID != "" && d.View.Focus == x.AgentDeckID }
-func (d Data) IsPending(x SessionInfo) bool { return x.AgentDeckID != "" && contains(d.View.HandbackPending, x.AgentDeckID) }
+func (d Data) IsOpen(x SessionInfo) bool {
+	return x.AgentDeckID != "" && contains(d.View.Open, x.AgentDeckID)
+}
+func (d Data) IsFocus(x SessionInfo) bool {
+	return x.AgentDeckID != "" && d.View.Focus == x.AgentDeckID
+}
+func (d Data) IsPending(x SessionInfo) bool {
+	return x.AgentDeckID != "" && contains(d.View.HandbackPending, x.AgentDeckID)
+}
 func (d Data) IsTaken(x SessionInfo) bool {
 	return x.AgentDeckID != "" && contains(d.View.TakenOver, x.AgentDeckID) && !d.IsPending(x)
 }

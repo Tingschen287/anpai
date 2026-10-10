@@ -140,23 +140,46 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 
 ```bash
 go build -o deck ./cmd/deck
-./deck daemon                  # 后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
-./deck panel quota             # 在当前窗格跑一块面板：decisions、quota、progress、notifications、activity
+./deck up                      # 一条命令打开四区布局（没有 deckd 就在布局的后台窗口里起它；已有布局就直接接上）
+./deck settings -check         # 只读自查设置文件（升级前先跑；不需要 deckd，不写任何东西）
+./deck daemon                  # 只起后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
 ./deck whoami                  # deckd 把当前进程认成谁
 ```
 
+**布局**（n049）：deck 自己的 tmux server（`$TMUX_TMPDIR/tmux-UID/deck`，无前缀键、无状态栏）。左栏 `deck sidebar` 按项目列会话
+（★ 主 agent，圆点：绿在跑、黄等你输入、灰空闲、红出错、空心为未知），中间上方一行 `deck tabs` 是打开的会话，中间是连到
+agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是面板。点左栏的会话把它换进中间；子 agent 默认只读，
+主 agent 的第一条 brief 确认送达后可写。按键都在布局 server 上截获，不进中间的 CLI：
+
+| 键 | 作用 |
+|---|---|
+| F2 | 接管中间正在显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还；交还没完成时再按 F2 重新接管） |
+| Ctrl-Q | 把中间正在看的会话放回后台（会话照常运行；任何 CLI 都收不到 Ctrl-Q） |
+| F5 / F6 / F7 | 显示或隐藏左栏 / 右栏 / 下栏（程序不退出，尺寸复原） |
+| F9 | agent 设置：全局可用清单（没装的标灰）、项目勾选 agent 与三档模型、主 agent、撤销记住的 Codex 授权 |
+| F10 | 键盘焦点回到中间窗格 |
+
+- logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时在 Windows Terminal 里用 Sixel，其余用半格色块。
+- 中间 client 断开（例如显示的会话被关掉）会以只读重连，并把断开时显示的会话放回后台；连续 3 次在 3 秒内断开就停下等你按回车。
+  每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。
+- 会话运行状态来自 agent-deck 的 headless 服务：`deck up -upstream 127.0.0.1:8420`（或 `DECK_AGENTDECK_ADDR`），
+  token 取 `WORKDECK_AGENTDECK_TOKEN`；不配时圆点一律是「状态未知」。
+
 - **唯一写入者**：deck 的状态（注册表、决策、通知、Codex 授权记忆、汇报队列、lease）只由 deckd 写，放在 `$XDG_STATE_HOME/deck/`，与旧 `work` 的目录分开。
 - **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。
-- **按调用者分权限**：deckd 凭 `SO_PEERCRED` 与进程链认出调用者在哪个 tmux 窗格——布局窗格是 owner，注册表里的会话是主 agent 或子 agent，其他是未知（只能读额度与健康状态）。项目与创建者一律由服务端推导。同一系统用户下这防的是模型越权与误操作，不防恶意代码。
-- **需要 Linux 6.5 及以上**：连接身份经 `SO_PEERPIDFD` 绑定到对端进程本身，防进程号复用。内核不支持时，一切调用者按未知处理：只能读额度与健康状态，不能写。
+- **按调用者分权限**：deckd 凭 `SO_PEERCRED` 与进程链认出调用者在哪个 tmux 窗格——布局窗格是 owner，注册表里的会话是主 agent 或子 agent，其他是未知（只能读额度、健康状态与 whoami 自身诊断，不能写）。项目与创建者一律由服务端推导。同一系统用户下这防的是模型越权与误操作，不防恶意代码。
+- **需要 Linux 6.5 及以上**：连接身份经 `SO_PEERPIDFD` 绑定到对端进程本身，防进程号复用。内核不支持时，一切调用者按未知处理：只能读额度、健康状态与 whoami，不能写。
+  （n050 另有一道墙钟出生时间检查，n049 去掉了：WSL 校时会移动 btime，同一个进程会被判成「连接后才出生」。）
 - **预留名额（给 n051 的 `deck agent` 用，`deckstore.Store.Reserve`）**：
   - 主、子会话都必须带启动请求指纹：`request_id`（字母数字与 `._:-`，最长 64）、`dir`（规整的绝对路径，最长 300 字节）、`task_sha256` 与 `args_sha256`（64 位小写十六进制，分别是任务正文与实际启动参数的 sha256）。原样校验，不清洗，不合格就拒绝。
-  - `request_id` 在整个注册表里只能用一次，失败、uncertain 等终态记录也占着它。重复请求返回错误，不是幂等地返回原预留；要重试就用新的请求 id。启动失败（`LaunchFailed`，非 uncertain）会释放名额，uncertain 继续占名额。
+  - `request_id` 在整个注册表里只能用一次：不论记录现在是什么状态（已完成、失败，或结果不明的 uncertain）都占着它。重复请求返回错误，不是幂等地返回原预留；要重试就用新的请求 id。启动失败（`LaunchFailed`，非 uncertain）会释放名额；uncertain 不是终态，继续占名额，之后仍可能被确认为启动成功（`LaunchSucceeded`）。
   - 超过预算包络时要先建一个 cost 决定，scope 用 `SpawnScope(请求, 项目设置)`；owner 批准后 `BeginExecute`，再在有效期内以同一请求调 `Reserve(请求, 决定 id)`。目录、任务、参数、请求 id、项目目录、包络版本任一变了，例外都不能用；用一次即标为 applied。
   - 项目目录同样进 scope，所以设置里项目 `path` 最长 300 字节。
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
+  - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`，或核对后把两份的 generation 改成一样。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
+  - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
 - **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
-- 布局（`deck up`、侧栏、中间窗格）在 n049，主 agent 工具（`deck agent`）在 n051。
+- 主 agent 工具（`deck agent`）在 n051。
 
 ## 测试
 

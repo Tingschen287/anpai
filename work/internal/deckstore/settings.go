@@ -137,8 +137,8 @@ func (s Settings) Validate() error {
 		}
 		projects[p.ID] = true
 		// 项目目录会原样进批准范围（scope），长度上限与 scope 的值一致
-		if p.Path == "" || !filepath.IsAbs(p.Path) || len(p.Path) > maxScopeValue || Clean(p.Path, 0) != p.Path {
-			return fmt.Errorf("项目 %s 的 path 必须是绝对路径，最长 %d 字节、不含控制字符", p.ID, maxScopeValue)
+		if err := CheckPath(p.Path); err != nil {
+			return fmt.Errorf("项目 %s 的 path %w", p.ID, err)
 		}
 		selected := map[string]bool{}
 		for _, id := range p.Agents {
@@ -250,59 +250,136 @@ func (s Settings) ResolveModel(projectID, model string) (Resolved, error) {
 
 // LoadSettings 从配置目录读 agents.yaml 与 projects.yaml。agents.yaml 不存在时用 DefaultAgents 并写出来，
 // 方便 owner 在设置界面或文件里改；projects.yaml 不存在就是没有项目。
-func LoadSettings(cfgDir string) (Settings, error) {
-	var s Settings
-	agentsPath := filepath.Join(cfgDir, "agents.yaml")
-	data, err := os.ReadFile(agentsPath)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		s.Agents = DefaultAgents()
-		if err := saveYAML(agentsPath, struct {
-			Agents []AgentDef `yaml:"agents"`
-		}{s.Agents}); err != nil {
-			return Settings{}, err
-		}
-	case err != nil:
-		return Settings{}, err
-	default:
-		var f struct {
-			Agents []AgentDef `yaml:"agents"`
-		}
-		if err := yaml.Unmarshal(data, &f); err != nil {
-			return Settings{}, fmt.Errorf("agents.yaml 解析不了：%w", err)
-		}
-		s.Agents = f.Agents
-	}
-	data, err = os.ReadFile(filepath.Join(cfgDir, "projects.yaml"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Settings{}, err
-	}
-	if err == nil {
-		var f struct {
-			Projects []ProjectDef `yaml:"projects"`
-		}
-		if err := yaml.Unmarshal(data, &f); err != nil {
-			return Settings{}, fmt.Errorf("projects.yaml 解析不了：%w", err)
-		}
-		s.Projects = f.Projects
-	}
-	sort.SliceStable(s.Projects, func(i, j int) bool { return s.Projects[i].ID < s.Projects[j].ID })
-	return s, s.Validate()
+// 两份设置文件的代际标记（n049，承接 n050 评审建议）：每次保存两份文件都写同一个 generation（上一代 +1），
+// 并先把上一代留成 .prev。保存在两次写之间失败，会留下一新一旧两份：读取时代数不一致就拒绝，
+// 不会把「各自合法、组合起来新旧混合」的配置当成有效配置用上。手改时保持两份的 generation 一样即可。
+
+type agentsFile struct {
+	Generation int        `yaml:"generation"`
+	Agents     []AgentDef `yaml:"agents"`
 }
 
-// SaveSettings 写回两份文件（只由 deckd 调）。写之前先校验。
+type projectsFile struct {
+	Generation int          `yaml:"generation"`
+	Projects   []ProjectDef `yaml:"projects"`
+}
+
+// ErrMixedSettings 表示两份设置文件来自不同的保存（上一次保存只写成一半）。
+type ErrMixedSettings struct {
+	Dir                string
+	AgentsGen, ProjGen int
+}
+
+func (e *ErrMixedSettings) Error() string {
+	return fmt.Sprintf("%s 下的 agents.yaml（第 %d 代）与 projects.yaml（第 %d 代）来自不同的保存，上一次保存只写成了一半；"+
+		"不用这份新旧混合的配置。恢复：把代数较新的那份换回它的 .prev（上一代），或核对内容后把两份的 generation 改成一样",
+		e.Dir, e.AgentsGen, e.ProjGen)
+}
+
+// readSettings 只读两份文件（不存在的按空处理），返回内容与各自的代数。
+func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
+	var a agentsFile
+	var p projectsFile
+	data, err := os.ReadFile(filepath.Join(cfgDir, "agents.yaml"))
+	haveAgents := err == nil
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return a, p, false, err
+	default:
+		if err := yaml.Unmarshal(data, &a); err != nil {
+			return a, p, false, fmt.Errorf("agents.yaml 解析不了：%w", err)
+		}
+	}
+	data, err = os.ReadFile(filepath.Join(cfgDir, "projects.yaml"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return a, p, false, err
+	default:
+		if err := yaml.Unmarshal(data, &p); err != nil {
+			return a, p, false, fmt.Errorf("projects.yaml 解析不了：%w", err)
+		}
+		if haveAgents && a.Generation != p.Generation {
+			return a, p, false, &ErrMixedSettings{Dir: cfgDir, AgentsGen: a.Generation, ProjGen: p.Generation}
+		}
+	}
+	return a, p, haveAgents, nil
+}
+
+func LoadSettings(cfgDir string) (Settings, error) {
+	a, p, haveAgents, err := readSettings(cfgDir)
+	if err != nil {
+		return Settings{}, err
+	}
+	s := Settings{Agents: a.Agents, Projects: p.Projects}
+	if !haveAgents {
+		s.Agents = DefaultAgents()
+		if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: p.Generation, Agents: s.Agents}); err != nil {
+			return Settings{}, err
+		}
+	}
+	sort.SliceStable(s.Projects, func(i, j int) bool { return s.Projects[i].ID < s.Projects[j].ID })
+	if err := s.Validate(); err != nil {
+		return Settings{}, fmt.Errorf("%s 下的设置不合规：%w（改好后再启动；可先运行 deck settings -check 自查）", cfgDir, err)
+	}
+	return s, nil
+}
+
+// CheckSettings 只读检查设置文件，不写任何东西（升级前自查用：deck settings -check）。
+func CheckSettings(cfgDir string) error {
+	a, p, haveAgents, err := readSettings(cfgDir)
+	if err != nil {
+		return err
+	}
+	s := Settings{Agents: a.Agents, Projects: p.Projects}
+	if !haveAgents {
+		s.Agents = DefaultAgents()
+	}
+	return s.Validate()
+}
+
+// SaveSettings 写回两份文件（只由 deckd 调）。写之前先校验；两份写同一个新代数，并先留上一代为 .prev。
 func SaveSettings(cfgDir string, s Settings) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), struct {
-		Agents []AgentDef `yaml:"agents"`
-	}{s.Agents}); err != nil {
+	a, _, _, err := readSettings(cfgDir)
+	if err != nil {
+		var mixed *ErrMixedSettings
+		if !errors.As(err, &mixed) {
+			return err
+		}
+		a.Generation = max(mixed.AgentsGen, mixed.ProjGen)
+	}
+	gen := a.Generation + 1
+	for _, name := range []string{"agents.yaml", "projects.yaml"} {
+		if data, err := os.ReadFile(filepath.Join(cfgDir, name)); err == nil {
+			if err := writeAtomic(filepath.Join(cfgDir, name+".prev"), data); err != nil {
+				return err
+			}
+		}
+	}
+	if err := saveFaultBefore("agents.yaml"); err != nil {
 		return err
 	}
-	return saveYAML(filepath.Join(cfgDir, "projects.yaml"), struct {
-		Projects []ProjectDef `yaml:"projects"`
-	}{s.Projects})
+	if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: gen, Agents: s.Agents}); err != nil {
+		return err
+	}
+	if err := saveFaultBefore("projects.yaml"); err != nil {
+		return err
+	}
+	return saveYAML(filepath.Join(cfgDir, "projects.yaml"), projectsFile{Generation: gen, Projects: s.Projects})
+}
+
+// saveFault 是故障注入点：只有测试会设置它，模拟「写到一半失败」。
+var saveFault func(name string) error
+
+func saveFaultBefore(name string) error {
+	if saveFault != nil {
+		return saveFault(name)
+	}
+	return nil
 }
 
 func saveYAML(path string, v any) error {
