@@ -129,6 +129,8 @@ type LayoutPane struct {
 	Width  int
 	Height int
 	Active bool
+	// WindowHeight 是所在窗口的高度（显隐与复原尺寸时按它分右栏面板的高度）。
+	WindowHeight int
 }
 
 // LayoutPanes 列出布局 server 上的全部窗格。server 没在跑时返回 ErrNoServer。
@@ -136,7 +138,7 @@ func LayoutPanes(ctx context.Context, socket string) ([]LayoutPane, error) {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
 	defer cancel()
 	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F",
-		"#{pane_id}\t#{pane_pid}\t#{@deck_role}\t#{window_name}\t#{pane_width}\t#{pane_height}\t#{pane_active}"))
+		"#{pane_id}\t#{pane_pid}\t#{@deck_role}\t#{window_name}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{window_height}"))
 	if err != nil {
 		if noServer(socket, err) {
 			return nil, ErrNoServer
@@ -146,13 +148,14 @@ func LayoutPanes(ctx context.Context, socket string) ([]LayoutPane, error) {
 	var panes []LayoutPane
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 7 {
+		if len(f) != 8 {
 			continue
 		}
 		pid, _ := strconv.Atoi(f[1])
 		w, _ := strconv.Atoi(f[4])
 		h, _ := strconv.Atoi(f[5])
-		panes = append(panes, LayoutPane{ID: f[0], PID: pid, Role: f[2], Window: f[3], Width: w, Height: h, Active: f[6] == "1"})
+		wh, _ := strconv.Atoi(f[7])
+		panes = append(panes, LayoutPane{ID: f[0], PID: pid, Role: f[2], Window: f[3], Width: w, Height: h, Active: f[6] == "1", WindowHeight: wh})
 	}
 	return panes, nil
 }
@@ -194,11 +197,35 @@ func LayoutUnpark(ctx context.Context, socket, pane, target string, spec SplitSp
 	return err
 }
 
+// LayoutResizeWidth 把窗格调到 width 列。
+func LayoutResizeWidth(ctx context.Context, socket, pane, width string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "resize-pane", "-t", pane, "-x", width))
+	return err
+}
+
+// LayoutResizeHeight 把窗格调到 height 行。
+func LayoutResizeHeight(ctx context.Context, socket, pane, height string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "resize-pane", "-t", pane, "-y", height))
+	return err
+}
+
 // LayoutNewWindow 在布局会话里新开一个窗口跑 command（设置界面用：它在窗格里，因此有 owner 身份）。
 func LayoutNewWindow(ctx context.Context, socket, session, name, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
 	defer cancel()
 	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "new-window", "-t", exactTarget(session), "-n", name, command))
+	return err
+}
+
+// LayoutBackgroundWindow 在布局会话里开一个后台窗口跑 command，不切过去（deck up 用它跑 deckd）。
+func LayoutBackgroundWindow(ctx context.Context, socket, session, name, command string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "new-window", "-d", "-t", exactTarget(session), "-n", name, command))
 	return err
 }
 

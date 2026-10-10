@@ -1,10 +1,11 @@
 // Command deck 是 Agent Deck v1 的入口（n050 起）。
 //
+//	deck up                     打开四区布局（没有 deckd 就在布局后台窗口里起它）
 //	deck daemon                 启动后台服务 deckd
 //	deck panel <名字> [-project] 在当前窗格里跑一个面板（decisions、quota、progress、notifications、activity）
 //	deck whoami                 deckd 把当前进程认成谁
 //
-// deck up（拼布局）与侧栏在 n049，deck agent（主 agent 工具）在 n051。
+// 布局窗格里的程序（n049）：center、sidebar、tabs、settings、idle、layout；deck agent（主 agent 工具）在 n051。
 package main
 
 import (
@@ -16,6 +17,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/config"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
@@ -36,6 +39,14 @@ func main() {
 	switch os.Args[1] {
 	case "daemon":
 		daemon(dirs, os.Args[2:])
+	case "up":
+		up(dirs, os.Args[2:])
+	case "center":
+		center(dirs, os.Args[2:])
+	case "idle":
+		idle()
+	case "layout":
+		layoutCmd(os.Args[2:])
 	case "panel":
 		panel(dirs, os.Args[2:])
 	case "whoami":
@@ -94,7 +105,8 @@ func panel(dirs deckstore.Dirs, args []string) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "用法：deck daemon | deck panel <名字> [-project id] | deck whoami")
+	fmt.Fprintln(os.Stderr, "用法：deck up | deck daemon | deck panel <名字> [-project id] | deck whoami\n"+
+		"（布局窗格里的程序：deck center、deck sidebar、deck tabs、deck settings、deck idle、deck layout）")
 	os.Exit(2)
 }
 
@@ -102,3 +114,6 @@ func fail(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "deck: "+format+"\n", a...)
 	os.Exit(1)
 }
+
+// displayWidth 是字符串在终端里占的列数（中文算两列）。
+func displayWidth(s string) int { return lipgloss.Width(s) }

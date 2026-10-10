@@ -1,0 +1,240 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/charmbracelet/x/term"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/layout"
+	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
+)
+
+// socketFlags 是布局与 agent-deck 两个 tmux server 的 socket 参数（deck up 传给每个窗格里的子命令）。
+func socketFlags(fs *flag.FlagSet) (layoutSock, agentSock *string) {
+	return fs.String("layout-socket", tmuxSocket("deck"), "布局 tmux server 的 socket"),
+		fs.String("agent-socket", tmuxSocket("default"), "agent-deck tmux server 的 socket")
+}
+
+// graphicsMode 决定 logo 画法：DECK_GRAPHICS 强制；否则 Windows Terminal（1.22 起支持 Sixel）里用 sixel，其余用色块。
+func graphicsMode(flagValue string) string {
+	switch v := strings.ToLower(flagValue); v {
+	case "sixel", "blocks", "none":
+		return v
+	}
+	if os.Getenv("WT_SESSION") != "" {
+		return "sixel"
+	}
+	return "blocks"
+}
+
+// up：一条命令打开四区布局（n049）。已经有布局就直接接上。
+func up(dirs deckstore.Dirs, args []string) {
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	layoutSock, agentSock := socketFlags(fs)
+	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断")
+	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（会话运行状态）")
+	fs.Parse(args)
+	self, err := os.Executable()
+	if err != nil {
+		fail("找不到 deck 自己的路径：%v", err)
+	}
+	ctx := context.Background()
+	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: graphicsMode(*graphics)}
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
+		spec.Width, spec.Height = w, h
+	}
+	// 空白占位会话：中间窗格起点与「全部隐藏」时显示它
+	if err := agentdeck.EnsureSession(ctx, *agentSock, viewstate.Idle, layout.Quote(self)+" idle"); err != nil {
+		fail("%v", err)
+	}
+	if !agentdeck.LayoutHasSession(ctx, *layoutSock, "deck") {
+		if err := buildLayout(dirs, spec, *upstream); err != nil {
+			fail("%v", err)
+		}
+	}
+	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fail("接不上布局：%v", err)
+	}
+}
+
+func buildLayout(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
+	panels, err := deckstore.LoadPanels(dirs.Config)
+	if err != nil {
+		return fmt.Errorf("读面板注册表失败：%w", err)
+	}
+	spec.Panels = panels
+	if err := os.MkdirAll(dirs.State, 0o700); err != nil {
+		return err
+	}
+	base := filepath.Join(dirs.State, "layout.conf")
+	if err := os.WriteFile(base, []byte(layout.BaseConf(spec)), 0o600); err != nil {
+		return err
+	}
+	m := layout.TmuxMux{Socket: spec.LayoutSocket}
+	built, err := layout.Build(m, spec, base)
+	if err != nil {
+		return fmt.Errorf("拼布局失败：%w", err)
+	}
+	keys := filepath.Join(dirs.State, "keys.conf")
+	if err := os.WriteFile(keys, []byte(layout.BindingsConf(spec, built)), 0o600); err != nil {
+		return err
+	}
+	if err := m.Source(keys); err != nil {
+		return fmt.Errorf("装按键失败：%w", err)
+	}
+	// deckd 没在跑就在布局的后台窗口里起它（外部命令只许在 adapter 包里调，所以不在这里另起进程）
+	var health map[string]any
+	if deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/health", &health) != nil {
+		d := []string{layout.Quote(spec.Deck), "daemon", "-layout-socket", layout.Quote(spec.LayoutSocket), "-agent-socket", layout.Quote(spec.AgentSocket)}
+		if upstream != "" {
+			d = append(d, "-upstream", layout.Quote(upstream))
+		}
+		if err := agentdeck.LayoutBackgroundWindow(context.Background(), spec.LayoutSocket, "deck", "deckd", strings.Join(d, " ")); err != nil {
+			return fmt.Errorf("起 deckd 失败：%w", err)
+		}
+	}
+	return nil
+}
+
+// center：中间窗格里的重连循环（架构稿 §1、§7）。
+func center(dirs deckstore.Dirs, args []string) {
+	fs := flag.NewFlagSet("center", flag.ExitOnError)
+	_, agentSock := socketFlags(fs)
+	fs.Parse(args)
+	self, _ := os.Executable()
+	client := deckclient.New(deckd.SocketPath(dirs))
+	in := bufio.NewReader(os.Stdin)
+	loop := &layout.CenterLoop{
+		Attach: func() (int, func() error, error) {
+			agentdeck.EnsureSession(context.Background(), *agentSock, viewstate.Idle, layout.Quote(self)+" idle")
+			cmd := agentdeck.CenterAttachCommand(*agentSock, viewstate.Idle)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if err := cmd.Start(); err != nil {
+				return 0, nil, err
+			}
+			return cmd.Process.Pid, cmd.Wait, nil
+		},
+		Announce: func(op string, pid int) { announce(client, *agentSock, op, pid) },
+		Pause: func(reason string) bool {
+			fmt.Print("\x1b[2J\x1b[H")
+			fmt.Printf("\n  %s\n\n  检查 agent-deck 的 tmux server（%s）后按回车重试，输入 q 回车退出。\n", reason, *agentSock)
+			line, _ := in.ReadString('\n')
+			return strings.TrimSpace(line) != "q"
+		},
+	}
+	loop.Run()
+}
+
+// announce 等新 client 出现在 agent-deck server 上，再告诉 deckd（deckd 可能还在启动：重试 30 秒）。
+func announce(c *deckclient.Client, agentSock, op string, pid int) {
+	deadline := time.Now().Add(30 * time.Second)
+	listed := false
+	for time.Now().Before(deadline) {
+		if !listed {
+			list, _ := agentdeck.ListTmuxClients(context.Background(), agentSock)
+			for _, cl := range list {
+				if cl.PID == pid {
+					listed = true
+				}
+			}
+		}
+		if listed {
+			var out any
+			err := c.Do(context.Background(), "POST", "/v1/view", map[string]string{"op": op}, &out)
+			if err == nil {
+				return
+			}
+			if de, ok := err.(*deckclient.Error); ok && de.Status != 503 {
+				return // deckd 明确拒绝（例如交还失败 409）：不重发，状态由面板与通知显示
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
+func idle() {
+	draw := func() {
+		w, h, err := term.GetSize(os.Stdout.Fd())
+		if err != nil {
+			w, h = 80, 24
+		}
+		lines := []string{
+			"Agent Deck",
+			"",
+			"左栏点一个会话，它就显示在这里；会话放回后台照常运行。",
+			"",
+		}
+		for _, k := range layout.Keys {
+			lines = append(lines, fmt.Sprintf("%-4s %s", k.Key, k.What))
+		}
+		lines = append(lines, "Ctrl-Q 把正在看的会话放回后台")
+		fmt.Print("\x1b[2J\x1b[?25l")
+		top := max(1, (h-len(lines))/2)
+		for i, l := range lines {
+			col := max(1, (w-displayWidth(l))/2)
+			style := "\x1b[2m"
+			if i == 0 {
+				style = "\x1b[1;38;5;39m"
+			}
+			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", top+i, col, style, l)
+		}
+	}
+	draw()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
+	for s := range sig {
+		if s != syscall.SIGWINCH {
+			return
+		}
+		draw()
+	}
+}
+
+// layoutCmd：deck layout toggle <left|right|bottom> | deck layout normalize（布局 server 的按键调用）。
+func layoutCmd(args []string) {
+	if len(args) < 1 {
+		fail("用法：deck layout toggle <left|right|bottom> | deck layout normalize")
+	}
+	fs := flag.NewFlagSet("layout", flag.ExitOnError)
+	layoutSock, agentSock := socketFlags(fs)
+	sub, rest := args[0], args[1:]
+	region := ""
+	if sub == "toggle" {
+		if len(rest) < 1 {
+			fail("要显隐哪一栏：left、right、bottom")
+		}
+		region, rest = rest[0], rest[1:]
+	}
+	fs.Parse(rest)
+	self, _ := os.Executable()
+	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock}
+	m := layout.TmuxMux{Socket: *layoutSock}
+	var err error
+	switch sub {
+	case "toggle":
+		err = layout.Toggle(m, spec, region)
+	case "normalize":
+		err = layout.Normalize(m, spec)
+	default:
+		fail("不认识 %q", sub)
+	}
+	if err != nil {
+		fail("%v", err)
+	}
+}
