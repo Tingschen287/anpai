@@ -25,6 +25,19 @@ func TestQuotaPanelShowsReasonInsteadOfNumbersWhenUnknown(t *testing.T) {
 			t.Errorf("额度面板缺 %q：\n%s", want, out)
 		}
 	}
+	// 「5h」与「周」两行的条子起点要对齐（全角字按两格算）
+	var starts []int
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, "█"); i >= 0 && (strings.Contains(line, "5h") || strings.Contains(line, "周")) {
+			starts = append(starts, ansi.StringWidth(line[:i]))
+		}
+	}
+	for _, s := range starts {
+		if s != starts[0] {
+			t.Errorf("额度条起点没对齐：%v\n%s", starts, out)
+			break
+		}
+	}
 	if strings.Contains(strings.Split(out, "OpenCode")[1], "%") {
 		t.Errorf("未知的来源不该出现百分比：\n%s", out)
 	}

@@ -78,7 +78,12 @@ func RenderQuota(qs []dashquota.ToolQuota, width int) string {
 			} else if w.Pct >= dashquota.DefaultThresholds.Warn {
 				style = warn
 			}
-			b.WriteString(fmt.Sprintf("  %-3s %s %3d%%\n", label, style.Render(bar(w.Pct, n)), w.Pct))
+			// 按显示宽度补齐：「周」是全角，占两格，%-3s 按字节数补会错位
+			pad := 3 - lipgloss.Width(label)
+			if pad < 0 {
+				pad = 0
+			}
+			b.WriteString(fmt.Sprintf("  %s%s %s %3d%%\n", label, strings.Repeat(" ", pad), style.Render(bar(w.Pct, n)), w.Pct))
 		}
 	}
 	return b.String()
