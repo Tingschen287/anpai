@@ -24,6 +24,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
@@ -47,6 +48,8 @@ func main() {
 		idle()
 	case "layout":
 		layoutCmd(os.Args[2:])
+	case "sidebar", "tabs":
+		ui(dirs, os.Args[1], os.Args[2:])
 	case "panel":
 		panel(dirs, os.Args[2:])
 	case "whoami":
@@ -117,3 +120,20 @@ func fail(format string, a ...any) {
 
 // displayWidth 是字符串在终端里占的列数（中文算两列）。
 func displayWidth(s string) int { return lipgloss.Width(s) }
+
+// ui：布局里的侧栏或标签条（n049）。
+func ui(dirs deckstore.Dirs, which string, args []string) {
+	fs := flag.NewFlagSet(which, flag.ExitOnError)
+	layoutSock, _ := socketFlags(fs)
+	fs.Parse(args)
+	api := deckui.DeckAPI{C: deckclient.New(deckd.SocketPath(dirs))}
+	var err error
+	if which == "sidebar" {
+		err = deckui.RunSidebar(api, *layoutSock)
+	} else {
+		err = deckui.RunTabs(api, *layoutSock)
+	}
+	if err != nil {
+		fail("%v", err)
+	}
+}

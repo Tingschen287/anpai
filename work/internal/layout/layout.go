@@ -299,7 +299,7 @@ func split(ps []deckstore.PanelDef) (right, bottom []deckstore.PanelDef) {
 
 // Keys 是布局 server 根表上的按键（外层 tmux 截获，不进中间的 CLI）。
 var Keys = []struct{ Key, What string }{
-	{"F2", "接管当前显示的子 agent（再按一次或切走即交还）"},
+	{"F2", "接管当前显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还）"},
 	{"F5", "显示/隐藏左栏"},
 	{"F6", "显示/隐藏右栏"},
 	{"F7", "显示/隐藏下栏"},
