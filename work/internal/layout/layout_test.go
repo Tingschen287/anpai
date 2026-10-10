@@ -155,6 +155,9 @@ func TestBindingsConf(t *testing.T) {
 			t.Fatalf("按键配置缺 %q：\n%s", want, conf)
 		}
 	}
+	if !strings.Contains(BaseConf(Spec{}), "set -g set-clipboard on") {
+		t.Fatal("要让中间复制的内容经 OSC 52 到外层终端")
+	}
 	if !strings.Contains(BaseConf(Spec{Graphics: "sixel"}), "terminal-features ',*:sixel'") || strings.Contains(BaseConf(Spec{Graphics: "blocks"}), "terminal-features") ||
 		!strings.Contains(BaseConf(Spec{Graphics: "blocks"}), "DECK_GRAPHICS 'blocks'") {
 		t.Fatal("只有能画 Sixel 时才告诉 tmux")

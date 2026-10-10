@@ -129,6 +129,9 @@ func BaseConf(s Spec) string {
 		"set -g pane-active-border-style fg=colour39",
 		"set -g pane-border-style fg=colour238",
 		"set -g window-size latest",
+		// 中间嵌套 client 复制时，内层 tmux 用 OSC 52 交给它的终端（也就是这台布局 server）；默认 external 不收窗格里
+		// 程序发来的 OSC 52，复制就到不了 Windows 剪贴板（n049 真实 CLI 复验发现）。on：转给外层终端
+		"set -g set-clipboard on",
 	} {
 		b.WriteString(line + "\n")
 	}

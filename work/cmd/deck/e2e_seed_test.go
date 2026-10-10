@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -33,21 +34,38 @@ func TestE2ESeed(t *testing.T) {
 	if err := st.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
 	}
-	for _, x := range []struct{ name, role, tool, title string }{
-		{"main", "main", "claude", "主 agent"},
-		{"sub1", "sub", "codex", "写测试"},
-		{"sub2", "sub", "kimi", "查资料"},
-	} {
+	type seed struct {
+		Name, Role, Tool, Title string
+		ID, Tmux                string // 真实 agent-deck 会话的 id 与 tmux 会话名（真实 CLI 复验用）；空则按演示命名
+		Brief                   bool   // 主 agent 的 brief 是否已确认
+	}
+	seeds := []seed{
+		{Name: "main", Role: "main", Tool: "claude", Title: "主 agent", Brief: true},
+		{Name: "sub1", Role: "sub", Tool: "codex", Title: "写测试"},
+		{Name: "sub2", Role: "sub", Tool: "kimi", Title: "查资料"},
+	}
+	if raw := os.Getenv("DECK_E2E_SESSIONS"); raw != "" {
+		seeds = nil
+		if err := json.Unmarshal([]byte(raw), &seeds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, s := range seeds {
+		x := struct{ name, role, tool, title string }{s.Name, s.Role, s.Tool, s.Title}
+		id, tmux := "ad-"+s.Name, "agentdeck_demo_"+s.Name
+		if s.ID != "" {
+			id, tmux = s.ID, s.Tmux
+		}
 		r, err := st.Reserve(deckstore.Session{Project: "demo", Role: x.role, Agent: x.tool, Tool: x.tool, Model: "m", Tier: deckstore.Economy,
 			Title: x.title, CreatedBy: "owner", RequestID: "e2e-" + x.name, Dir: os.Getenv("HOME"),
 			TaskSHA256: strings.Repeat("a", 64), ArgsSHA256: strings.Repeat("b", 64)}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := st.LaunchSucceeded(r.Key, "ad-"+x.name, "agentdeck_demo_"+x.name); err != nil {
+		if err := st.LaunchSucceeded(r.Key, id, tmux); err != nil {
 			t.Fatal(err)
 		}
-		if x.role == "main" {
+		if x.role == "main" && s.Brief {
 			if err := st.ConfirmBrief(r.Key); err != nil {
 				t.Fatal(err)
 			}
