@@ -134,6 +134,24 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 只读子命令会把它吐出来。从事件时间戳自己推一个出来是猜，所以这里不猜。上限能读到，
 照常显示。
 
+## Agent Deck v1：deck 与 deckd（n050 起，建设中）
+
+`work` 是旧界面，n052 前保留。新的 `deck` 命令（`cmd/deck`）是 v1 的入口，设计见项目 `1.design/2026-10-10-agent-deck-v1-architecture.md`。
+
+```bash
+go build -o deck ./cmd/deck
+./deck daemon                  # 后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
+./deck panel quota             # 在当前窗格跑一块面板：decisions、quota、progress、notifications、activity
+./deck whoami                  # deckd 把当前进程认成谁
+```
+
+- **唯一写入者**：deck 的状态（注册表、决策、通知、Codex 授权记忆、汇报队列、lease）只由 deckd 写，放在 `$XDG_STATE_HOME/deck/`，与旧 `work` 的目录分开。
+- **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。
+- **按调用者分权限**：deckd 凭 `SO_PEERCRED` 与进程链认出调用者在哪个 tmux 窗格——布局窗格是 owner，注册表里的会话是主 agent 或子 agent，其他是未知（只能读额度与健康状态）。项目与创建者一律由服务端推导。同一系统用户下这防的是模型越权与误操作，不防恶意代码。
+- **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
+- **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
+- 布局（`deck up`、侧栏、中间窗格）在 n049，主 agent 工具（`deck agent`）在 n051。
+
 ## 测试
 
 ```bash
