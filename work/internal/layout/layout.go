@@ -300,6 +300,7 @@ func split(ps []deckstore.PanelDef) (right, bottom []deckstore.PanelDef) {
 // Keys 是布局 server 根表上的按键（外层 tmux 截获，不进中间的 CLI）。
 var Keys = []struct{ Key, What string }{
 	{"F2", "接管当前显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还）"},
+	{"Ctrl-Q", "把中间正在看的会话放回后台（会话照常运行）"},
 	{"F5", "显示/隐藏左栏"},
 	{"F6", "显示/隐藏右栏"},
 	{"F7", "显示/隐藏下栏"},
@@ -317,6 +318,9 @@ func BindingsConf(s Spec, b Built) string {
 	var w strings.Builder
 	w.WriteString("# Agent Deck v1 按键（deck up 生成，勿手改）\n")
 	fmt.Fprintf(&w, "bind -n F2 send-keys -t %s F2\n", b.Tabs)
+	// Ctrl-Q：放回后台。在布局 server 上截获、交给标签条按隐藏规则处理（架构稿 §7），只读与可写时都有效，
+	// 不靠 agent-deck 在它那台 server 上的 C-q 断开绑定、也不必断开重连中间 client（n049 真机演示后改）
+	fmt.Fprintf(&w, "bind -n C-q send-keys -t %s C-q\n", b.Tabs)
 	fmt.Fprintf(&w, "bind -n F5 %s\n", toggle("left"))
 	fmt.Fprintf(&w, "bind -n F6 %s\n", toggle("right"))
 	fmt.Fprintf(&w, "bind -n F7 %s\n", toggle("bottom"))

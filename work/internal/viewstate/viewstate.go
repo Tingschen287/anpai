@@ -241,6 +241,14 @@ func (m *Machine) Hide(id string) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
+	if id == "" {
+		// 空串表示「中间正显示的那个」：由状态机在锁内取焦点。界面手里的焦点可能是一秒前的，
+		// 拿它去隐藏或接管会作用到别的会话上（n049 真机演示：Ctrl-Q 隐藏了上一个会话）
+		if m.focus == "" {
+			return ErrNotOpen
+		}
+		id = m.focus
+	}
 	t, err := m.canon(id)
 	if err != nil {
 		return err
@@ -379,6 +387,14 @@ func (m *Machine) Takeover(id string) error {
 	defer m.mu.Unlock()
 	if err := m.writable(); err != nil {
 		return err
+	}
+	if id == "" {
+		// 空串表示「中间正显示的那个」：由状态机在锁内取焦点。界面手里的焦点可能是一秒前的，
+		// 拿它去隐藏或接管会作用到别的会话上（n049 真机演示：Ctrl-Q 隐藏了上一个会话）
+		if m.focus == "" {
+			return ErrNotOpen
+		}
+		id = m.focus
 	}
 	t, err := m.canon(id)
 	if err != nil {

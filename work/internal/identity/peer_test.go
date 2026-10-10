@@ -12,25 +12,29 @@ import (
 	"time"
 )
 
-// 第 3 次实现（n050 评审 R4）：出生时间不留容差、换算不溢出、连接身份绑定到 pidfd。
-
-// 评审复现：原调用者退出，新窗格进程在连接后 0.5 秒复用了 pid，两次读链都读到新进程。
-func TestReusedPIDBornAfterConnectionIsRejectedWithoutTolerance(t *testing.T) {
+// 进程号复用由 pidfd 发现：原调用者退出、新窗格进程复用了 pid，两次读链都读到新进程，但 pidfd 指向的进程已不再持有它。
+func TestReusedPIDIsCaughtByLifetimeBinding(t *testing.T) {
 	proc := fakeProc(t, map[int]int{500: 1})
-	writeStat(proc, 500, 1, 1050) // 开机后 10.5 秒出生
 	r := Resolver{ProcRoot: proc, Sources: []PaneSource{fakeSource{{Server: "/s/deck", PaneID: "%1", PanePID: 500, Session: "layout"}}}}
-	at := time.Unix(1790000000, 0).Add(10 * time.Second)
-	if p, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: at, Same: held}); err == nil {
-		t.Fatalf("连接后出生的复用进程被认成布局窗格：%+v", p)
-	}
-	// 同一时刻出生（滴答取整后相等）是合法的调用者
-	writeStat(proc, 500, 1, 1000)
-	if _, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: at, Same: held}); err != nil {
-		t.Fatalf("连接时刻出生的调用者应被接受：%v", err)
+	gone := func() error { return errors.New("pidfd 现在指向 pid -1（已退出）") }
+	if p, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: time.Now(), Same: gone}); err == nil {
+		t.Fatalf("复用 pid 的进程被认成布局窗格：%+v", p)
 	}
 }
 
-// held 是一个始终成立的生命周期绑定：这些用例只考出生时间这道附加检查。
+// 墙钟出生时间不参与判定（n049）：WSL 校时会让 btime 移动，同一个进程会被算成「连接后才出生」。
+// 这里构造正是那种情形——按墙钟算出生在连接之后——有 pidfd 证明是同一个进程，就应接受。
+func TestWallClockBirthTimeIsNotUsed(t *testing.T) {
+	proc := fakeProc(t, map[int]int{500: 1})
+	writeStat(proc, 500, 1, 100*3600) // 按 btime 换算是开机后 1 小时
+	r := Resolver{ProcRoot: proc, Sources: []PaneSource{fakeSource{{Server: "/s/deck", PaneID: "%1", PanePID: 500, Session: "layout"}}}}
+	at := time.Unix(1790000000, 0).Add(30 * time.Minute) // 连接按墙钟在开机后 30 分钟
+	if _, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: at, Same: held}); err != nil {
+		t.Fatalf("有 pidfd 证明是同一个进程时，不应因墙钟出生时间拒绝：%v", err)
+	}
+}
+
+// held 是一个始终成立的生命周期绑定。
 func held() error { return nil }
 
 // 第 4 次实现（评审 A3-1 的复现）：连接没有生命周期绑定时，不据进程号判定窗格——
@@ -53,18 +57,6 @@ func TestConnectionWithoutLifetimeBindingIsNotResolved(t *testing.T) {
 				t.Fatalf("没有绑定的连接被判成了 %+v（%v）", p, err)
 			}
 		})
-	}
-}
-
-// 评审复现：开机三年后出生的进程，换算不溢出。
-func TestBirthTimeDoesNotOverflowAfterYearsOfUptime(t *testing.T) {
-	r := Resolver{ProcRoot: fakeProc(t, map[int]int{500: 1})}
-	for _, seconds := range []int64{3 * 365 * 24 * 3600, 30 * 365 * 24 * 3600} {
-		got, err := r.bornAt(uint64(seconds*100 + 37))
-		want := time.Unix(1790000000, 0).Add(time.Duration(seconds)*time.Second + 370*time.Millisecond)
-		if err != nil || !got.Equal(want) {
-			t.Fatalf("开机 %d 秒后：got=%s want=%s err=%v", seconds, got, want, err)
-		}
 	}
 }
 

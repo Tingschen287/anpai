@@ -147,6 +147,7 @@ func TestBindingsConf(t *testing.T) {
 	conf := BindingsConf(s, Built{Center: "%1", Tabs: "%7"})
 	for _, want := range []string{
 		"bind -n F2 send-keys -t %7 F2",
+		"bind -n C-q send-keys -t %7 C-q",
 		"bind -n F10 select-pane -t %1",
 		`run-shell -b ''\''/opt/my deck/deck'\'' '\''layout'\'' '\''toggle'\'' '\''left'\''`,
 	} {

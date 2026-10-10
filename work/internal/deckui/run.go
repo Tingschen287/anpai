@@ -305,10 +305,12 @@ func RunTabs(api API, layoutSock string) error {
 				return nil
 			}
 			switch {
+			case ev.Key == "ctrl-q": // 布局 server 把 Ctrl-Q 转到这里：放回后台
+				// 不带会话号：由 deckd 取它此刻的焦点（标签条手里的数据可能是一秒前的）
+				l.act("hide", "")
+				selectCenter(layoutSock)
 			case ev.Key == "f2": // 布局 server 把根表上的 F2 转到这里
-				if x, ok := tb.Focused(); ok {
-					l.act("takeover", x.AgentDeckID)
-				}
+				l.act("takeover", "")
 				selectCenter(layoutSock)
 			case ev.Mouse != nil && ev.Mouse.Press && ev.Mouse.Button == 0:
 				if id, closeIt, ok := tb.Hit(ev.Mouse.X); ok {

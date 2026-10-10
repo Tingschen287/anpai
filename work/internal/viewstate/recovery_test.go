@@ -257,3 +257,29 @@ func TestRetakeEndsTheRestoredWaiver(t *testing.T) {
 		t.Fatalf("应保持接管：%+v", l)
 	}
 }
+
+// 空会话号表示「中间正显示的那个」：Hide 与 Takeover 按状态机自己的焦点，不用界面手里可能过时的焦点（n049 真机演示）。
+func TestEmptySessionMeansCurrentFocus(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	w.m.Open("main")
+	if err := w.m.Hide(""); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.m.State(); st.Focus != "subA" || contains(st.Open, "main") {
+		t.Fatalf("应隐藏当时的焦点 main：%+v", st)
+	}
+	if err := w.m.Takeover(""); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatal("应接管当时的焦点 subA")
+	}
+	w.m.Hide("")
+	if err := w.m.Hide(""); err != ErrNotOpen {
+		t.Fatalf("没有焦点时应是 ErrNotOpen：%v", err)
+	}
+	if err := w.m.Takeover(""); err != ErrNotOpen {
+		t.Fatalf("没有焦点时接管应是 ErrNotOpen：%v", err)
+	}
+}

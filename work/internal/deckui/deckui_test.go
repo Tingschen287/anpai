@@ -24,8 +24,8 @@ func keys(evs []Event) string {
 }
 
 func TestParseKeys(t *testing.T) {
-	evs, rest := Parse([]byte("\x1b[A\x1bOB\r\x1bOQ\x1b[15~\x1b[21~h你\x7f\t"), false)
-	if got := keys(evs); got != "up,down,enter,f2,f5,f10,h,你,backspace,tab" || len(rest) != 0 {
+	evs, rest := Parse([]byte("\x1b[A\x1bOB\r\x1bOQ\x1b[15~\x1b[21~h你\x7f\t\x11"), false)
+	if got := keys(evs); got != "up,down,enter,f2,f5,f10,h,你,backspace,tab,ctrl-q" || len(rest) != 0 {
 		t.Fatalf("按键：%s（剩 %q）", got, rest)
 	}
 	// 不完整的转义序列与半个汉字留到下一段

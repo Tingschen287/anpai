@@ -46,6 +46,8 @@ func Parse(buf []byte, flush bool) (events []Event, rest []byte) {
 				events = append(events, Event{Key: "backspace"})
 			case 0x03:
 				events = append(events, Event{Key: "ctrl-c"})
+			case 0x11:
+				events = append(events, Event{Key: "ctrl-q"})
 			default:
 				if c < 0x20 {
 					break

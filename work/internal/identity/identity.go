@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -147,7 +146,7 @@ type Proc struct {
 // Peer 是一条连接的对端。
 type Peer struct {
 	PID         int
-	ConnectedAt time.Time // 非零时，调用进程必须在此之前出生
+	ConnectedAt time.Time // 非零表示这是一条连接：必须带 Same
 	// Same 报告「连接的对端进程仍然持有 PID」（由 SO_PEERPIDFD 得到的 pidfd 判定，见 PeerPIDFD）。
 	// 判定开始前与结束后各问一次：两次都成立，说明整个判定期间 /proc/PID 就是那条连接的进程，
 	// 进程号复用在任何时刻发生都会被发现（n050 评审 R4）。连接必须带它（评审 A3-1）。
@@ -155,7 +154,7 @@ type Peer struct {
 }
 
 // ErrNoLifetimeBinding 表示一条连接的对端没有生命周期绑定（Peer.Same 为空，通常是内核不支持 SO_PEERPIDFD）。
-// 出生时间检查挡不住进程号复用（btime 取整、接受连接的延迟都会放大窗口，n050 评审 A3-1），所以不据此判定窗格。
+// 没有 pidfd 就没有可靠的办法证明 /proc/<pid> 还是建立连接的那个进程（n050 评审 A3-1），所以不据此判定窗格。
 var ErrNoLifetimeBinding = errors.New("连接没有绑定到对端进程（内核不支持 SO_PEERPIDFD，需 Linux 6.5 及以上），不据进程号判定窗格")
 
 // Resolve 按一个 pid 判定窗格，不核对进程生命周期：只用于不涉及连接的查询与测试，不能用于授权。
@@ -166,10 +165,13 @@ func (r Resolver) Resolve(ctx context.Context, pid int) (Pane, error) {
 // ResolvePeer 返回对端进程所在的窗格。进程已消失、读不了 /proc、列窗格失败、或判定过程中进程链变了，都返回错误，
 // 调用方据此拒绝写入。
 //
-// 连接（ConnectedAt 非零）必须带 Same，否则返回 ErrNoLifetimeBinding（评审 A3-1）。进程号复用的两道检查：
-//   - Same（pidfd）：判定前后对端进程都仍持有 PID，否则拒绝。这是主检查。
-//   - 出生时间：调用进程必须不晚于连接建立时刻出生，不留容差。btime 是向下取整的整秒、starttime 是向下取整的滴答，
-//     算出的出生时间不晚于真实出生时间，所以真正的调用者不会被误拒。它只是附加检查，单靠它挡不住复用。
+// 连接（ConnectedAt 非零）必须带 Same，否则返回 ErrNoLifetimeBinding（评审 A3-1）。进程号复用由两道检查发现：
+//   - Same（pidfd）：判定前后对端进程都仍持有 PID，否则拒绝。
+//   - 进程链二次读取：列完窗格后再读一次，从调用者到命中层的 pid 与启动滴答数必须一致。
+//
+// n050 还有一道「墙钟出生时间不晚于连接时刻」的检查，n049 去掉了：它把启动滴答数换成墙钟要用 /proc/stat 的 btime，
+// WSL 校时后 btime 会移动，同一个进程、同一条连接前一次通过、后一次被判成「连接后才出生」（n049 真链路演示，
+// center.log 有记录）。有了 pidfd 之后它不再提供额外保护，只会误伤。
 func (r Resolver) ResolvePeer(ctx context.Context, peer Peer) (Pane, error) {
 	pid := peer.PID
 	if !peer.ConnectedAt.IsZero() && peer.Same == nil {
@@ -183,15 +185,6 @@ func (r Resolver) ResolvePeer(ctx context.Context, peer Peer) (Pane, error) {
 	chain, err := r.Ancestry(pid)
 	if err != nil {
 		return Pane{}, err
-	}
-	if !peer.ConnectedAt.IsZero() {
-		born, err := r.bornAt(chain[0].Start)
-		if err != nil {
-			return Pane{}, err
-		}
-		if born.After(peer.ConnectedAt) {
-			return Pane{}, fmt.Errorf("pid %d 在连接建立之后才出生（%s > %s），疑似 pid 被复用", pid, born.Format(time.RFC3339Nano), peer.ConnectedAt.Format(time.RFC3339Nano))
-		}
 	}
 	byPID := map[int]Pane{}
 	for _, src := range r.Sources {
@@ -271,32 +264,6 @@ func (r Resolver) root() string {
 		return "/proc"
 	}
 	return r.ProcRoot
-}
-
-// clockTicks 是 USER_HZ。Linux 在 x86/arm 上恒为 100；不用 cgo 取 sysconf。
-const clockTicks = 100
-
-// bornAt 把出生滴答数换成墙钟时间：开机时间（/proc/stat 的 btime）+ 滴答数 / USER_HZ。
-func (r Resolver) bornAt(start uint64) (time.Time, error) {
-	data, err := os.ReadFile(filepath.Join(r.root(), "stat"))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("读不到开机时间：%w", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if v, ok := strings.CutPrefix(line, "btime "); ok {
-			bt, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if err != nil {
-				return time.Time{}, err
-			}
-			// 先拆成整秒与余下的滴答再换算：直接 start*Second 在开机约 1068 天后溢出（n050 评审 R4）
-			secs, rem := start/clockTicks, start%clockTicks
-			if secs > uint64(math.MaxInt64/int64(time.Second)) {
-				return time.Time{}, fmt.Errorf("出生滴答数 %d 超出范围", start)
-			}
-			return time.Unix(bt, 0).Add(time.Duration(secs)*time.Second + time.Duration(rem)*(time.Second/clockTicks)), nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("/proc/stat 里没有 btime")
 }
 
 // statOf 返回父进程 pid 与出生时间。

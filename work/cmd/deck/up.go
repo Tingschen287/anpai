@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -55,6 +57,12 @@ func up(dirs deckstore.Dirs, args []string) {
 	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: graphicsMode(*graphics)}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
+	}
+	// tmux 用 -S 指定 socket 时不会自建 tmux-UID 这层目录（用 -L 时才建）：先按 tmux 的做法建好，0700
+	for _, sock := range []string{*layoutSock, *agentSock} {
+		if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+			fail("建 tmux socket 目录失败：%v", err)
+		}
 	}
 	// 空白占位会话：中间窗格起点与「全部隐藏」时显示它
 	if err := agentdeck.EnsureSession(ctx, *agentSock, viewstate.Idle, layout.Quote(self)+" idle"); err != nil {
@@ -123,13 +131,22 @@ func center(dirs deckstore.Dirs, args []string) {
 		Attach: func() (int, func() error, error) {
 			agentdeck.EnsureSession(context.Background(), *agentSock, viewstate.Idle, layout.Quote(self)+" idle")
 			cmd := agentdeck.CenterAttachCommand(*agentSock, viewstate.Idle)
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			// tmux 的报错同时留一份：停止重试时把它写进说明（否则被清屏冲掉，只剩一个退出码）
+			var errBuf bytes.Buffer
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, io.MultiWriter(os.Stderr, &errBuf)
 			if err := cmd.Start(); err != nil {
 				return 0, nil, err
 			}
-			return cmd.Process.Pid, cmd.Wait, nil
+			return cmd.Process.Pid, func() error {
+				err := cmd.Wait()
+				if msg := strings.TrimSpace(errBuf.String()); err != nil && msg != "" {
+					lines := strings.Split(msg, "\n")
+					err = fmt.Errorf("%w（%s）", err, deckstore.Clean(lines[len(lines)-1], 160))
+				}
+				return err
+			}, nil
 		},
-		Announce: func(op string, pid int) { announce(client, *agentSock, op, pid) },
+		Announce: func(op string, pid int) { announce(client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid) },
 		Pause: func(reason string) bool {
 			fmt.Print("\x1b[2J\x1b[H")
 			fmt.Printf("\n  %s\n\n  检查 agent-deck 的 tmux server（%s）后按回车重试，输入 q 回车退出。\n", reason, *agentSock)
@@ -141,7 +158,16 @@ func center(dirs deckstore.Dirs, args []string) {
 }
 
 // announce 等新 client 出现在 agent-deck server 上，再告诉 deckd（deckd 可能还在启动：重试 30 秒）。
-func announce(c *deckclient.Client, agentSock, op string, pid int) {
+// 结果记进 $XDG_STATE_HOME/deck/center.log：client 已连上、界面看不到这里的输出，出错要有地方查。
+func announce(c *deckclient.Client, logPath, agentSock, op string, pid int) {
+	logf := func(format string, a ...any) {
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		fmt.Fprintf(f, time.Now().Format("2006-01-02 15:04:05 ")+format+"\n", a...)
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	listed := false
 	for time.Now().Before(deadline) {
@@ -157,14 +183,17 @@ func announce(c *deckclient.Client, agentSock, op string, pid int) {
 			var out any
 			err := c.Do(context.Background(), "POST", "/v1/view", map[string]string{"op": op}, &out)
 			if err == nil {
+				logf("client %d 已连上，%s 完成", pid, op)
 				return
 			}
 			if de, ok := err.(*deckclient.Error); ok && de.Status != 503 {
+				logf("client %d 已连上，%s 被 deckd 拒绝：%v", pid, op, err)
 				return // deckd 明确拒绝（例如交还失败 409）：不重发，状态由面板与通知显示
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	logf("client %d：30 秒内没能通知 deckd（%s；client 已列出：%v）", pid, op, listed)
 }
 
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
@@ -181,9 +210,8 @@ func idle() {
 			"",
 		}
 		for _, k := range layout.Keys {
-			lines = append(lines, fmt.Sprintf("%-4s %s", k.Key, k.What))
+			lines = append(lines, fmt.Sprintf("%-6s %s", k.Key, k.What))
 		}
-		lines = append(lines, "Ctrl-Q 把正在看的会话放回后台")
 		fmt.Print("\x1b[2J\x1b[?25l")
 		top := max(1, (h-len(lines))/2)
 		for i, l := range lines {
