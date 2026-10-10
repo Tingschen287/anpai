@@ -39,7 +39,8 @@ func withConn(ctx context.Context, c net.Conn) context.Context {
 
 // peerOf 取连接的对端：pid、连接建立时间，以及（内核支持时）绑定对端进程本身的 pidfd 检查——
 // 连接身份绑定到进程，而不只是一个会被复用的整数 pid（n050 评审 R4）。内核不支持 SO_PEERPIDFD 时
-// 退回出生时间检查；其他错误按身份查询失败处理（不能写）。done 必须调用。
+// 返回没有 Same 的 Peer，由 classify 降为未知调用者（评审 A3-1）；其他错误按身份查询失败处理（不能写）。
+// done 必须调用。
 func peerOf(c *net.UnixConn, at time.Time) (identity.Peer, func(), error) {
 	pid, err := identity.PeerPID(c)
 	if err != nil {
@@ -70,6 +71,20 @@ func (s *Server) resolve(ctx context.Context) Caller {
 		return Caller{Role: RoleUnknown, Err: err}
 	}
 	defer done()
+	return s.classify(ctx, peer)
+}
+
+// classify 按对端判定角色。没有 pidfd 绑定（peer.Same 为空，旧内核）时不授予任何角色：一律当未知调用者，
+// 并带上 Err，使写接口全部拒绝，只能读健康与额度（n050 评审 A3-1）。identity.ResolvePeer 对这种连接本来就报错，
+// 这里在授权层再拦一次，不依赖下层的实现。
+func (s *Server) classify(ctx context.Context, peer identity.Peer) Caller {
+	if peer.Same == nil {
+		return Caller{Role: RoleUnknown, Err: identity.ErrNoLifetimeBinding}
+	}
+	return s.classifyPane(ctx, peer)
+}
+
+func (s *Server) classifyPane(ctx context.Context, peer identity.Peer) Caller {
 	pane, err := s.resolver.ResolvePeer(ctx, peer)
 	if errors.Is(err, identity.ErrUnknown) {
 		return Caller{Role: RoleUnknown}

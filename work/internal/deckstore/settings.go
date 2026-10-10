@@ -136,8 +136,9 @@ func (s Settings) Validate() error {
 			return fmt.Errorf("项目 %s 重复", p.ID)
 		}
 		projects[p.ID] = true
-		if p.Path == "" || !filepath.IsAbs(p.Path) {
-			return fmt.Errorf("项目 %s 的 path 必须是绝对路径", p.ID)
+		// 项目目录会原样进批准范围（scope），长度上限与 scope 的值一致
+		if p.Path == "" || !filepath.IsAbs(p.Path) || len(p.Path) > maxScopeValue || Clean(p.Path, 0) != p.Path {
+			return fmt.Errorf("项目 %s 的 path 必须是绝对路径，最长 %d 字节、不含控制字符", p.ID, maxScopeValue)
 		}
 		selected := map[string]bool{}
 		for _, id := range p.Agents {

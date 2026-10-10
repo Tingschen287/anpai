@@ -683,6 +683,9 @@ func checkIDs(x Session) error {
 	return nil
 }
 
+// maxScopeValue 是批准范围里单个值的最大字节数（决定的 scope 与启动请求的工作目录共用）。
+const maxScopeValue = 300
+
 var (
 	requestRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 	sha256Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -693,8 +696,9 @@ func checkLaunch(x Session) error {
 	if !requestRe.MatchString(x.RequestID) {
 		return fmt.Errorf("启动请求 id 缺失或不合格（只许字母数字与 ._:-，最长 64）")
 	}
-	if !filepath.IsAbs(x.Dir) || filepath.Clean(x.Dir) != x.Dir || len(x.Dir) > 4096 || Clean(x.Dir, 0) != x.Dir {
-		return fmt.Errorf("工作目录须是规整的绝对路径：%q", Clean(x.Dir, 200))
+	// 目录会原样进批准范围（scope），所以长度上限与 scope 的值一致：否则长目录能预留，却申请不了对应的例外（评审 A3 建议 S1）
+	if !filepath.IsAbs(x.Dir) || filepath.Clean(x.Dir) != x.Dir || len(x.Dir) > maxScopeValue || Clean(x.Dir, 0) != x.Dir {
+		return fmt.Errorf("工作目录须是规整的绝对路径，最长 %d 字节：%q", maxScopeValue, Clean(x.Dir, 200))
 	}
 	if !sha256Re.MatchString(x.TaskSHA256) || !sha256Re.MatchString(x.ArgsSHA256) {
 		return fmt.Errorf("任务与启动参数的 sha256 须是 64 位小写十六进制")

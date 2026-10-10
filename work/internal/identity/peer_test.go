@@ -20,13 +20,39 @@ func TestReusedPIDBornAfterConnectionIsRejectedWithoutTolerance(t *testing.T) {
 	writeStat(proc, 500, 1, 1050) // 开机后 10.5 秒出生
 	r := Resolver{ProcRoot: proc, Sources: []PaneSource{fakeSource{{Server: "/s/deck", PaneID: "%1", PanePID: 500, Session: "layout"}}}}
 	at := time.Unix(1790000000, 0).Add(10 * time.Second)
-	if p, err := r.ResolveAt(context.Background(), 500, at); err == nil {
+	if p, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: at, Same: held}); err == nil {
 		t.Fatalf("连接后出生的复用进程被认成布局窗格：%+v", p)
 	}
 	// 同一时刻出生（滴答取整后相等）是合法的调用者
 	writeStat(proc, 500, 1, 1000)
-	if _, err := r.ResolveAt(context.Background(), 500, at); err != nil {
+	if _, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: at, Same: held}); err != nil {
 		t.Fatalf("连接时刻出生的调用者应被接受：%v", err)
+	}
+}
+
+// held 是一个始终成立的生命周期绑定：这些用例只考出生时间这道附加检查。
+func held() error { return nil }
+
+// 第 4 次实现（评审 A3-1 的复现）：连接没有生命周期绑定时，不据进程号判定窗格——
+// 无论开机时间取整（替代进程实际在连接后出生、换算值却更早），还是接受连接有延迟（替代进程在连接与接受之间出生）。
+func TestConnectionWithoutLifetimeBindingIsNotResolved(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		start    uint64
+		accepted time.Duration
+	}{
+		{"开机时间取整", 1050, 10900 * time.Millisecond},
+		{"接受连接延迟", 1100, 12 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proc := fakeProc(t, map[int]int{500: 1})
+			writeStat(proc, 500, 1, tc.start)
+			r := Resolver{ProcRoot: proc, Sources: []PaneSource{fakeSource{{Server: "/s/deck", PaneID: "%1", PanePID: 500, Session: "layout"}}}}
+			p, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: time.Unix(1790000000, 0).Add(tc.accepted)})
+			if !errors.Is(err, ErrNoLifetimeBinding) {
+				t.Fatalf("没有绑定的连接被判成了 %+v（%v）", p, err)
+			}
+		})
 	}
 }
 

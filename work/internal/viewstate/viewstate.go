@@ -431,8 +431,10 @@ func (m *Machine) openTakenLocked(session string, t Target, note string) error {
 		}
 		return fmt.Errorf("放开输入失败，已交还：%w", err)
 	}
+	// 输入回到 owner 手上：之前缓存的画面摘要已过时，重启恢复的豁免也到此为止——
+	// 下一次交还必须重新取到画面（n050 评审 A3-2）
 	tk := m.taken[session]
-	tk.writable = true
+	tk.writable, tk.summary, tk.restored = true, nil, false
 	m.taken[session] = tk
 	if err := m.notify(note); err != nil {
 		// 记不下来就不维持一个没人知道的接管：关输入、交还；哪一步不成都照实说

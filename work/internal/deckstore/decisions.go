@@ -152,7 +152,7 @@ func checkScope(scope map[string]string) error {
 		if !scopeKeyRe.MatchString(k) {
 			return fmt.Errorf("scope 的键 %q 不合规（小写字母开头，只含小写字母、数字、下划线）", k)
 		}
-		if len(v) > 300 || Clean(v, 0) != v {
+		if len(v) > maxScopeValue || Clean(v, 0) != v {
 			return fmt.Errorf("scope 的 %s 含控制字符、疑似密钥或过长", k)
 		}
 	}

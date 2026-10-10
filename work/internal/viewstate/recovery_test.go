@@ -183,3 +183,77 @@ func TestDeliverDoesNotReopenInputWhenStoppedMidway(t *testing.T) {
 		t.Fatalf("存储中途停止应保持只读：err=%v ro=%v", err, w.c.ro)
 	}
 }
+
+// 第 4 次实现（n050 评审 A3-2）：重新接管后，旧摘要与重启豁免都失效，下一次交还必须重新取到画面。
+
+type scriptedCapture struct {
+	*fakeCenter
+	line string
+	fail bool
+}
+
+func (c *scriptedCapture) Capture(int) ([]string, error) {
+	if c.fail {
+		return nil, errors.New("capture failed")
+	}
+	return []string{c.line}, nil
+}
+
+// 评审复现：交还失败时缓存了「重新接管前」的画面；重新接管后 owner 又输入了，下一次抓屏失败，不能拿旧画面交还。
+func TestRetakeInvalidatesTheCachedSummary(t *testing.T) {
+	w := newWorld(t)
+	c := &scriptedCapture{fakeCenter: w.c, line: "重新接管前"}
+	w.m.center = c
+	w.m.Open("subA")
+	w.m.Takeover("subA")
+	w.failNotify = true
+	w.m.Hide("subA") // 抓到「重新接管前」，通知失败，保持接管并缓存
+	w.failNotify = false
+	w.m.Open("subA")
+	if err := w.m.Takeover("subA"); err != nil {
+		t.Fatal(err)
+	}
+	c.line, c.fail = "owner 新输入之后", true
+	if err := w.m.Open("main"); !isHandback(err) {
+		t.Fatalf("抓屏失败应交还失败：%v", err)
+	}
+	if err := w.m.RetryHandback("subA"); err == nil {
+		ev, _ := w.l.Events()
+		t.Fatalf("重新接管后仍用旧摘要交还了：%+v", ev[len(ev)-1].Handback)
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("应保持接管：%+v", l)
+	}
+	// 再显示到中间、抓屏恢复，用新画面交还
+	c.fail = false
+	w.m.Open("subA")
+	if err := w.m.RetryHandback("subA"); err != nil {
+		t.Fatal(err)
+	}
+	ev, _ := w.l.Events()
+	if hb := ev[len(ev)-1].Handback; hb == nil || len(hb.LastLines) != 1 || hb.LastLines[0] != "owner 新输入之后" {
+		t.Fatalf("应带新画面：%+v", hb)
+	}
+}
+
+// 评审复现：重启恢复的会话被重新接管后，不再享有「无画面也可交还」的豁免。
+func TestRetakeEndsTheRestoredWaiver(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	w.m.Takeover("subA")
+	w.m = New(w.c, w.l, w.m.lookup, func(string) error { return nil }, nil)
+	w.m.Open("subA")
+	if err := w.m.Takeover("subA"); err != nil {
+		t.Fatal(err)
+	}
+	w.m.center = captureFails{w.c}
+	if err := w.m.Open("main"); !isHandback(err) {
+		t.Fatalf("抓屏失败应交还失败：%v", err)
+	}
+	if err := w.m.RetryHandback("subA"); err == nil {
+		t.Fatal("重新接管后仍按重启豁免无画面交还了")
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("应保持接管：%+v", l)
+	}
+}

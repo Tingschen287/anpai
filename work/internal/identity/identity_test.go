@@ -203,11 +203,11 @@ func TestProcessBornAfterConnectionIsRejected(t *testing.T) {
 	writeStat(proc, 500, 1, 100*3600) // 开机后 1 小时出生
 	r := Resolver{ProcRoot: proc}
 	connectedAt := time.Unix(1790000000, 0).Add(30 * time.Minute) // 连接建立在开机后 30 分钟
-	if _, err := r.ResolveAt(context.Background(), 500, connectedAt); err == nil || !strings.Contains(err.Error(), "复用") {
+	if _, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: connectedAt, Same: held}); err == nil || !strings.Contains(err.Error(), "复用") {
 		t.Fatalf("连接之后出生的进程应被拒：%v", err)
 	}
 	connectedAt = time.Unix(1790000000, 0).Add(2 * time.Hour)
-	if _, err := r.ResolveAt(context.Background(), 500, connectedAt); !errors.Is(err, ErrUnknown) {
+	if _, err := r.ResolvePeer(context.Background(), Peer{PID: 500, ConnectedAt: connectedAt, Same: held}); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("连接之前出生的进程应正常判定：%v", err)
 	}
 }

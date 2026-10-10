@@ -148,6 +148,12 @@ go build -o deck ./cmd/deck
 - **唯一写入者**：deck 的状态（注册表、决策、通知、Codex 授权记忆、汇报队列、lease）只由 deckd 写，放在 `$XDG_STATE_HOME/deck/`，与旧 `work` 的目录分开。
 - **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。
 - **按调用者分权限**：deckd 凭 `SO_PEERCRED` 与进程链认出调用者在哪个 tmux 窗格——布局窗格是 owner，注册表里的会话是主 agent 或子 agent，其他是未知（只能读额度与健康状态）。项目与创建者一律由服务端推导。同一系统用户下这防的是模型越权与误操作，不防恶意代码。
+- **需要 Linux 6.5 及以上**：连接身份经 `SO_PEERPIDFD` 绑定到对端进程本身，防进程号复用。内核不支持时，一切调用者按未知处理：只能读额度与健康状态，不能写。
+- **预留名额（给 n051 的 `deck agent` 用，`deckstore.Store.Reserve`）**：
+  - 主、子会话都必须带启动请求指纹：`request_id`（字母数字与 `._:-`，最长 64）、`dir`（规整的绝对路径，最长 300 字节）、`task_sha256` 与 `args_sha256`（64 位小写十六进制，分别是任务正文与实际启动参数的 sha256）。原样校验，不清洗，不合格就拒绝。
+  - `request_id` 在整个注册表里只能用一次，失败、uncertain 等终态记录也占着它。重复请求返回错误，不是幂等地返回原预留；要重试就用新的请求 id。启动失败（`LaunchFailed`，非 uncertain）会释放名额，uncertain 继续占名额。
+  - 超过预算包络时要先建一个 cost 决定，scope 用 `SpawnScope(请求, 项目设置)`；owner 批准后 `BeginExecute`，再在有效期内以同一请求调 `Reserve(请求, 决定 id)`。目录、任务、参数、请求 id、项目目录、包络版本任一变了，例外都不能用；用一次即标为 applied。
+  - 项目目录同样进 scope，所以设置里项目 `path` 最长 300 字节。
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
 - **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
 - 布局（`deck up`、侧栏、中间窗格）在 n049，主 agent 工具（`deck agent`）在 n051。

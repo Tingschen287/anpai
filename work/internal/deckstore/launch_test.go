@@ -108,6 +108,7 @@ func TestLaunchFingerprintIsRequiredAndRequestIDIsUnique(t *testing.T) {
 		"相对目录":     func(y *Session) { y.Dir = "proj" },
 		"不规整目录":    func(y *Session) { y.Dir = "/tmp/proj/../x" },
 		"目录含控制符":   func(y *Session) { y.Dir = "/tmp/\x1b[2Jx" },
+		"目录超过 scope 值上限": func(y *Session) { y.Dir = "/tmp/" + strings.Repeat("d", maxScopeValue) },
 		"任务哈希大写":   func(y *Session) { y.TaskSHA256 = strings.Repeat("A", 64) },
 		"参数哈希过短":   func(y *Session) { y.ArgsSHA256 = "abc" },
 	} {
@@ -179,5 +180,15 @@ func TestReserveDoesNotShareTheCallersGraph(t *testing.T) {
 	x.Graph.Node = "被调用方改了"
 	if got, _ := s.Session(r.Key); got.Graph == nil || got.Graph.Node != "n050" {
 		t.Fatalf("注册表不应跟着变：%+v", got.Graph)
+	}
+}
+
+// 项目目录也进批准范围：超过 scope 值上限的项目目录在设置里就被拒（否则这个项目永远申请不了例外）。
+func TestProjectPathLongerThanScopeValueIsRejected(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	set := s.Settings()
+	set.Projects[0].Path = "/tmp/" + strings.Repeat("p", maxScopeValue)
+	if err := s.ReplaceSettings(set); err == nil {
+		t.Fatal("过长的项目目录应被拒")
 	}
 }
