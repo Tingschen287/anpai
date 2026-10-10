@@ -161,7 +161,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 
 - logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时按终端名推断：有 `WT_SESSION`（Windows Terminal，1.22 起支持 Sixel）用 Sixel，其余用半格色块。这不是能力探测：老版本 Windows Terminal 或经 ssh 等丢了这个变量时，用 `DECK_GRAPHICS` 指定。
 - 中间 client 断开（例如显示的会话被关掉）会以只读重连，并把断开时显示的会话放回后台；连续 3 次在 3 秒内断开就停下等你按回车。
-  每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。
+  每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。重建的 client 与旧的共用中间窗格的终端，所以 deckd 的每个视图操作都绑定到开始时的那个 client（被替换就整体中止、不改状态），`deck center` 也在起新 client 之前先等 deckd 做完进行中的操作。
 - deckd 跑在布局的后台窗口里：关掉布局 server（例如 `tmux -S … kill-server`）deckd 随之停止，agent 会话照常在 agent-deck server 上跑，
   这期间决定、通知、派送都不可用。再 `deck up` 会把 deckd 起来；接管中的会话按重启恢复处理（保持接管、自动派送暂停，等你交还）。
 - 会话运行状态来自 agent-deck 的 headless 服务：`deck up -upstream 127.0.0.1:8420`（或 `DECK_AGENTDECK_ADDR`），

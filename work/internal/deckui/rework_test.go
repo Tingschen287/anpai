@@ -116,3 +116,31 @@ func TestSaveSendsSnapshotAndKeepsLaterEdits(t *testing.T) {
 		t.Fatalf("再存一次后应干净：dirty=%v saved=%d", m.dirty, len(api.saved))
 	}
 }
+
+// n049 评审 2 B7：保存成功后的重读还没回来时又改了：重读回来不覆盖新改动，仍标为没保存。
+func TestReloadAfterSaveKeepsEditsMadeMeanwhile(t *testing.T) {
+	m, api := settingsFixture()
+	press(m, "down", "enter") // 勾 codex
+	_, save := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	done := save()
+	api.set, _ = cloneSettings(api.saved[0]) // deckd 那边存下的是按 s 那一刻的设置
+	_, reload := m.Update(done)
+	if reload == nil {
+		t.Fatal("保存成功后应重读")
+	}
+	press(m, "down", "enter") // 重读回来之前又勾了一个
+	agents := strings.Join(m.project().Agents, ",")
+	m.Update(reload())
+	if strings.Join(m.project().Agents, ",") != agents || !m.dirty || !strings.Contains(m.msg, "还没保存") {
+		t.Fatalf("重读覆盖了新改动：%v（之前 %s）dirty=%v msg=%q", m.project().Agents, agents, m.dirty, m.msg)
+	}
+	// 没有新改动时，重读照常换成 deckd 存下的设置、清掉 dirty
+	_, save = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	done = save()
+	api.set, _ = cloneSettings(api.saved[1])
+	_, reload = m.Update(done)
+	m.Update(reload())
+	if m.dirty || strings.Join(m.project().Agents, ",") != agents {
+		t.Fatalf("没有新改动时重读应照常：%v dirty=%v", m.project().Agents, m.dirty)
+	}
+}

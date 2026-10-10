@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
@@ -22,6 +23,16 @@ type TmuxCenter struct {
 	AgentSocket  string
 	// Ancestry 返回进程链（identity.Resolver.Ancestry）；测试可换。
 	Ancestry func(pid int) ([]identity.Proc, error)
+
+	mu    sync.Mutex
+	bound int // Bind 绑定的 client 进程号（0 未绑定）
+}
+
+// Bind 见 viewstate.Center：之后的操作只作用于这个 client，它被替换或不在了就返回 ErrStaleClient。
+func (c *TmuxCenter) Bind(client int) {
+	c.mu.Lock()
+	c.bound = client
+	c.mu.Unlock()
 }
 
 // NewTmuxCenter 用真实的 /proc 建中间窗格。
@@ -33,7 +44,15 @@ func NewTmuxCenter(layoutSocket, agentSocket string) *TmuxCenter {
 // ErrNoCenter 表示布局没起来，或中间窗格里没有连上的 client。
 var ErrNoCenter = errors.New("找不到中间窗格的 client（布局没起来，或中间窗格正在重连）")
 
+// client 找中间现在的 client；有绑定时还要求就是绑定的那个。
 func (c *TmuxCenter) client() (agentdeck.TmuxClient, error) {
+	c.mu.Lock()
+	bound := c.bound
+	c.mu.Unlock()
+	return c.find(bound)
+}
+
+func (c *TmuxCenter) find(bound int) (agentdeck.TmuxClient, error) {
 	ctx := context.Background()
 	panes, err := agentdeck.LayoutPanes(ctx, c.LayoutSocket)
 	if errors.Is(err, agentdeck.ErrNoServer) {
@@ -75,13 +94,16 @@ func (c *TmuxCenter) client() (agentdeck.TmuxClient, error) {
 			}
 		}
 	}
-	switch len(hits) {
-	case 0:
+	switch {
+	case len(hits) > 1:
+		return agentdeck.TmuxClient{}, fmt.Errorf("中间窗格下有 %d 个 client，无法判定", len(hits))
+	case bound != 0 && (len(hits) == 0 || hits[0].PID != bound):
+		// 重建的 client 与旧的共用中间窗格的 tty：不核对进程号就会把旧操作做到新 client 上（n049 评审 2 B1）
+		return agentdeck.TmuxClient{}, fmt.Errorf("%w（这次操作绑定的 client %d 已不在中间）", viewstate.ErrStaleClient, bound)
+	case len(hits) == 0:
 		return agentdeck.TmuxClient{}, ErrNoCenter
-	case 1:
-		return hits[0], nil
 	}
-	return agentdeck.TmuxClient{}, fmt.Errorf("中间窗格下有 %d 个 client，无法判定", len(hits))
+	return hits[0], nil
 }
 
 // SetReadOnly 设为只读或可写：tmux 只有翻转，所以先读、不一致才翻、翻完读回核对。
@@ -114,8 +136,9 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 }
 
 // ClientID 是中间现在那个 client 的进程号。
+// 不看绑定：绑定之前要先知道是谁。
 func (c *TmuxCenter) ClientID() (int, error) {
-	cl, err := c.client()
+	cl, err := c.find(0)
 	if err != nil {
 		return 0, err
 	}

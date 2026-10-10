@@ -453,7 +453,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 // restore 把为并回而暂时停放的窗格接回原位，再整理尺寸、选回中间。
 func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec) error {
 	if err := m.Unpark(pane, center, spec); err != nil {
-		return fmt.Errorf("%s接不回原位（它还在后台窗口 parked-*，再按一次显隐键或重开 deck up）：%w", what, err)
+		return fmt.Errorf("%s接不回原位（它还在后台窗口 parked-* 里照常运行；再按显隐键不会把它接回，要恢复就关掉布局 server 后重新 deck up）：%w", what, err)
 	}
 	if err := Normalize(m, s); err != nil {
 		return err

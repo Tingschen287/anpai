@@ -142,3 +142,28 @@ func TestCenterLoopCancelsAnnounceWhenItsClientExits(t *testing.T) {
 		}
 	}
 }
+
+// 每个 client 退出后、起下一个之前先过栅栏（n049 评审 2 B1）。
+func TestCenterLoopFencesBeforeReattaching(t *testing.T) {
+	var order []string
+	n, clock := 0, time.Unix(0, 0)
+	l := &CenterLoop{
+		Now: func() time.Time { return clock }, // 只在 client 跑着时走：之后连不上就是快速失败、停下
+		Attach: func() (int, func() error, error) {
+			n++
+			if n > 2 {
+				return 0, nil, errors.New("x")
+			}
+			order = append(order, "attach")
+			return 100 + n, func() error { clock = clock.Add(time.Minute); order = append(order, "exit"); return nil }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence:    func() { order = append(order, "fence") },
+		Pause:    func(string) bool { return false },
+		MaxQuick: 1,
+	}
+	l.Run()
+	if got := strings.Join(order, ","); got != "attach,exit,fence,attach,exit,fence" {
+		t.Fatalf("顺序应是 连上 → 退出 → 栅栏 → 再连：%s", got)
+	}
+}

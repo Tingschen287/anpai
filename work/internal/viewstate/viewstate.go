@@ -44,6 +44,10 @@ type Center interface {
 	Capture(tmuxSession string, lines int) ([]string, error)
 	// ClientID 是中间现在那个 client 的标识（进程号）。reset、resync 据此核对通知是不是它发的（n049 评审 1 B1）。
 	ClientID() (int, error)
+	// Bind 把之后的 SetReadOnly、ReadOnly、Switch、LastInput 绑定到这个 client：它被替换或不在了，这些调用返回
+	// ErrStaleClient、不作用到新 client 上（重建的 client 与旧的共用中间窗格的 tty，按 tty 找 client 分不出新旧，
+	// n049 评审 2 B1）。Bind(0) 解除。状态机只在持锁时调用。
+	Bind(client int)
 }
 
 // ErrStaleClient 表示 reset、resync 的通知来自已经不在中间的旧 client：不执行，免得作用到新 client 与新焦点上。
@@ -208,6 +212,7 @@ func (m *Machine) Open(id string) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
+	defer m.bind()()
 	t, err := m.canon(id)
 	if err != nil {
 		return err
@@ -229,6 +234,7 @@ func (m *Machine) Focus(id string) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
+	defer m.bind()()
 	t, err := m.canon(id)
 	if err != nil {
 		return err
@@ -248,6 +254,7 @@ func (m *Machine) Hide(id string) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
+	defer m.bind()()
 	return m.hideLocked(id)
 }
 
@@ -295,25 +302,54 @@ func (m *Machine) CenterReset(client int) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
-	if err := m.currentClient(client); err != nil {
-		return err
-	}
-	m.clientGen++
-	if m.focus == "" {
-		return nil
-	}
-	return m.hideLocked(m.focus)
-}
-
-func (m *Machine) currentClient(client int) error {
-	id, err := m.center.ClientID()
+	unbind, err := m.bindTo(client)
 	if err != nil {
 		return err
 	}
-	if client <= 0 || id != client {
-		return fmt.Errorf("%w（通知来自 client %d，中间现在是 %d）", ErrStaleClient, client, id)
+	defer unbind()
+	if m.focus != "" {
+		if err := m.hideLocked(m.focus); err != nil {
+			if errors.Is(err, ErrStaleClient) {
+				return err // 做到一半 client 被替换：什么都没改（输入关闭之前就停了，或停在切换之前）
+			}
+			m.clientGen++
+			return err
+		}
 	}
+	m.clientGen++
 	return nil
+}
+
+// bind 把这一次操作绑定到中间现在的 client（见 Center.Bind），返回解除函数。中间没有 client（布局没起来、
+// 正在重连）时不绑定，操作照常，由各步自己报错。
+func (m *Machine) bind() func() {
+	id, err := m.center.ClientID()
+	if err != nil {
+		return func() {}
+	}
+	m.center.Bind(id)
+	return func() { m.center.Bind(0) }
+}
+
+// bindTo 同 bind，但要求中间现在的 client 就是 client（reset、resync 的发通知者），否则 ErrStaleClient。
+func (m *Machine) bindTo(client int) (func(), error) {
+	id, err := m.center.ClientID()
+	if err != nil {
+		return nil, err
+	}
+	if client <= 0 || id != client {
+		return nil, fmt.Errorf("%w（通知来自 client %d，中间现在是 %d）", ErrStaleClient, client, id)
+	}
+	m.center.Bind(id)
+	return func() { m.center.Bind(0) }, nil
+}
+
+// Fence 等正在进行的状态机操作做完再返回（拿一次锁）。deck center 在旧 client 退出后、起新 client 之前调它：
+// 新 client 连上时不会有操作做到一半——否则那个操作在「找 client」与「执行 tmux 命令」之间，
+// 可能作用到共用同一个 tty 的新 client 上（n049 评审 2 B1）。
+func (m *Machine) Fence() {
+	m.mu.Lock()
+	m.mu.Unlock()
 }
 
 // Resync 在中间 client 新建之后（deck center 首次连上、或 deckd 重启后）调用：client 代次 +1，
@@ -325,11 +361,19 @@ func (m *Machine) Resync(client int) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
-	if err := m.currentClient(client); err != nil {
+	unbind, err := m.bindTo(client)
+	if err != nil {
+		return err
+	}
+	defer unbind()
+	if err := m.switchLocked(m.focus); err != nil {
+		if !errors.Is(err, ErrStaleClient) {
+			m.clientGen++
+		}
 		return err
 	}
 	m.clientGen++
-	return m.switchLocked(m.focus)
+	return nil
 }
 
 // RetryHandback 重试一次失败的交还。会话必须不在中间可写（是焦点时先关输入并确认）。
@@ -347,6 +391,7 @@ func (m *Machine) RetryHandback(id string) error {
 		return ErrNotTaken
 	}
 	if m.focus == t.Session {
+		defer m.bind()()
 		if err := m.closeInputLocked(); err != nil {
 			return err
 		}
@@ -396,11 +441,16 @@ func (m *Machine) switchLocked(target string) error {
 }
 
 func (m *Machine) closeInputLocked() error {
-	if err := m.center.SetReadOnly(true); err != nil {
+	if err := m.center.SetReadOnly(true); errors.Is(err, ErrStaleClient) {
+		return err // 绑定的 client 已被替换：不是「关不上」，什么都没做
+	} else if err != nil {
 		m.notify("中间窗格输入已关闭（异常）：设置只读失败")
 		return ErrInputNotClosed
 	}
 	ro, err := m.center.ReadOnly()
+	if errors.Is(err, ErrStaleClient) {
+		return err
+	}
 	if err != nil || !ro {
 		m.notify("中间窗格输入已关闭（异常）：读回只读状态失败")
 		return ErrInputNotClosed
@@ -438,6 +488,9 @@ func (m *Machine) Takeover(id string) error {
 	if t.Role != "sub" {
 		return ErrNotSub
 	}
+	client, _ := m.center.ClientID()
+	unbind := m.bind()
+	defer func() { unbind() }()
 	if tk, ok := m.taken[session]; ok {
 		if tk.writable {
 			return nil // 已在接管中，输入在你手上
@@ -451,6 +504,16 @@ func (m *Machine) Takeover(id string) error {
 		// 每次（含醒来后）先比对：作废的请求还没拿到写入权，直接放弃，不碰任何 lease
 		if m.layoutGen != reqLayout || m.clientGen != reqClient || m.focus != session {
 			return ErrTakeoverStale
+		}
+		// 醒来后别的操作可能换过绑定：重新绑定，并要求还是开始时那个 client（被替换就放弃，不碰 lease）
+		if client > 0 {
+			unbind()
+			u, err := m.bindTo(client)
+			if err != nil {
+				unbind = func() {}
+				return ErrTakeoverStale
+			}
+			unbind = u
 		}
 		if err := m.writable(); err != nil {
 			return err
@@ -581,6 +644,7 @@ func (m *Machine) DeliverToMain(id string, deliver func() error) error {
 	if m.focus != t.Session {
 		return deliver()
 	}
+	defer m.bind()()
 	ro, err := m.center.ReadOnly()
 	if err != nil {
 		return ErrInputNotClosed

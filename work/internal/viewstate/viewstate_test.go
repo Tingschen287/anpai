@@ -2,6 +2,7 @@ package viewstate
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,17 @@ type fakeCenter struct {
 	violations []string
 	captured   []string // Capture 收到的会话名
 	client     int      // ClientID：中间现在的 client（0 表示 testClient）
+	bound      int      // Bind 绑定的 client
+}
+
+func (c *fakeCenter) Bind(client int) { c.bound = client }
+
+// stale：绑定的 client 已被替换（同真实实现，SetReadOnly、ReadOnly、Switch、LastInput 都查）。
+func (c *fakeCenter) stale() error {
+	if id, _ := c.ClientID(); c.bound != 0 && id != c.bound {
+		return fmt.Errorf("%w（假 client %d → %d）", ErrStaleClient, c.bound, id)
+	}
+	return nil
 }
 
 // testClient 是假中间 client 的进程号。
@@ -34,6 +46,9 @@ func (c *fakeCenter) ClientID() (int, error) {
 }
 
 func (c *fakeCenter) SetReadOnly(ro bool) error {
+	if err := c.stale(); err != nil {
+		return err
+	}
 	if ro && c.failSetRO {
 		return errors.New("set ro failed")
 	}
@@ -42,12 +57,18 @@ func (c *fakeCenter) SetReadOnly(ro bool) error {
 	return nil
 }
 func (c *fakeCenter) ReadOnly() (bool, error) {
+	if err := c.stale(); err != nil {
+		return false, err
+	}
 	if c.failReadRO {
 		return false, errors.New("read failed")
 	}
 	return c.ro, nil
 }
 func (c *fakeCenter) Switch(s string) error {
+	if err := c.stale(); err != nil {
+		return err
+	}
 	if !c.ro {
 		c.violations = append(c.violations, "切换到 "+s+" 时输入是开着的")
 	}
@@ -55,7 +76,12 @@ func (c *fakeCenter) Switch(s string) error {
 	c.log = append(c.log, "switch:"+s)
 	return nil
 }
-func (c *fakeCenter) LastInput() (time.Time, error) { return c.lastInput, nil }
+func (c *fakeCenter) LastInput() (time.Time, error) {
+	if err := c.stale(); err != nil {
+		return time.Time{}, err
+	}
+	return c.lastInput, nil
+}
 func (c *fakeCenter) Capture(s string, n int) ([]string, error) {
 	c.captured = append(c.captured, s)
 	return []string{"画面最后一行"}, nil

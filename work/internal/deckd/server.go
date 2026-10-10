@@ -520,7 +520,7 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 }
 
 type viewBody struct {
-	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）、resync、reset（中间 client 重建）
+	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）、resync、reset（中间 client 重建）、fence
 	Session string `json:"session"`
 	Client  int    `json:"client"` // resync、reset：发通知的中间 client 进程号（不是现在那个就拒绝）
 }
@@ -545,6 +545,11 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	switch b.Op {
+	case "fence":
+		// 中间 client 退出后、新 client 连上前（deck center 调）：等正在进行的视图操作做完（n049 评审 2 B1）
+		s.view.Fence()
+		writeJSON(w, http.StatusOK, s.view.State())
+		return
 	case "open":
 		err = s.view.Open(b.Session)
 	case "focus":

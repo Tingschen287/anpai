@@ -21,6 +21,9 @@ type CenterLoop struct {
 	// Announce 等新 client 连上后通知 deckd（op 为 resync 或 reset）。在后台调用，失败只记下不打断循环。
 	// ctx 在这个 client 退出时取消：旧 client 的通知不能留到新 client 上去执行（n049 评审 1 B1）。
 	Announce func(ctx context.Context, op string, pid int)
+	// Fence 在一个 client 退出后、起下一个之前调用：等 deckd 正在进行的视图操作做完再连新 client。
+	// 新旧 client 共用中间窗格的 tty，操作做到一半时连上的新 client 会被当成旧的（n049 评审 2 B1）。可为 nil。
+	Fence func()
 	// Pause 显示原因并等 owner 决定：true 重试，false 退出循环。
 	Pause func(reason string) bool
 	Now   func() time.Time
@@ -49,6 +52,9 @@ func (l *CenterLoop) Run() {
 			go l.Announce(ctx, op, pid)
 			err = wait()
 			cancel()
+			if l.Fence != nil {
+				l.Fence()
+			}
 		}
 		if l.Now().Sub(start) < l.QuickExit {
 			quick++

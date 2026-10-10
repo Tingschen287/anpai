@@ -89,6 +89,7 @@ type loadedMsg struct {
 	trust     []deckstore.TrustGrant
 	err       error
 	trustOnly bool // 只换授权列表，不动正在编辑的设置
+	edits     int  // 发起重读时的改动计数：回来时又有改动，就不拿重读的设置盖掉它们
 }
 type doneMsg struct {
 	what  string
@@ -104,6 +105,15 @@ func (m *Settings) load() tea.Msg {
 	defer cancel()
 	s, g, err := m.API.Load(ctx)
 	return loadedMsg{set: s, trust: g, err: err}
+}
+
+// reloadAfterSave 保存成功后重读。记下发起时的改动计数：重读回来之前又改了，回来时不覆盖（n049 评审 2 B7）。
+func (m *Settings) reloadAfterSave(edits int) tea.Cmd {
+	return func() tea.Msg {
+		msg := m.load().(loadedMsg)
+		msg.edits = edits
+		return msg
+	}
 }
 
 // loadTrust 重读授权列表，保留没保存的编辑。
@@ -284,6 +294,11 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.trust = msg.trust
 			return m, nil
 		}
+		if msg.edits != m.edits {
+			m.trust = msg.trust // 重读途中又改了：设置以界面上的为准，仍标为没保存
+			m.msg = "保存完成（之后又有改动，还没保存）"
+			return m, nil
+		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
@@ -295,7 +310,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.msg = msg.what + "完成"
 		if msg.save && msg.edits == m.edits {
-			return m, m.load
+			return m, m.reloadAfterSave(m.edits)
 		}
 		if msg.save {
 			m.msg += "（保存期间又有改动，还没保存）"

@@ -159,6 +159,15 @@ func center(dirs deckstore.Dirs, args []string) {
 		Announce: func(ctx context.Context, op string, pid int) {
 			announce(ctx, client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid)
 		},
+		Fence: func() {
+			// deckd 不在或 5 秒内没回应就照常重连（没有进行中的操作可等），结果记进 center.log
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var out any
+			if err := client.Do(ctx, "POST", "/v1/view", map[string]any{"op": "fence"}, &out); err != nil {
+				centerLog(filepath.Join(dirs.State, "center.log"), "重连前等 deckd 做完进行中的操作失败（照常重连）：%v", err)
+			}
+		},
 		Pause: func(reason string) bool {
 			fmt.Print("\x1b[2J\x1b[H")
 			fmt.Printf("\n  %s\n\n  检查 agent-deck 的 tmux server（%s）后按回车重试，输入 q 回车退出。\n", reason, *agentSock)
@@ -169,6 +178,16 @@ func center(dirs deckstore.Dirs, args []string) {
 	loop.Run()
 }
 
+// centerLog 往 center.log 记一行（client 连着时界面看不到 deck center 的输出）。
+func centerLog(logPath, format string, a ...any) {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, time.Now().Format("2006-01-02 15:04:05 ")+format+"\n", a...)
+}
+
 // announce 等新 client 出现在 agent-deck server 上，再告诉 deckd（deckd 可能还在启动：重试 30 秒）。
 // 结果记进 $XDG_STATE_HOME/deck/center.log：client 已连上、界面看不到这里的输出，出错要有地方查。
 //
@@ -176,14 +195,7 @@ func center(dirs deckstore.Dirs, args []string) {
 // 请求带上它的进程号，deckd 在状态机锁里核对它仍是中间现在的 client，不是就拒绝（409），
 // 所以查与发之间它恰好退出，也不会作用到新 client 上。
 func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op string, pid int) {
-	logf := func(format string, a ...any) {
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		fmt.Fprintf(f, time.Now().Format("2006-01-02 15:04:05 ")+format+"\n", a...)
-	}
+	logf := func(format string, a ...any) { centerLog(logPath, format, a...) }
 	deadline := time.Now().Add(30 * time.Second)
 	listed, seen := false, false
 	for time.Now().Before(deadline) {
