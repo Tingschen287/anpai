@@ -213,6 +213,19 @@ func TestDecisionAnswerNeedsCurrentVersion(t *testing.T) {
 	}
 }
 
+// 带过时版本号的回答被拒，即使决定仍是 open。
+func TestAnswerWithWrongVersionIsRefused(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	d, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindPush, Summary: "推送？", CreatedBy: "main"})
+	var ve *ErrVersion
+	if _, err := s.Answer(d.ID, OptApprove, d.Version+7, "owner"); !errors.As(err, &ve) {
+		t.Fatalf("版本号不对应被拒：%v", err)
+	}
+	if got, _ := s.Decision(d.ID); got.State != StateOpen {
+		t.Fatalf("被拒的回答不该改变状态：%s", got.State)
+	}
+}
+
 // 两个回答同时到：恰好一个成功。
 func TestConcurrentAnswersOnlyOneWins(t *testing.T) {
 	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))

@@ -13,11 +13,12 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 )
 
 // Pane 是某个 tmux server 上的一个窗格。
@@ -41,31 +42,15 @@ type TmuxSource struct {
 	Socket string // tmux -S 的 socket 路径
 }
 
-// Panes 运行 tmux list-panes -a。server 没在跑时返回空列表，不算错。
+// Panes 列出这个 server 的全部窗格（经 agentdeck adapter 调 tmux）。server 没在跑时返回空列表，不算错。
 func (s TmuxSource) Panes(ctx context.Context) ([]Pane, error) {
-	cmd := exec.CommandContext(ctx, "tmux", "-S", s.Socket, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{session_name}")
-	out, err := cmd.Output()
+	list, err := agentdeck.ListTmuxPanes(ctx, s.Socket)
 	if err != nil {
-		if _, statErr := os.Stat(s.Socket); errors.Is(statErr, os.ErrNotExist) {
-			return nil, nil
-		}
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && strings.Contains(string(ee.Stderr), "no server running") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("列 tmux 窗格失败（%s）：%w", s.Socket, err)
+		return nil, err
 	}
-	var panes []Pane
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) != 3 {
-			continue
-		}
-		pid, err := strconv.Atoi(f[1])
-		if err != nil {
-			continue
-		}
-		panes = append(panes, Pane{Server: s.Socket, PaneID: f[0], PanePID: pid, Session: f[2]})
+	panes := make([]Pane, 0, len(list))
+	for _, p := range list {
+		panes = append(panes, Pane{Server: s.Socket, PaneID: p.PaneID, PanePID: p.PanePID, Session: p.Session})
 	}
 	return panes, nil
 }

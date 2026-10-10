@@ -28,7 +28,7 @@ type Config struct {
 	LayoutSocket string // 布局 tmux server 的 socket 路径
 	AgentSocket  string // agent-deck tmux server 的 socket 路径
 	DashboardURL string // Token 看板，默认 http://127.0.0.1:8899
-	Projectctl   string // projectctl.py 路径（进度面板只读用）
+	Projectctl   string // Graph 控制器脚本路径（进度面板只读用）
 }
 
 type paneResolver interface {
@@ -81,6 +81,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/trust", s.getTrust)
 	mux.HandleFunc("DELETE /v1/trust", s.deleteTrust)
 	mux.HandleFunc("GET /v1/progress", s.getProgress)
+	mux.HandleFunc("GET /v1/panels", s.getPanels)
+	mux.HandleFunc("POST /v1/panels/{name}", s.setPanel)
 	mux.HandleFunc("GET /v1/events", s.events)
 	return mux
 }
@@ -504,6 +506,36 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	}
 	s.bus.publish(deckstore.Event{Kind: "view"})
 	writeJSON(w, http.StatusOK, s.view.State())
+}
+
+// ---------------- 面板注册表 ----------------
+
+func (s *Server) getPanels(w http.ResponseWriter, r *http.Request) {
+	if !need(w, s.caller(r), false, RoleOwner) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.Panels())
+}
+
+type panelBody struct {
+	On bool `json:"on"`
+}
+
+func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
+	c := s.caller(r)
+	if !need(w, c, true, RoleOwner) {
+		return
+	}
+	var b panelBody
+	if err := readBody(r, &b); err != nil {
+		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		return
+	}
+	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
+		storeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.Panels())
 }
 
 // ---------------- SSE ----------------

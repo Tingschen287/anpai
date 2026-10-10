@@ -1,0 +1,107 @@
+package deckstore
+
+import (
+	"fmt"
+	"sort"
+	"time"
+)
+
+// 子 agent 完成后给主 agent 的汇报队列（owner 在 n048 验收时要求，架构稿 §14.4）。
+//
+// 同一个子 agent 的同一次完成只收一次（按 子会话 + 完成编号 去重）。送不送、什么时候送由 viewstate 的送达门决定；
+// 这里只记状态：pending（等送）→ delivered（已送达）或 unconfirmed（送达未确认，不自动重发）。
+
+// 汇报来源。
+const (
+	ReportActive   = "active"   // 子 agent 自己运行 deck agent report --done
+	ReportInferred = "inferred" // 状态转为空闲并保持一段时间，推断为完成
+	ReportGraph    = "graph"    // 账本出现该节点的 submit
+)
+
+// 汇报状态。
+const (
+	ReportPending     = "pending"
+	ReportDelivered   = "delivered"
+	ReportUnconfirmed = "unconfirmed"
+)
+
+// Report 是一条等着转告主 agent 的汇报。
+type Report struct {
+	ID           string    `json:"id"`
+	Project      string    `json:"project"`
+	Main         string    `json:"main"` // 主 agent 会话 key
+	Sub          string    `json:"sub"`  // 子 agent 会话 key
+	CompletionID string    `json:"completion_id"`
+	Source       string    `json:"source"`
+	Text         string    `json:"text"`
+	State        string    `json:"state"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// EnqueueReport 收下一条汇报。同一子会话、同一完成编号已经收过就返回已有的那条，不重复。
+func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
+	var out Report
+	added := false
+	err := s.mutate(func() (func() error, []Event, error) {
+		if r.Source != ReportActive && r.Source != ReportInferred && r.Source != ReportGraph {
+			return nil, nil, fmt.Errorf("不认识的汇报来源 %q", r.Source)
+		}
+		sub, ok := s.sessions[r.Sub]
+		if !ok || sub.Role != "sub" {
+			return nil, nil, fmt.Errorf("%s 不是已登记的子 agent", r.Sub)
+		}
+		main, ok := s.sessions[sub.Parent]
+		if !ok || main.Role != "main" || main.Project != sub.Project {
+			return nil, nil, fmt.Errorf("子 agent %s 没有登记主 agent", r.Sub)
+		}
+		for _, x := range s.reports {
+			if x.Sub == r.Sub && x.CompletionID == r.CompletionID {
+				out = *x
+				return nil, nil, nil
+			}
+		}
+		now := s.now()
+		x := &Report{ID: newID("rep"), Project: sub.Project, Main: main.Key, Sub: sub.Key, CompletionID: Clean(r.CompletionID, 80),
+			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now}
+		s.reports = append(s.reports, x)
+		out, added = *x, true
+		return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
+	})
+	return out, added, err
+}
+
+// PendingReports 返回某主 agent 还没送的汇报，按时间。
+func (s *Store) PendingReports(main string) []Report {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Report
+	for _, x := range s.reports {
+		if x.Main == main && x.State == ReportPending {
+			out = append(out, *x)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
+}
+
+// MarkReport 记下送达结果：delivered 或 unconfirmed。只能从 pending 改。
+func (s *Store) MarkReport(id, state string) error {
+	if state != ReportDelivered && state != ReportUnconfirmed {
+		return fmt.Errorf("汇报结果只能是 delivered 或 unconfirmed")
+	}
+	return s.mutate(func() (func() error, []Event, error) {
+		for _, x := range s.reports {
+			if x.ID == id {
+				if x.State != ReportPending {
+					return nil, nil, fmt.Errorf("汇报 %s 已是 %s", id, x.State)
+				}
+				x.State, x.UpdatedAt = state, s.now()
+				return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
+			}
+		}
+		return nil, nil, fmt.Errorf("没有汇报 %s", id)
+	})
+}
+
+func (s *Store) saveReports() error { return writeJSON(s.path("reports.json"), s.reports) }

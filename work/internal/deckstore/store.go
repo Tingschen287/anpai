@@ -46,6 +46,8 @@ type Store struct {
 	decs     map[string]*Decision
 	notes    []Notification
 	noteSeq  int64
+	reports  []*Report
+	panels   []PanelDef
 	hook     func(Event)
 }
 
@@ -89,6 +91,12 @@ func Open(dirs Dirs) (*Store, error) {
 	}
 	if err := s.loadNotes(); err != nil {
 		return nil, err
+	}
+	if _, err := readJSON(s.path("reports.json"), &s.reports); err != nil {
+		return nil, err
+	}
+	if s.panels, err = LoadPanels(dirs.Config); err != nil {
+		return nil, fmt.Errorf("面板注册表不可用：%w", err)
 	}
 	if changed {
 		if err := s.saveRegistry(); err != nil {
