@@ -17,6 +17,8 @@ func TestDispatchedBindingIsVisibleToAttachWithoutRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.json")
 	t.Setenv("WORKDECK_CONFIG", cfg)
+	// 写入者锁落在临时目录，不碰本机真实的 ~/.local/state（n050）
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	bin := filepath.Join(dir, "agent-deck")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -60,6 +62,8 @@ func TestASecondWorkDeckOnTheSameConfigCannotWriteBindings(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.json")
 	t.Setenv("WORKDECK_CONFIG", cfg)
+	// 写入者锁落在临时目录，不碰本机真实的 ~/.local/state（n050）
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	called := filepath.Join(dir, "upstream-called")
 	bin := filepath.Join(dir, "agent-deck")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch \""+called+"\"\nexit 0\n"), 0o755); err != nil {

@@ -35,7 +35,11 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/queue"
 	"github.com/Tingschen287/terminal-deck/work/internal/routing"
 	"github.com/Tingschen287/terminal-deck/work/internal/ui"
+	"github.com/Tingschen287/terminal-deck/work/internal/writerlock"
 )
+
+// heldWriterLock 是本进程取得的 agent-deck profile 写入者锁；nil 表示只读运行。
+var heldWriterLock *writerlock.Lock
 
 func main() {
 	var (
@@ -114,7 +118,14 @@ func main() {
 	} else if dispatchErr != nil {
 		fmt.Fprintf(os.Stderr, "work: 派工未启用：%v\n", dispatchErr)
 	}
-	if attacher, bs, err := buildAttacher(bindings, bindingsErr); err == nil {
+	// 没拿到写入者锁（例如 deckd 占着同一个 profile）：进入会话与队列投递也是写，一并关掉，只看。
+	writable := heldWriterLock != nil
+	if !writable {
+		fmt.Fprintf(os.Stderr, "work: 只读运行：没有取得 agent-deck profile 的写入者锁，不派工、不进入会话、不投递\n")
+	}
+	if !writable {
+		// 不接进入会话
+	} else if attacher, bs, err := buildAttacher(bindings, bindingsErr); err == nil {
 		model = model.WithAttacher(attacher, bs)
 	} else if dispatchErr == nil {
 		// 派工配好了却进不去，说明配置有别的毛病，要说出来。
@@ -124,8 +135,10 @@ func main() {
 	// 队列文件打不开时不静默退掉：界面常驻告警。
 	if store, up, err := buildQueue(); err == nil {
 		qstore = store
-		if up != nil {
+		if up != nil && writable {
 			model = model.WithQueue(store, up, arbiter.Deliverer{Client: up, Leases: leases}, pc)
+		} else if up != nil {
+			model = model.WithQueue(store, up, nil, pc)
 		} else {
 			model = model.WithQueue(store, nil, nil, pc)
 		}
@@ -154,6 +167,13 @@ func buildDispatcher(projectRoot string, leases *lease.Store, store *binding.Sto
 	if err != nil {
 		return nil, err
 	}
+	// 同一个 agent-deck profile 只许一个写入者（n050，架构稿 §3）：deckd 占着时，本进程只看不写。
+	// 锁要活到进程退出，放进包级变量，免得 *os.File 被回收时连带释放 flock。
+	wl, err := writerlock.Acquire(cfg.Profile, "work")
+	if err != nil {
+		return nil, err
+	}
+	heldWriterLock = wl
 	// token 只从环境变量来，配置文件里没有这个字段。
 	client, err := agentdeck.NewClient(cfg.UpstreamBinary, cfg.Profile, cfg.UpstreamAddr, config.Token())
 	if err != nil {
