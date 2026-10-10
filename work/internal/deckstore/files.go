@@ -62,12 +62,17 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
-	// 同步父目录，rename 才算真正落盘
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		d.Sync()
-		d.Close()
+	// 同步父目录，rename 才算真正落盘；任何一步失败都算写失败（存储随之停止，n050 评审 S3）
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("打不开目录做落盘同步：%w", err)
 	}
-	return nil
+	serr := d.Sync()
+	cerr := d.Close()
+	if serr != nil {
+		return fmt.Errorf("目录落盘同步失败：%w", serr)
+	}
+	return cerr
 }
 
 func writeJSON(path string, v any) error {

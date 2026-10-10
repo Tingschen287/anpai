@@ -7,7 +7,7 @@ import (
 
 func mainAndSub(t *testing.T, s *Store) (Session, Session) {
 	t.Helper()
-	m, err := s.Reserve(Session{Project: "deck", Role: "main", Agent: "claude", Tool: "claude", Model: "m", Tier: Frontier, Title: "主", CreatedBy: "owner"}, "")
+	m, err := s.Reserve(launch(Session{Project: "deck", Role: "main", Agent: "claude", Tool: "claude", Model: "m", Tier: Frontier, Title: "主", CreatedBy: "owner"}), "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
@@ -36,21 +37,40 @@ func withConn(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connKey{}, c)
 }
 
+// peerOf 取连接的对端：pid、连接建立时间，以及（内核支持时）绑定对端进程本身的 pidfd 检查——
+// 连接身份绑定到进程，而不只是一个会被复用的整数 pid（n050 评审 R4）。内核不支持 SO_PEERPIDFD 时
+// 退回出生时间检查；其他错误按身份查询失败处理（不能写）。done 必须调用。
+func peerOf(c *net.UnixConn, at time.Time) (identity.Peer, func(), error) {
+	pid, err := identity.PeerPID(c)
+	if err != nil {
+		return identity.Peer{}, func() {}, err
+	}
+	peer := identity.Peer{PID: pid, ConnectedAt: at}
+	fd, err := identity.PeerPIDFD(c)
+	switch {
+	case err == nil:
+		peer.Same = identity.PIDFDHolds(fd, pid)
+		return peer, func() { syscall.Close(fd) }, nil
+	case errors.Is(err, identity.ErrNoPIDFD):
+		return peer, func() {}, nil
+	default:
+		return identity.Peer{}, func() {}, err
+	}
+}
+
 // resolve 判定调用者。
 func (s *Server) resolve(ctx context.Context) Caller {
 	c, _ := ctx.Value(connKey{}).(*net.UnixConn)
 	if c == nil {
 		return Caller{Role: RoleUnknown, Err: errors.New("不是 unix socket 连接")}
 	}
-	pid, err := identity.PeerPID(c)
+	at, _ := ctx.Value(connAtKey{}).(time.Time)
+	peer, done, err := peerOf(c, at)
 	if err != nil {
 		return Caller{Role: RoleUnknown, Err: err}
 	}
-	if s.peerOverride != nil {
-		pid = s.peerOverride(pid)
-	}
-	at, _ := ctx.Value(connAtKey{}).(time.Time)
-	pane, err := s.resolver.ResolveAt(ctx, pid, at)
+	defer done()
+	pane, err := s.resolver.ResolvePeer(ctx, peer)
 	if errors.Is(err, identity.ErrUnknown) {
 		return Caller{Role: RoleUnknown}
 	}

@@ -48,7 +48,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f := &fixture{t: t, store: st}
 	mk := func(project, role, tmux string) deckstore.Session {
-		r, err := st.Reserve(deckstore.Session{Project: project, Role: role, Agent: "claude", Tool: "claude", Model: "m", Tier: deckstore.Economy, Title: role, CreatedBy: "owner"}, "")
+		r, err := st.Reserve(deckstore.Session{Project: project, Role: role, Agent: "claude", Tool: "claude", Model: "m", Tier: deckstore.Economy, Title: role, CreatedBy: "owner", RequestID: "req-" + tmux, Dir: "/tmp/" + project, TaskSHA256: strings.Repeat("a", 64), ArgsSHA256: strings.Repeat("b", 64)}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -109,7 +109,7 @@ func TestPermissionMatrix(t *testing.T) {
 		{"GET", "/v1/notifications", "", map[string]int{"owner": 200, "main": 200, "sub": 403, "unknown": 403}},
 		{"GET", "/v1/settings", "", map[string]int{"owner": 200, "main": 200, "sub": 403, "unknown": 403}},
 		{"GET", "/v1/trust", "", map[string]int{"owner": 200, "main": 403, "sub": 403, "unknown": 403}},
-		{"PUT", "/v1/settings", "{}", map[string]int{"main": 403, "sub": 403, "unknown": 403}},
+		{"PUT", "/v1/settings", "{}", map[string]int{"owner": 400, "main": 403, "sub": 403, "unknown": 403}},
 		{"POST", "/v1/decisions", `{"kind":"push","summary":"推送？"}`, map[string]int{"owner": 403, "sub": 403, "unknown": 403, "main": 201}},
 		{"POST", "/v1/view", `{"op":"open","session":"x"}`, map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 503}},
 		{"GET", "/v1/events?after=x", "", map[string]int{"sub": 403, "unknown": 403}},
@@ -175,6 +175,20 @@ func TestCrossProjectAccessIsRefused(t *testing.T) {
 	json.Unmarshal([]byte(body), &list)
 	if len(list) != 1 || list[0].Key != f.sub.Key {
 		t.Errorf("子 agent 只能看到自己：%s", body)
+	}
+}
+
+// 整份替换设置缺字段不当成清空：{} 被拒，原设置不变。
+func TestPutSettingsRequiresBothFields(t *testing.T) {
+	f := newFixture(t)
+	before := len(f.store.Settings().Projects)
+	for _, body := range []string{`{}`, `{"agents":[]}`, `{"projects":[]}`} {
+		if got, out := f.do("owner", "PUT", "/v1/settings", body); got != 400 {
+			t.Fatalf("%s 应被拒：%d %s", body, got, out)
+		}
+	}
+	if len(f.store.Settings().Projects) != before || before == 0 {
+		t.Fatalf("设置不应被改：%d → %d", before, len(f.store.Settings().Projects))
 	}
 }
 

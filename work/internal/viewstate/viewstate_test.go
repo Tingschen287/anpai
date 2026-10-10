@@ -233,13 +233,17 @@ func TestLeavingTakenOverSessionAutoHandsBackAfterClosingInput(t *testing.T) {
 	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderWorkbench {
 		t.Fatalf("离开后应自动交还：%+v", l)
 	}
-	if last := w.notes[len(w.notes)-1]; !strings.Contains(last, "42 秒") || !strings.Contains(last, "已自动交还") {
+	// lease 提交之前写的通知，不宣称「已交还」（n050 评审 R2）
+	if last := w.notes[len(w.notes)-1]; !strings.Contains(last, "42 秒") || !strings.Contains(last, "正在自动交还") {
 		t.Fatalf("应发交还通知：%q", last)
 	}
 	ev, _ := w.l.Events()
 	last := ev[len(ev)-1]
 	if last.Kind != lease.EventAutoHandback || !strings.Contains(last.Reason, "画面最后一行") {
 		t.Fatalf("交还事件应带画面末行：%+v", last)
+	}
+	if hb := last.Handback; hb == nil || hb.DurationSeconds != 42 || hb.AttachedAt.IsZero() || !hb.ReturnedAt.Equal(w.now) || len(hb.LastLines) != 1 {
+		t.Fatalf("完整摘要应随事件落盘：%+v", hb)
 	}
 	if n := w.notes[len(w.notes)-1]; !strings.Contains(n, "画面最后一行") {
 		t.Fatalf("交还通知应带画面末行：%q", n)

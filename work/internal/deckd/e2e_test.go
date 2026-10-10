@@ -47,7 +47,8 @@ func TestE2EIdentityFromRealPanes(t *testing.T) {
 	if err := st.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
 	}
-	r, _ := st.Reserve(deckstore.Session{Project: "alpha", Role: "main", Agent: "claude", Tool: "claude", Model: "claude-opus-5-5", Tier: deckstore.Frontier, Title: "主 agent", CreatedBy: "owner"}, "")
+	r, _ := st.Reserve(deckstore.Session{Project: "alpha", Role: "main", Agent: "claude", Tool: "claude", Model: "claude-opus-5-5", Tier: deckstore.Frontier, Title: "主 agent", CreatedBy: "owner",
+		RequestID: "req-main", Dir: "/tmp/alpha", TaskSHA256: strings.Repeat("a", 64), ArgsSHA256: strings.Repeat("b", 64)}, "")
 	st.LaunchSucceeded(r.Key, "ad-main", "agentdeck_alpha_main")
 	dec, _ := st.CreateDecision(deckstore.NewDecision{Project: "alpha", Kind: deckstore.KindDeviation, Summary: "按状态分组？", Options: []string{"按项目"}, CreatedBy: r.Key})
 

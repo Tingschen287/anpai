@@ -77,6 +77,8 @@ type Event struct {
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Reason    string    `json:"reason"`
+	// Handback 是自动交还时的完整摘要（进入与离开时间、画面末行、说明），与持有者切换同一次落盘（n050 评审 R2）。
+	Handback *Handback `json:"handback,omitempty"`
 }
 
 // 事件种类。
@@ -301,7 +303,22 @@ func (s *Store) OwnerReturn(sessionID string, hb Handback) error {
 	return s.commitLocked(sessionID, &next, Event{At: s.now(), SessionID: sessionID, Kind: EventReturn, From: HolderOwner, To: HolderOwner, Reason: "owner 已回来，自动投递仍暂停，等确认交还"})
 }
 
-// AutoHandback 是 Agent Deck 的自动交还：会话须由 owner 持有；摘要随事件留档，写入权立即回到 workbench。
+// OwnerHeld 列出由 owner 持有、且没有挂着待确认摘要的会话：Agent Deck 的接管中或交还未完成的会话。
+// deckd 重启时用它恢复接管状态（n050 评审 R5）。
+func (s *Store) OwnerHeld() []Lease {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Lease
+	for _, l := range s.leases {
+		if l.Holder == HolderOwner && l.PendingHandback == nil {
+			out = append(out, *l)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
+	return out
+}
+
+// AutoHandback 是 Agent Deck 的自动交还：会话须由 owner 持有；完整摘要随事件同一次落盘，写入权立即回到 workbench。
 // 调用方负责先确认 owner 的输入已关闭（中间窗格只读），再调这里。
 func (s *Store) AutoHandback(sessionID string, hb Handback) error {
 	s.mu.Lock()
@@ -315,8 +332,11 @@ func (s *Store) AutoHandback(sessionID string, hb Handback) error {
 	if len(hb.Notes) > 0 {
 		reason += "；" + strings.Join(hb.Notes, "；")
 	}
+	h := hb
+	h.LastLines = append([]string(nil), hb.LastLines...)
+	h.Notes = append([]string(nil), hb.Notes...)
 	next := &Lease{SessionID: sessionID, Holder: HolderWorkbench, Since: now, ExpiresAt: now.Add(s.ttl)}
-	return s.commitLocked(sessionID, next, Event{At: now, SessionID: sessionID, Kind: EventAutoHandback, From: HolderOwner, To: HolderWorkbench, Reason: reason})
+	return s.commitLocked(sessionID, next, Event{At: now, SessionID: sessionID, Kind: EventAutoHandback, From: HolderOwner, To: HolderWorkbench, Reason: reason, Handback: &h})
 }
 
 // ConfirmHandback 是 owner 看过摘要后的确认：写入权回到 Work Deck，自动投递恢复。

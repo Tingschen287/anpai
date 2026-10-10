@@ -2,10 +2,12 @@ package deckstore
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,8 +99,28 @@ func TestSettingsSurviveReopen(t *testing.T) {
 
 // ---------- 名额预留 ----------
 
+var reqSeq atomic.Int64
+
+// launch 补上启动请求指纹（每次一个新的请求 id）。
+func launch(x Session) Session {
+	x.RequestID = fmt.Sprintf("req-%d", reqSeq.Add(1))
+	x.Dir = "/tmp/proj"
+	x.TaskSHA256 = strings.Repeat("a", 64)
+	x.ArgsSHA256 = strings.Repeat("b", 64)
+	return x
+}
+
 func sub(tier Tier) Session {
-	return Session{Project: "deck", Role: "sub", Agent: "claude", Tool: "claude", Model: "m", Tier: tier, Title: "t", CreatedBy: "main"}
+	return launch(Session{Project: "deck", Role: "sub", Agent: "claude", Tool: "claude", Model: "m", Tier: tier, Title: "t", CreatedBy: "main"})
+}
+
+func project(t *testing.T, s *Store) ProjectDef {
+	t.Helper()
+	p, ok := s.Settings().Project("deck")
+	if !ok {
+		t.Fatal("没有项目 deck")
+	}
+	return p
 }
 
 func TestReserveEnforcesEnvelope(t *testing.T) {
@@ -181,7 +203,7 @@ func TestReserveExceptionRequiresExecutingCostDecision(t *testing.T) {
 	env := Envelope{ID: "e", Version: 1, MaxSubagents: 0, MaxFrontier: 0, TokenSoftCap: 1}
 	s := withProject(t, testDirs(t), env)
 	req := sub(Economy)
-	scope := SpawnScope(req, env)
+	scope := SpawnScope(req, project(t, s))
 	d, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "多开一个", Scope: scope, CreatedBy: "main"})
 	if _, err := s.Reserve(req, d.ID); err == nil {
 		t.Fatal("未批准的决定不能当例外")
@@ -214,7 +236,7 @@ func TestConcurrentUseOfOneExceptionSucceedsOnce(t *testing.T) {
 	env := Envelope{ID: "e", Version: 1, MaxSubagents: 0, MaxFrontier: 0, TokenSoftCap: 1}
 	s := withProject(t, testDirs(t), env)
 	req := sub(Economy)
-	scope := SpawnScope(req, env)
+	scope := SpawnScope(req, project(t, s))
 	d, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "x", Scope: scope, CreatedBy: "main"})
 	d, _ = s.Answer(d.ID, OptApprove, d.Version, "owner")
 	s.BeginExecute(d.ID, scope)

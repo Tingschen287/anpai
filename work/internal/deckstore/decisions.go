@@ -187,7 +187,10 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 		if !ok {
 			return nil, nil, fmt.Errorf("没有决定 %s", id)
 		}
-		s.expireLocked(d)
+		if s.expireLocked(d) {
+			out = d.clone()
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期，不能再答", id)
+		}
 		if d.State != StateOpen {
 			return nil, nil, fmt.Errorf("决定 %s 已是 %s，不能再答", id, d.State)
 		}
@@ -281,6 +284,9 @@ func (s *Store) Cancel(id, by string) error {
 		if d.CreatedBy != by {
 			return nil, nil, fmt.Errorf("只有创建者能撤回决定 %s", id)
 		}
+		if s.expireLocked(d) {
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期", id)
+		}
 		if d.State != StateOpen {
 			return nil, nil, fmt.Errorf("决定 %s 已是 %s，不能撤回", id, d.State)
 		}
@@ -290,15 +296,15 @@ func (s *Store) Cancel(id, by string) error {
 	})
 }
 
-// Decisions 列出决定（含过期判定）。project 为空返回全部。
+// Decisions 列出决定。过了有效期还没转 expired 的按 expired 显示（只读，不改内存；
+// 状态转换由下一次碰到它的写操作落盘，n050 评审 S2）。project 为空返回全部。
 func (s *Store) Decisions(project string) []Decision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Decision
 	for _, d := range s.decs {
 		if project == "" || d.Project == project {
-			s.expireLocked(d)
-			out = append(out, d.clone())
+			out = append(out, s.viewLocked(d))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -313,11 +319,20 @@ func (s *Store) Decision(id string) (Decision, bool) {
 	if !ok {
 		return Decision{}, false
 	}
-	s.expireLocked(d)
-	return d.clone(), true
+	return s.viewLocked(d), true
 }
 
-// expireLocked：open 或 approved 但已过有效期的转为 expired（只改内存，落盘随下一次写）。
+// viewLocked 返回给读方看的副本：已过有效期的 open/approved 显示为 expired。
+func (s *Store) viewLocked(d *Decision) Decision {
+	c := d.clone()
+	if (c.State == StateOpen || c.State == StateApproved) && !c.ExpiresAt.IsZero() && s.now().After(c.ExpiresAt) {
+		c.State = StateExpired
+	}
+	return c
+}
+
+// expireLocked：open 或 approved 但已过有效期的转为 expired。只在写操作（mutate）里调用，
+// 调用方见到 true 必须返回落盘动作，不能只改内存。
 func (s *Store) expireLocked(d *Decision) bool {
 	if (d.State == StateOpen || d.State == StateApproved) && !d.ExpiresAt.IsZero() && s.now().After(d.ExpiresAt) {
 		d.State, d.UpdatedAt = StateExpired, s.now()

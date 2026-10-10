@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -75,6 +76,58 @@ func PeerPID(c *net.UnixConn) (int, error) {
 	return int(cred.Pid), nil
 }
 
+// soPeerPIDFD 是 SO_PEERPIDFD（Linux 6.5 起；asm-generic 下为 77）。标准库 syscall 没有这个常量。
+const soPeerPIDFD = 77
+
+// ErrNoPIDFD 表示内核不支持 SO_PEERPIDFD。
+var ErrNoPIDFD = errors.New("内核不支持 SO_PEERPIDFD")
+
+// PeerPIDFD 取连接对端进程的 pidfd。内核在 connect 时记下对端的进程结构，所以 pidfd 指向的一定是建立连接的那个进程，
+// 不会因为 pid 被复用而指错。用完要 Close（syscall.Close）。
+func PeerPIDFD(c *net.UnixConn) (int, error) {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return -1, err
+	}
+	fd, serr := -1, error(nil)
+	if err := raw.Control(func(s uintptr) {
+		fd, serr = syscall.GetsockoptInt(int(s), syscall.SOL_SOCKET, soPeerPIDFD)
+	}); err != nil {
+		return -1, err
+	}
+	if errors.Is(serr, syscall.ENOPROTOOPT) {
+		return -1, ErrNoPIDFD
+	}
+	if serr != nil {
+		return -1, serr
+	}
+	return fd, nil
+}
+
+// PIDFDHolds 返回一个检查：pidfd 指向的进程仍然持有 pid。进程被回收后 /proc/self/fdinfo 里的 Pid 变为 -1
+// （僵尸状态下 pid 仍被占着、不会被复用），所以「Pid 等于 pid」就说明此刻 /proc/<pid> 是这个进程。
+func PIDFDHolds(fd, pid int) func() error {
+	return func() error {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if v, ok := strings.CutPrefix(line, "Pid:"); ok {
+				got, err := strconv.Atoi(strings.TrimSpace(v))
+				if err != nil {
+					return err
+				}
+				if got != pid {
+					return fmt.Errorf("pidfd 现在指向 pid %d（-1 表示已退出）", got)
+				}
+				return nil
+			}
+		}
+		return errors.New("pidfd 的 fdinfo 里没有 Pid")
+	}
+}
+
 // Resolver 把一个 pid 对应到它所在的窗格。
 type Resolver struct {
 	Sources  []PaneSource
@@ -91,26 +144,52 @@ type Proc struct {
 	Start uint64
 }
 
-// Resolve 等同于 ResolveAt(ctx, pid, time.Time{})：不检查出生时间与连接时间的先后。
-func (r Resolver) Resolve(ctx context.Context, pid int) (Pane, error) {
-	return r.ResolveAt(ctx, pid, time.Time{})
+// Peer 是一条连接的对端。
+type Peer struct {
+	PID         int
+	ConnectedAt time.Time // 非零时，调用进程必须在此之前出生
+	// Same 报告「连接的对端进程仍然持有 PID」（由 SO_PEERPIDFD 得到的 pidfd 判定，见 PeerPIDFD）。
+	// 判定开始前与结束后各问一次：两次都成立，说明整个判定期间 /proc/PID 就是那条连接的进程，
+	// 进程号复用在任何时刻发生都会被发现（n050 评审 R4）。nil 表示内核不支持，只剩出生时间检查。
+	Same func() error
 }
 
-// ResolveAt 返回 pid 所在的窗格。进程已消失、读不了 /proc、列窗格失败、或判定过程中进程链变了，都返回错误，
-// 调用方据此拒绝写入。connectedAt 非零时，调用进程必须在连接建立之前（含 1 秒误差）就已经出生：
-// 连接之后才出生的，只可能是原进程退出后复用了它的 pid。
+// Resolve 等同于 ResolvePeer(ctx, Peer{PID: pid})：不检查出生时间，也不核对进程生命周期。
+func (r Resolver) Resolve(ctx context.Context, pid int) (Pane, error) {
+	return r.ResolvePeer(ctx, Peer{PID: pid})
+}
+
+// ResolveAt 等同于 ResolvePeer(ctx, Peer{PID: pid, ConnectedAt: connectedAt})。
 func (r Resolver) ResolveAt(ctx context.Context, pid int, connectedAt time.Time) (Pane, error) {
+	return r.ResolvePeer(ctx, Peer{PID: pid, ConnectedAt: connectedAt})
+}
+
+// ResolvePeer 返回对端进程所在的窗格。进程已消失、读不了 /proc、列窗格失败、或判定过程中进程链变了，都返回错误，
+// 调用方据此拒绝写入。
+//
+// 进程号复用的两道检查：
+//   - Same（pidfd）：判定前后对端进程都仍持有 PID，否则拒绝。这是主检查。
+//   - 出生时间：调用进程必须不晚于连接建立时刻出生，不留容差。btime 是向下取整的整秒、starttime 是向下取整的滴答，
+//     算出的出生时间不晚于真实出生时间，所以真正的调用者不会被误拒；但复用者若在连接后一秒内出生仍可能漏过，
+//     所以它只是没有 pidfd 时的退路。
+func (r Resolver) ResolvePeer(ctx context.Context, peer Peer) (Pane, error) {
+	pid := peer.PID
+	if peer.Same != nil {
+		if err := peer.Same(); err != nil {
+			return Pane{}, fmt.Errorf("连接的对端进程已不再持有 pid %d：%w", pid, err)
+		}
+	}
 	chain, err := r.Ancestry(pid)
 	if err != nil {
 		return Pane{}, err
 	}
-	if !connectedAt.IsZero() {
+	if !peer.ConnectedAt.IsZero() {
 		born, err := r.bornAt(chain[0].Start)
 		if err != nil {
 			return Pane{}, err
 		}
-		if born.After(connectedAt.Add(time.Second)) {
-			return Pane{}, fmt.Errorf("pid %d 在连接建立之后才出生（%s > %s），疑似 pid 被复用", pid, born.Format(time.RFC3339Nano), connectedAt.Format(time.RFC3339Nano))
+		if born.After(peer.ConnectedAt) {
+			return Pane{}, fmt.Errorf("pid %d 在连接建立之后才出生（%s > %s），疑似 pid 被复用", pid, born.Format(time.RFC3339Nano), peer.ConnectedAt.Format(time.RFC3339Nano))
 		}
 	}
 	byPID := map[int]Pane{}
@@ -149,6 +228,11 @@ func (r Resolver) ResolveAt(ctx context.Context, pid int, connectedAt time.Time)
 	for i := 0; i < upto; i++ {
 		if again[i] != chain[i] {
 			return Pane{}, fmt.Errorf("判定过程中进程链变了（第 %d 层 %v → %v）", i, chain[i], again[i])
+		}
+	}
+	if peer.Same != nil {
+		if err := peer.Same(); err != nil {
+			return Pane{}, fmt.Errorf("判定过程中连接的对端进程退出了：%w", err)
 		}
 	}
 	if hit < 0 {
@@ -203,7 +287,12 @@ func (r Resolver) bornAt(start uint64) (time.Time, error) {
 			if err != nil {
 				return time.Time{}, err
 			}
-			return time.Unix(bt, 0).Add(time.Duration(start) * time.Second / clockTicks), nil
+			// 先拆成整秒与余下的滴答再换算：直接 start*Second 在开机约 1068 天后溢出（n050 评审 R4）
+			secs, rem := start/clockTicks, start%clockTicks
+			if secs > uint64(math.MaxInt64/int64(time.Second)) {
+				return time.Time{}, fmt.Errorf("出生滴答数 %d 超出范围", start)
+			}
+			return time.Unix(bt, 0).Add(time.Duration(secs)*time.Second + time.Duration(rem)*(time.Second/clockTicks)), nil
 		}
 	}
 	return time.Time{}, fmt.Errorf("/proc/stat 里没有 btime")

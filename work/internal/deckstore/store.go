@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -235,6 +236,11 @@ type Session struct {
 	Graph          *GraphLink `json:"graph,omitempty"`
 	BriefConfirmed bool       `json:"brief_confirmed"` // 主 agent 的第一条 brief 已确认送达（之前中间窗格对它保持只读）
 	Note           string     `json:"note,omitempty"`
+	// 启动请求的指纹（架构稿 §4，n050 评审 R1）：由发起方（n051 的 deck agent）给出，预留时校验并写入批准范围。
+	RequestID  string `json:"request_id"`  // 本次启动请求 id，同一 id 只能预留一次
+	Dir        string `json:"dir"`         // 工作目录（绝对路径）
+	TaskSHA256 string `json:"task_sha256"` // 任务正文的 sha256
+	ArgsSHA256 string `json:"args_sha256"` // 启动参数的 sha256
 }
 
 // clone 返回不与内部共享指针的副本。
@@ -337,27 +343,40 @@ type Reservation struct {
 	Key string
 }
 
-// SpawnScope 是「开一个子 agent」这个动作的批准范围：超额例外按它绑定，预留时重新计算比对（n050 评审 B2）。
-func SpawnScope(x Session, env Envelope) map[string]string {
+// SpawnScope 是「开一个子 agent」这个动作的批准范围（架构稿 §4）：超额例外按它绑定，预留时按当时的项目设置
+// 重新计算比对（n050 评审 B2、R1）。项目目录、工作目录、任务与启动参数的哈希、启动请求 id、包络 id 与版本
+// 任一变化都使批准失效；例外次数 v1 固定为一次。
+func SpawnScope(x Session, p ProjectDef) map[string]string {
 	graph := "none"
 	if x.Graph != nil {
 		graph = fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt)
 	}
 	return map[string]string{
-		"action": "spawn", "project": x.Project, "parent": x.Parent, "agent": x.Agent, "tool": x.Tool,
+		"action": "spawn", "project": x.Project, "project_dir": p.Path, "parent": x.Parent, "agent": x.Agent, "tool": x.Tool,
 		"model": x.Model, "tier": string(x.Tier), "title": x.Title, "graph": graph,
-		"envelope": env.ID, "envelope_version": fmt.Sprint(env.Version),
+		"dir": x.Dir, "task_sha256": x.TaskSHA256, "args_sha256": x.ArgsSHA256, "request_id": x.RequestID,
+		"envelope": p.Envelope.ID, "envelope_version": fmt.Sprint(p.Envelope.Version), "exception_uses": "1",
 	}
 }
 
 // Reserve 在锁内「检查并预留」名额，写一条 launching 记录。exception 非空表示一次性超额例外：
-// 它必须是本项目、正在执行（BeginExecute 过）的 cost 决定，且其 scope 与本次请求的 SpawnScope 一致；
-// 通过后在同一把锁里把它标为 applied（已消费），同一个例外不能再用（n050 评审 B2）。
+// 它必须是本项目、正在执行（BeginExecute 过）、未过有效期的 cost 决定，且其 scope 与本次请求的 SpawnScope 一致；
+// 通过后在同一把锁里把它标为 applied（已消费），同一个例外不能再用（n050 评审 B2、R1）。
+// 过期的例外在这里转为 expired 并落盘。
 func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error) {
 	var res Reservation
+	x = x.clone() // 不与调用方共享 Graph 指针
 	err := s.mutate(func() (func() error, []Event, error) {
 		if err := checkIDs(x); err != nil {
 			return nil, nil, err
+		}
+		if err := checkLaunch(x); err != nil {
+			return nil, nil, err
+		}
+		for _, y := range s.sessions {
+			if y.RequestID == x.RequestID {
+				return nil, nil, fmt.Errorf("启动请求 %s 已经预留过（会话 %s），同一请求不能预留两次", x.RequestID, y.Key)
+			}
 		}
 		var consumed *Decision
 		p, ok := s.settings.Project(x.Project)
@@ -382,8 +401,14 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 				if !ok || d.Kind != KindCost || d.Project != x.Project || d.State != StateExecuting {
 					return nil, nil, fmt.Errorf("超额例外 %s 无效（须是本项目、正在执行的 cost 决定；用过的不能再用）", exceptionDecision)
 				}
-				if ScopeHash(SpawnScope(x, env)) != d.ScopeHash {
-					return nil, nil, fmt.Errorf("超额例外 %s 批准的是另一个请求（工具、模型、档位、标题、父会话或包络不一致）", exceptionDecision)
+				if !d.ExpiresAt.IsZero() && s.now().After(d.ExpiresAt) {
+					d.State, d.Result, d.UpdatedAt = StateExpired, "超额例外过了有效期仍未使用", s.now()
+					d.Version++
+					return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}},
+						fmt.Errorf("超额例外 %s 已过有效期，已作废", exceptionDecision)
+				}
+				if ScopeHash(SpawnScope(x, p)) != d.ScopeHash {
+					return nil, nil, fmt.Errorf("超额例外 %s 批准的是另一个请求（目录、任务、启动参数、请求 id、工具、模型、档位、标题、父会话或包络不一致）", exceptionDecision)
 				}
 				consumed = d
 			}
@@ -654,6 +679,25 @@ func checkIDs(x Session) error {
 		if len(v) > 120 || Clean(v, 0) != v {
 			return fmt.Errorf("会话的 %s 含非法字符或过长", name)
 		}
+	}
+	return nil
+}
+
+var (
+	requestRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+	sha256Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// checkLaunch 校验启动请求的指纹：一律原样校验、不清洗（同 B8 的做法），不合格就拒绝。
+func checkLaunch(x Session) error {
+	if !requestRe.MatchString(x.RequestID) {
+		return fmt.Errorf("启动请求 id 缺失或不合格（只许字母数字与 ._:-，最长 64）")
+	}
+	if !filepath.IsAbs(x.Dir) || filepath.Clean(x.Dir) != x.Dir || len(x.Dir) > 4096 || Clean(x.Dir, 0) != x.Dir {
+		return fmt.Errorf("工作目录须是规整的绝对路径：%q", Clean(x.Dir, 200))
+	}
+	if !sha256Re.MatchString(x.TaskSHA256) || !sha256Re.MatchString(x.ArgsSHA256) {
+		return fmt.Errorf("任务与启动参数的 sha256 须是 64 位小写十六进制")
 	}
 	return nil
 }

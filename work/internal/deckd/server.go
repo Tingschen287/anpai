@@ -32,7 +32,7 @@ type Config struct {
 }
 
 type paneResolver interface {
-	ResolveAt(ctx context.Context, pid int, connectedAt time.Time) (identity.Pane, error)
+	ResolvePeer(ctx context.Context, peer identity.Peer) (identity.Pane, error)
 }
 
 // ProgressFunc 读一个项目的进度（只读）。
@@ -50,7 +50,6 @@ type Server struct {
 	// 只在测试里设置：按请求决定调用者。生产路径没有任何方式设置它。
 	callerFn func(*http.Request) Caller
 	// 只在测试里设置：改写对端 pid。
-	peerOverride func(int) int
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
@@ -187,11 +186,22 @@ func projectScope(w http.ResponseWriter, c Caller, asked string) (string, bool) 
 	return c.Project, true
 }
 
+// stopped 汇总 deck 存储与写入权记账（经中间窗格状态机）的停止原因（n050 评审 R3）。
+func (s *Server) stopped() error {
+	if err := s.store.Broken(); err != nil {
+		return err
+	}
+	if s.view != nil {
+		return s.view.Stopped()
+	}
+	return nil
+}
+
 // ---------------- 只读 ----------------
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"ok": true, "event_id": s.bus.Current()}
-	if err := s.store.Broken(); err != nil {
+	if err := s.stopped(); err != nil {
 		out["ok"], out["broken"] = false, err.Error()
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -450,11 +460,21 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if !need(w, c, true, RoleOwner) {
 		return
 	}
-	var next deckstore.Settings
-	if err := readBody(r, &next); err != nil {
+	// 整份替换：agents 与 projects 都必须显式给出（可以是空列表），缺字段不当成「清空」——
+	// 否则一个 {} 就把全部设置抹掉了（n050 第 3 次实现补权限矩阵时发现）
+	var body struct {
+		Agents   *[]deckstore.AgentDef   `json:"agents"`
+		Projects *[]deckstore.ProjectDef `json:"projects"`
+	}
+	if err := readBody(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
 		return
 	}
+	if body.Agents == nil || body.Projects == nil {
+		fail(w, http.StatusBadRequest, "整份替换设置须同时给出 agents 与 projects")
+		return
+	}
+	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
 	if err := s.store.ReplaceSettings(next); err != nil {
 		storeErr(w, err)
 		return
@@ -495,7 +515,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
 		return
 	}
-	if err := s.store.Broken(); err != nil {
+	if err := s.stopped(); err != nil {
 		fail(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
@@ -528,7 +548,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State(), "handback_failed": he.Session})
 			return
 		}
-		if s.store.Broken() != nil {
+		if s.stopped() != nil {
 			fail(w, http.StatusServiceUnavailable, "%v", err)
 			return
 		}
