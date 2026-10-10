@@ -301,5 +301,8 @@ func (s *Sidebar) Render(w, h int) Frame {
 	return Frame{Lines: lines, Images: images}
 }
 
-// sanitize 去掉会话标题里的控制字符与疑似密钥（标题来自模型，可能夹带转义序列）。
-func sanitize(s string) string { return deckstore.Clean(strings.TrimSpace(s), 80) }
+// sanitize 去掉会话标题里的控制字符与疑似密钥（标题来自模型，可能夹带转义序列），
+// 并压成一行：Clean 为多行报告保留换行与制表符，单行字段里它们会挪动行列、错开点击区域。
+func sanitize(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 80)) }
+
+func oneLine(s string) string { return strings.NewReplacer("\n", " ", "\t", " ").Replace(s) }

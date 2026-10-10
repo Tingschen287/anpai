@@ -69,9 +69,13 @@ func up(dirs deckstore.Dirs, args []string) {
 		fail("%v", err)
 	}
 	if !agentdeck.LayoutHasSession(ctx, *layoutSock, "deck") {
-		if err := buildLayout(dirs, spec, *upstream); err != nil {
+		if err := buildLayout(dirs, spec); err != nil {
 			fail("%v", err)
 		}
+	}
+	// 每次 up 都查一次 deckd：布局还在而 deckd 单独退出了，再运行 deck up 就把它重新起来（n049 评审 1 S1）
+	if err := ensureDeckd(dirs, spec, *upstream); err != nil {
+		fail("%v", err)
 	}
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -80,7 +84,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	}
 }
 
-func buildLayout(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
+func buildLayout(dirs deckstore.Dirs, spec layout.Spec) error {
 	panels, err := deckstore.LoadPanels(dirs.Config)
 	if err != nil {
 		return fmt.Errorf("读面板注册表失败：%w", err)
@@ -105,7 +109,13 @@ func buildLayout(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
 	if err := m.Source(keys); err != nil {
 		return fmt.Errorf("装按键失败：%w", err)
 	}
-	// deckd 没在跑就在布局的后台窗口里起它（外部命令只许在 adapter 包里调，所以不在这里另起进程）
+	return nil
+}
+
+// ensureDeckd：deckd 没在跑就在布局的后台窗口里起它（外部命令只许在 adapter 包里调，所以不在这里另起进程）。
+// 后果：关掉布局 server 时 deckd 随之停止，agent 会话照常在 agent-deck server 上跑；再 deck up 时重新起来，
+// 接管中的会话按 n050 的重启恢复处理（保持接管、自动派送暂停，等 owner 交还）。
+func ensureDeckd(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
 	var health map[string]any
 	if deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/health", &health) != nil {
 		d := []string{layout.Quote(spec.Deck), "daemon", "-layout-socket", layout.Quote(spec.LayoutSocket), "-agent-socket", layout.Quote(spec.AgentSocket)}
@@ -146,8 +156,8 @@ func center(dirs deckstore.Dirs, args []string) {
 				return err
 			}, nil
 		},
-		Announce: func(op string, pid int) {
-			announce(client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid)
+		Announce: func(ctx context.Context, op string, pid int) {
+			announce(ctx, client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid)
 		},
 		Pause: func(reason string) bool {
 			fmt.Print("\x1b[2J\x1b[H")
@@ -161,7 +171,11 @@ func center(dirs deckstore.Dirs, args []string) {
 
 // announce 等新 client 出现在 agent-deck server 上，再告诉 deckd（deckd 可能还在启动：重试 30 秒）。
 // 结果记进 $XDG_STATE_HOME/deck/center.log：client 已连上、界面看不到这里的输出，出错要有地方查。
-func announce(c *deckclient.Client, logPath, agentSock, op string, pid int) {
+//
+// 通知只属于这一个 client（n049 评审 1 B1）：它退出（ctx 取消）就不再发；每次发之前重新确认它还在；
+// 请求带上它的进程号，deckd 在状态机锁里核对它仍是中间现在的 client，不是就拒绝（409），
+// 所以查与发之间它恰好退出，也不会作用到新 client 上。
+func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op string, pid int) {
 	logf := func(format string, a ...any) {
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -171,19 +185,26 @@ func announce(c *deckclient.Client, logPath, agentSock, op string, pid int) {
 		fmt.Fprintf(f, time.Now().Format("2006-01-02 15:04:05 ")+format+"\n", a...)
 	}
 	deadline := time.Now().Add(30 * time.Second)
-	listed := false
+	listed, seen := false, false
 	for time.Now().Before(deadline) {
-		if !listed {
-			list, _ := agentdeck.ListTmuxClients(context.Background(), agentSock)
-			for _, cl := range list {
-				if cl.PID == pid {
-					listed = true
-				}
+		if ctx.Err() != nil {
+			logf("client %d 已退出，不再通知 deckd（%s）", pid, op)
+			return
+		}
+		list, lerr := agentdeck.ListTmuxClients(ctx, agentSock)
+		listed = false
+		for _, cl := range list {
+			if cl.PID == pid {
+				listed, seen = true, true
 			}
+		}
+		if lerr == nil && seen && !listed {
+			logf("client %d 已不在 agent-deck server 上，不再通知 deckd（%s）", pid, op)
+			return
 		}
 		if listed {
 			var out any
-			err := c.Do(context.Background(), "POST", "/v1/view", map[string]string{"op": op}, &out)
+			err := c.Do(ctx, "POST", "/v1/view", map[string]any{"op": op, "client": pid}, &out)
 			if err == nil {
 				logf("client %d 已连上，%s 完成", pid, op)
 				return
@@ -193,9 +214,12 @@ func announce(c *deckclient.Client, logPath, agentSock, op string, pid int) {
 				return // deckd 明确拒绝（例如交还失败 409）：不重发，状态由面板与通知显示
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
-	logf("client %d：30 秒内没能通知 deckd（%s；client 已列出：%v）", pid, op, listed)
+	logf("client %d：30 秒内没能通知 deckd（%s；client 已列出：%v）", pid, op, seen)
 }
 
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
@@ -255,7 +279,11 @@ func layoutCmd(args []string) {
 	self, _ := os.Executable()
 	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock}
 	m := layout.TmuxMux{Socket: *layoutSock}
-	var err error
+	unlock, err := layout.Lock(*layoutSock+".lock", 10*time.Second)
+	if err != nil {
+		fail("%v", err)
+	}
+	defer unlock()
 	switch sub {
 	case "toggle":
 		err = layout.Toggle(m, spec, region)

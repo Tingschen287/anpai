@@ -1,6 +1,7 @@
 package layout
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ type script struct {
 	runs    []run // 每次 attach 的结果
 	i       int
 	ops     map[int]string // client 进程号 → op（Announce 在后台并发调用，按进程号还原先后）
+	ctxs    map[int]context.Context
 	pauses  []string
 	answers []bool
 }
@@ -37,12 +39,12 @@ func (s *script) loop() *CenterLoop {
 			}
 			return 100 + s.i, func() error { s.mu.Lock(); s.now = s.now.Add(r.lasts); s.mu.Unlock(); return r.err }, nil
 		},
-		Announce: func(op string, pid int) {
+		Announce: func(ctx context.Context, op string, pid int) {
 			s.mu.Lock()
 			if s.ops == nil {
-				s.ops = map[int]string{}
+				s.ops, s.ctxs = map[int]string{}, map[int]context.Context{}
 			}
-			s.ops[pid] = op
+			s.ops[pid], s.ctxs[pid] = op, ctx
 			s.mu.Unlock()
 		},
 		Pause: func(reason string) bool {
@@ -121,5 +123,22 @@ func TestCenterLoopCountsQuickNormalExitsToo(t *testing.T) {
 	s.loop().Run()
 	if len(s.pauses) != 1 {
 		t.Fatalf("应停下一次：%v", s.pauses)
+	}
+}
+
+// 每个 client 的通知在它退出后即取消（n049 评审 1 B1）。
+func TestCenterLoopCancelsAnnounceWhenItsClientExits(t *testing.T) {
+	s := &script{now: time.Unix(0, 0), runs: []run{
+		{lasts: time.Minute}, {lasts: time.Minute},
+		{start: errors.New("x")}, {start: errors.New("x")}, {start: errors.New("x")},
+	}, answers: []bool{false}}
+	s.loop().Run()
+	waitOps(t, s, 2)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for pid, ctx := range s.ctxs {
+		if ctx.Err() == nil {
+			t.Fatalf("client %d 退出后它的通知还没取消", pid)
+		}
 	}
 }

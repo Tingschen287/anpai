@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
+	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
 // TmuxCenter 是真实的中间窗格（n049，架构稿 §1、§2），实现 viewstate.Center。
@@ -100,6 +101,9 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 	if err != nil {
 		return err
 	}
+	if st.PID != cl.PID {
+		return fmt.Errorf("翻转只读时中间 client 被替换了（%d → %d）", cl.PID, st.PID) // tty 被新 client 复用
+	}
 	if st.ReadOnly != ro {
 		return fmt.Errorf("只读标记读回不对（要 %v，得 %v）", ro, st.ReadOnly)
 	}
@@ -107,6 +111,15 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 		return fmt.Errorf("翻转只读时 client 被切走了（%s → %s）", cl.Session, st.Session)
 	}
 	return nil
+}
+
+// ClientID 是中间现在那个 client 的进程号。
+func (c *TmuxCenter) ClientID() (int, error) {
+	cl, err := c.client()
+	if err != nil {
+		return 0, err
+	}
+	return cl.PID, nil
 }
 
 // ReadOnly 读回中间 client 的只读标记。
@@ -118,6 +131,9 @@ func (c *TmuxCenter) ReadOnly() (bool, error) {
 	st, err := agentdeck.ClientState(context.Background(), c.AgentSocket, cl.TTY)
 	if err != nil {
 		return false, err
+	}
+	if st.PID != cl.PID {
+		return false, fmt.Errorf("读只读标记时中间 client 被替换了（%d → %d）", cl.PID, st.PID)
 	}
 	return st.ReadOnly, nil
 }
@@ -144,13 +160,13 @@ func (c *TmuxCenter) LastInput() (time.Time, error) {
 	return st.Activity, nil
 }
 
-// Capture 抓中间正显示的会话画面，返回末尾 lines 行非空行。
-func (c *TmuxCenter) Capture(lines int) ([]string, error) {
-	cl, err := c.client()
-	if err != nil {
-		return nil, err
+// Capture 抓 agent-deck server 上指定会话的画面，返回末尾 lines 行非空行。
+// 按会话名抓，不看中间 client 正显示哪个（client 重建后它在 deck-idle 上）。
+func (c *TmuxCenter) Capture(session string, lines int) ([]string, error) {
+	if session == "" || session == viewstate.Idle {
+		return nil, fmt.Errorf("不抓占位会话 %q 当交还摘要", session)
 	}
-	all, err := agentdeck.CaptureSession(context.Background(), c.AgentSocket, cl.Session)
+	all, err := agentdeck.CaptureSession(context.Background(), c.AgentSocket, session)
 	if err != nil {
 		return nil, err
 	}

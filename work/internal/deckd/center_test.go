@@ -174,7 +174,7 @@ func TestViewMachineOnRealCenter(t *testing.T) {
 	if st := state(); st.Session != viewstate.Idle || !st.ReadOnly {
 		t.Fatalf("全部隐藏后应显示 deck-idle 且只读：%+v", st)
 	}
-	if err := m.Resync(); err != nil {
+	if err := m.Resync(clientID(t, w)); err != nil {
 		t.Fatal(err)
 	}
 }

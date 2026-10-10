@@ -55,7 +55,7 @@ func (a DeckAPI) View(ctx context.Context, op, session string) error {
 }
 
 // errText 把错误清洗成一行可显示的文字。
-func errText(err error) string { return deckstore.Clean(err.Error(), 120) }
+func errText(err error) string { return oneLine(deckstore.Clean(err.Error(), 120)) }
 
 type driver struct {
 	old    *term.State

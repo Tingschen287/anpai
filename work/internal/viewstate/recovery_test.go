@@ -15,7 +15,9 @@ import (
 
 type captureFails struct{ *fakeCenter }
 
-func (c captureFails) Capture(int) ([]string, error) { return nil, errors.New("capture failed") }
+func (c captureFails) Capture(string, int) ([]string, error) {
+	return nil, errors.New("capture failed")
+}
 
 func pending(st State, s string) bool { return contains(st.HandbackPending, s) }
 
@@ -192,7 +194,7 @@ type scriptedCapture struct {
 	fail bool
 }
 
-func (c *scriptedCapture) Capture(int) ([]string, error) {
+func (c *scriptedCapture) Capture(string, int) ([]string, error) {
 	if c.fail {
 		return nil, errors.New("capture failed")
 	}

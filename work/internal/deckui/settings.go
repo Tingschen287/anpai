@@ -2,6 +2,7 @@ package deckui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -76,6 +77,7 @@ type Settings struct {
 	proj      int // 正在编辑的项目
 	cur       int // 光标所在的行（rows 下标）
 	dirty     bool
+	edits     int // 每次改动加一：保存回来时据此判断保存期间有没有新改动
 	quitAsked bool
 	msg       string
 	loaded    bool
@@ -83,13 +85,16 @@ type Settings struct {
 }
 
 type loadedMsg struct {
-	set   deckstore.Settings
-	trust []deckstore.TrustGrant
-	err   error
+	set       deckstore.Settings
+	trust     []deckstore.TrustGrant
+	err       error
+	trustOnly bool // 只换授权列表，不动正在编辑的设置
 }
 type doneMsg struct {
-	what string
-	err  error
+	what  string
+	err   error
+	save  bool // 是保存（不是撤销授权）
+	edits int  // 保存时的改动计数
 }
 
 func (m *Settings) Init() tea.Cmd { return m.load }
@@ -98,7 +103,20 @@ func (m *Settings) load() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, g, err := m.API.Load(ctx)
-	return loadedMsg{s, g, err}
+	return loadedMsg{set: s, trust: g, err: err}
+}
+
+// loadTrust 重读授权列表，保留没保存的编辑。
+func (m *Settings) loadTrust() tea.Msg {
+	msg := m.load().(loadedMsg)
+	msg.trustOnly = true
+	return msg
+}
+
+// touch 记一次编辑。
+func (m *Settings) touch() {
+	m.dirty = true
+	m.edits++
 }
 
 func (m *Settings) installed(a deckstore.AgentDef) bool {
@@ -201,7 +219,7 @@ func (m *Settings) togglePick(id string) {
 	} else {
 		p.Agents = append(p.Agents, id)
 	}
-	m.dirty = true
+	m.touch()
 }
 
 // cycleTier 让某一档换到下一个可选模型；最后一个之后是「不设」。
@@ -223,7 +241,7 @@ func (m *Settings) cycleTier(tier deckstore.Tier) {
 	} else {
 		p.Models[tier] = next
 	}
-	m.dirty = true
+	m.touch()
 }
 
 // cycleMain 让主 agent 在「勾选的 agent × 三档」之间轮换。
@@ -250,7 +268,7 @@ func (m *Settings) cycleMain() {
 		}
 	}
 	p.MainAgent = deckstore.MainAgent{Agent: next.agent, Tier: next.tier}
-	m.dirty = true
+	m.touch()
 }
 
 func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -260,6 +278,10 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loadedMsg:
 		if msg.err != nil {
 			m.msg = "读不到设置：" + errText(msg.err)
+			return m, nil
+		}
+		if msg.trustOnly {
+			m.trust = msg.trust
 			return m, nil
 		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
@@ -272,7 +294,13 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.msg = msg.what + "完成"
-		return m, m.load
+		if msg.save && msg.edits == m.edits {
+			return m, m.load
+		}
+		if msg.save {
+			m.msg += "（保存期间又有改动，还没保存）"
+		}
+		return m, m.loadTrust // 撤销授权不能丢掉没保存的编辑
 	case tea.KeyMsg:
 		return m.key(msg.String())
 	}
@@ -284,6 +312,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		m.quitAsked = false
 	}
 	rs := m.rows()
+	m.cur = max(0, min(m.cur, len(rs)-1)) // 列表可能变短或为空
 	switch k {
 	case "q", "esc", "ctrl+c":
 		if m.dirty && !m.quitAsked && k != "ctrl+c" {
@@ -295,7 +324,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		m.cur = max(0, m.cur-1)
 	case "down", "j":
-		m.cur = min(len(rs)-1, m.cur+1)
+		m.cur = max(0, min(len(rs)-1, m.cur+1))
 	case "left", "h":
 		if len(m.set.Projects) > 0 {
 			m.proj = (m.proj + len(m.set.Projects) - 1) % len(m.set.Projects)
@@ -305,7 +334,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			m.proj = (m.proj + 1) % len(m.set.Projects)
 		}
 	case " ", "enter":
-		if m.cur >= len(rs) {
+		if m.cur < 0 || m.cur >= len(rs) {
 			break
 		}
 		switch r := rs[m.cur]; r.kind {
@@ -322,15 +351,20 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				return doneMsg{"撤销 " + g.Project + " 的 " + g.Tool + " 授权", m.API.Revoke(ctx, g.Project, g.Tool)}
+				return doneMsg{what: "撤销 " + g.Project + " 的 " + g.Tool + " 授权", err: m.API.Revoke(ctx, g.Project, g.Tool)}
 			}
 		}
 	case "s":
-		set := m.set
+		set, err := cloneSettings(m.set) // 保存在后台跑，继续编辑不能改到正在发出的那份
+		if err != nil {
+			m.msg = "保存失败：" + errText(err)
+			return m, nil
+		}
+		edits := m.edits
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			return doneMsg{"保存", m.API.Save(ctx, set)}
+			return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits}
 		}
 	}
 	return m, nil
@@ -407,7 +441,7 @@ func (m *Settings) View() string {
 		b.WriteString("\n\x1b[38;5;214m 有没保存的改动\x1b[0m")
 	}
 	if m.msg != "" {
-		b.WriteString("\n " + deckstore.Clean(m.msg, 240))
+		b.WriteString("\n " + oneLine(deckstore.Clean(m.msg, 240)))
 	}
 	return b.String()
 }
@@ -416,4 +450,14 @@ func (m *Settings) View() string {
 func RunSettings(api SettingsAPI) error {
 	_, err := tea.NewProgram(&Settings{API: api}, tea.WithAltScreen()).Run()
 	return err
+}
+
+// cloneSettings 深拷贝一份设置（slice 与 map 不再共享）。
+func cloneSettings(s deckstore.Settings) (deckstore.Settings, error) {
+	var out deckstore.Settings
+	b, err := json.Marshal(s)
+	if err == nil {
+		err = json.Unmarshal(b, &out)
+	}
+	return out, err
 }

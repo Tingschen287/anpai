@@ -84,7 +84,7 @@ func (t *Tabs) Render(w int) Frame {
 	col := 0
 	for _, id := range t.Data.View.Open {
 		x, ok := t.find(id)
-		title, tool := id, ""
+		title, tool := sanitize(id), ""
 		if ok {
 			title, tool = sanitize(x.Title), x.Tool
 		}

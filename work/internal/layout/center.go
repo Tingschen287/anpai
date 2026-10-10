@@ -1,6 +1,7 @@
 package layout
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -8,7 +9,8 @@ import (
 // CenterLoop 是中间窗格里 `deck center` 的重连循环（架构稿 §1 Ctrl-Q、§7 必测场景，n049）。
 //
 // 中间窗格里跑一个连到 agent-deck server 的只读 tmux client。它退出有两种：
-//   - 正常断开（退出码 0）：owner 按了 Ctrl-Q（agent-deck 的绑定），或显示的会话被关掉。按隐藏规则处理：
+//   - 正常断开（退出码 0）：显示的会话被关掉，或 client 被 detach（Ctrl-Q 由布局 server 截获、经 deckd 隐藏，
+//     不会让 client 退出）。按隐藏规则处理：
 //     重新以只读连到 deck-idle，再告诉 deckd「reset」，deckd 把焦点会话移出打开集合、把新 client 切到上一个打开的会话。
 //   - 连不上或出错（非 0）：重新连上后只告诉 deckd「resync」，按当前焦点重做一次切换，不隐藏任何会话。
 //
@@ -17,7 +19,8 @@ type CenterLoop struct {
 	// Attach 起一个 client，返回它的进程号与等待函数。
 	Attach func() (pid int, wait func() error, err error)
 	// Announce 等新 client 连上后通知 deckd（op 为 resync 或 reset）。在后台调用，失败只记下不打断循环。
-	Announce func(op string, pid int)
+	// ctx 在这个 client 退出时取消：旧 client 的通知不能留到新 client 上去执行（n049 评审 1 B1）。
+	Announce func(ctx context.Context, op string, pid int)
 	// Pause 显示原因并等 owner 决定：true 重试，false 退出循环。
 	Pause func(reason string) bool
 	Now   func() time.Time
@@ -42,8 +45,10 @@ func (l *CenterLoop) Run() {
 		start := l.Now()
 		pid, wait, err := l.Attach()
 		if err == nil {
-			go l.Announce(op, pid)
+			ctx, cancel := context.WithCancel(context.Background())
+			go l.Announce(ctx, op, pid)
 			err = wait()
+			cancel()
 		}
 		if l.Now().Sub(start) < l.QuickExit {
 			quick++

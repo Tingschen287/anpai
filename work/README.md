@@ -140,7 +140,7 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 
 ```bash
 go build -o deck ./cmd/deck
-./deck up                      # 一条命令打开四区布局（没有 deckd 就在布局的后台窗口里起它；已有布局就直接接上）
+./deck up                      # 一条命令打开四区布局（已有布局就直接接上；每次都查 deckd，没在跑就在布局的后台窗口里起它）
 ./deck settings -check         # 只读自查设置文件（升级前先跑；不需要 deckd，不写任何东西）
 ./deck daemon                  # 只起后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
 ./deck whoami                  # deckd 把当前进程认成谁
@@ -159,9 +159,11 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 | F9 | agent 设置：全局可用清单（没装的标灰）、项目勾选 agent 与三档模型、主 agent、撤销记住的 Codex 授权 |
 | F10 | 键盘焦点回到中间窗格 |
 
-- logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时在 Windows Terminal 里用 Sixel，其余用半格色块。
+- logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时按终端名推断：有 `WT_SESSION`（Windows Terminal，1.22 起支持 Sixel）用 Sixel，其余用半格色块。这不是能力探测：老版本 Windows Terminal 或经 ssh 等丢了这个变量时，用 `DECK_GRAPHICS` 指定。
 - 中间 client 断开（例如显示的会话被关掉）会以只读重连，并把断开时显示的会话放回后台；连续 3 次在 3 秒内断开就停下等你按回车。
-  每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。
+  每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。
+- deckd 跑在布局的后台窗口里：关掉布局 server（例如 `tmux -S … kill-server`）deckd 随之停止，agent 会话照常在 agent-deck server 上跑，
+  这期间决定、通知、派送都不可用。再 `deck up` 会把 deckd 起来；接管中的会话按重启恢复处理（保持接管、自动派送暂停，等你交还）。
 - 会话运行状态来自 agent-deck 的 headless 服务：`deck up -upstream 127.0.0.1:8420`（或 `DECK_AGENTDECK_ADDR`），
   token 取 `WORKDECK_AGENTDECK_TOKEN`；不配时圆点一律是「状态未知」。
 
@@ -176,7 +178,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   - 超过预算包络时要先建一个 cost 决定，scope 用 `SpawnScope(请求, 项目设置)`；owner 批准后 `BeginExecute`，再在有效期内以同一请求调 `Reserve(请求, 决定 id)`。目录、任务、参数、请求 id、项目目录、包络版本任一变了，例外都不能用；用一次即标为 applied。
   - 项目目录同样进 scope，所以设置里项目 `path` 最长 300 字节。
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
-  - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`，或核对后把两份的 generation 改成一样。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
+  - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`（没有 `.prev` 说明它是第一次写，删掉即回到默认），或核对后把两份的 generation 改成一样。第一次保存时 `projects.yaml` 还不存在，缺的那份按第 0 代算，同样能识别。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
   - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
 - **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
 - 主 agent 工具（`deck agent`）在 n051。

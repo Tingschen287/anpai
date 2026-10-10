@@ -38,9 +38,16 @@ type Center interface {
 	SetReadOnly(ro bool) error
 	ReadOnly() (bool, error)
 	Switch(tmuxSession string) error
-	LastInput() (time.Time, error)       // tmux client_activity：owner 最后一次在中间打字的时间
-	Capture(lines int) ([]string, error) // 中间窗格当前画面的最后几行（交还摘要用）
+	LastInput() (time.Time, error) // tmux client_activity：owner 最后一次在中间打字的时间
+	// Capture 抓指定 tmux 会话画面的最后几行（交还摘要用）。按名字抓、不按中间 client 当前显示的：
+	// client 重建后中间显示的是 deck-idle，被交还的会话已不在 client 上（n049 评审 1 B2）。
+	Capture(tmuxSession string, lines int) ([]string, error)
+	// ClientID 是中间现在那个 client 的标识（进程号）。reset、resync 据此核对通知是不是它发的（n049 评审 1 B1）。
+	ClientID() (int, error)
 }
+
+// ErrStaleClient 表示 reset、resync 的通知来自已经不在中间的旧 client：不执行，免得作用到新 client 与新焦点上。
+var ErrStaleClient = errors.New("通知来自已经不在中间的旧 client")
 
 // Leases 是写入权记账（lease.Store 满足它）。
 type Leases interface {
@@ -241,6 +248,10 @@ func (m *Machine) Hide(id string) error {
 	if err := m.writable(); err != nil {
 		return err
 	}
+	return m.hideLocked(id)
+}
+
+func (m *Machine) hideLocked(id string) error {
 	if id == "" {
 		// 空串表示「中间正显示的那个」：由状态机在锁内取焦点。界面手里的焦点可能是一秒前的，
 		// 拿它去隐藏或接管会作用到别的会话上（n049 真机演示：Ctrl-Q 隐藏了上一个会话）
@@ -276,25 +287,45 @@ func (m *Machine) Hide(id string) error {
 }
 
 // CenterReset 在中间 client 断开或重建后调用（例如 Ctrl-Q）：client 代次 +1，之前等待中的接管请求全部作废；
-// 焦点会话按隐藏处理（新 client 由 n049 以只读方式建好后再调这里）。
-func (m *Machine) CenterReset() error {
+// 焦点会话按隐藏处理（新 client 由 n049 以只读方式建好后再调这里）。client 是发通知的那个 client：
+// 它已不是中间现在的 client 就返回 ErrStaleClient、什么都不做。核对与隐藏在同一把锁里。
+func (m *Machine) CenterReset(client int) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.writable(); err != nil {
+		return err
+	}
+	if err := m.currentClient(client); err != nil {
+		return err
+	}
 	m.clientGen++
-	focus := m.focus
-	m.mu.Unlock()
-	if focus == "" {
+	if m.focus == "" {
 		return nil
 	}
-	return m.Hide(focus)
+	return m.hideLocked(m.focus)
+}
+
+func (m *Machine) currentClient(client int) error {
+	id, err := m.center.ClientID()
+	if err != nil {
+		return err
+	}
+	if client <= 0 || id != client {
+		return fmt.Errorf("%w（通知来自 client %d，中间现在是 %d）", ErrStaleClient, client, id)
+	}
+	return nil
 }
 
 // Resync 在中间 client 新建之后（deck center 首次连上、或 deckd 重启后）调用：client 代次 +1，
 // 按当前焦点重做一次切换（先只读确认、再切、再按目标放开），让新 client 显示的与 deckd 记的一致。
-// 与 CenterReset 不同，它不隐藏任何会话（n049）。
-func (m *Machine) Resync() error {
+// 与 CenterReset 不同，它不隐藏任何会话（n049）。client 的核对同 CenterReset。
+func (m *Machine) Resync(client int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.writable(); err != nil {
+		return err
+	}
+	if err := m.currentClient(client); err != nil {
 		return err
 	}
 	m.clientGen++
@@ -485,7 +516,7 @@ func (m *Machine) handbackLocked(session, why string) error {
 	tk := m.taken[session]
 	tk.writable = false
 	m.taken[session] = tk
-	t, _ := m.lookup(session)
+	t, known := m.lookup(session)
 	fail := func(cause error) error {
 		m.notify(fmt.Sprintf("%s 交还没有完成，保持接管、自动派送暂停（可重试交还）：%v", title(t), cause))
 		return &ErrHandback{Session: session, Cause: cause}
@@ -493,7 +524,10 @@ func (m *Machine) handbackLocked(session, why string) error {
 	var hb lease.Handback
 	switch {
 	case m.focus == session:
-		lines, err := m.center.Capture(5)
+		if !known || t.Tmux == "" {
+			return fail(errors.New("找不到它的 tmux 会话，取不到画面摘要"))
+		}
+		lines, err := m.center.Capture(t.Tmux, 5)
 		if err != nil {
 			return fail(fmt.Errorf("取不到画面摘要：%w", err))
 		}

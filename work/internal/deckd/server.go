@@ -522,6 +522,7 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 type viewBody struct {
 	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）、resync、reset（中间 client 重建）
 	Session string `json:"session"`
+	Client  int    `json:"client"` // resync、reset：发通知的中间 client 进程号（不是现在那个就拒绝）
 }
 
 func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
@@ -556,10 +557,10 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		err = s.view.RetryHandback(b.Session)
 	case "resync":
 		// 中间 client 新建后（deck center 首次连上）：按当前焦点重做一次切换，不隐藏任何会话（n049）
-		err = s.view.Resync()
+		err = s.view.Resync(b.Client)
 	case "reset":
 		// 中间 client 断开（Ctrl-Q）后、新 client 以只读连上时：焦点会话按隐藏处理（架构稿 §1、§7）
-		err = s.view.CenterReset()
+		err = s.view.CenterReset(b.Client)
 	default:
 		fail(w, http.StatusBadRequest, "不认识的操作 %q", b.Op)
 		return

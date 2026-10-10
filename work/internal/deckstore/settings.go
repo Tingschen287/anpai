@@ -268,15 +268,22 @@ type projectsFile struct {
 type ErrMixedSettings struct {
 	Dir                string
 	AgentsGen, ProjGen int
+	ProjMissing        bool // projects.yaml 不存在（第一次保存只写成了 agents.yaml）
 }
 
 func (e *ErrMixedSettings) Error() string {
-	return fmt.Sprintf("%s 下的 agents.yaml（第 %d 代）与 projects.yaml（第 %d 代）来自不同的保存，上一次保存只写成了一半；"+
-		"不用这份新旧混合的配置。恢复：把代数较新的那份换回它的 .prev（上一代），或核对内容后把两份的 generation 改成一样",
-		e.Dir, e.AgentsGen, e.ProjGen)
+	proj := fmt.Sprintf("projects.yaml（第 %d 代）", e.ProjGen)
+	if e.ProjMissing {
+		proj = "projects.yaml（不存在，按第 0 代）"
+	}
+	return fmt.Sprintf("%s 下的 agents.yaml（第 %d 代）与 %s来自不同的保存，上一次保存只写成了一半；"+
+		"不用这份新旧混合的配置。恢复：把代数较新的那份换回它的 .prev（上一代；没有 .prev 说明它是第一次写，删掉即回到默认），"+
+		"或核对内容后把两份的 generation 改成一样（缺的那份补上）",
+		e.Dir, e.AgentsGen, proj)
 }
 
-// readSettings 只读两份文件（不存在的按空处理），返回内容与各自的代数。
+// readSettings 只读两份文件（不存在的按空的第 0 代处理），返回内容与各自的代数。
+// agents.yaml 总是先写：它比 projects.yaml 新（包括 projects.yaml 还不存在）就是保存只写成了一半。
 func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 	var a agentsFile
 	var p projectsFile
@@ -300,9 +307,10 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 		if err := yaml.Unmarshal(data, &p); err != nil {
 			return a, p, false, fmt.Errorf("projects.yaml 解析不了：%w", err)
 		}
-		if haveAgents && a.Generation != p.Generation {
-			return a, p, false, &ErrMixedSettings{Dir: cfgDir, AgentsGen: a.Generation, ProjGen: p.Generation}
-		}
+	}
+	if haveAgents && a.Generation != p.Generation {
+		return a, p, false, &ErrMixedSettings{Dir: cfgDir, AgentsGen: a.Generation, ProjGen: p.Generation,
+			ProjMissing: errors.Is(err, os.ErrNotExist)}
 	}
 	return a, p, haveAgents, nil
 }

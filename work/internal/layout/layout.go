@@ -15,6 +15,7 @@
 package layout
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -348,7 +349,8 @@ func regionOf(role string) string {
 }
 
 // Toggle 显示或隐藏一整栏：这一栏在主窗口里就全部停放到后台窗口，否则全部挪回原位。
-func Toggle(m Mux, s Spec, region string) error {
+// 为并回暂时停放的标签条或侧栏，接回失败也如实返回（不报成功留下缺栏的布局，n049 评审 1 S2）。
+func Toggle(m Mux, s Spec, region string) (err error) {
 	s = s.withDefaults()
 	if region != "left" && region != "right" && region != "bottom" {
 		return fmt.Errorf("没有 %q 这一栏（只有 left、right、bottom）", region)
@@ -405,10 +407,7 @@ func Toggle(m Mux, s Spec, region string) error {
 			return err
 		}
 		defer func() {
-			if err := m.Unpark(tabs, center, agentdeck.SplitSpec{Before: true, Size: "1"}); err == nil {
-				Normalize(m, s)
-				m.Select(center)
-			}
+			err = errors.Join(err, restore(m, s, center, "标签条", tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
 		}()
 	}
 	// 下栏原本在侧栏右边（侧栏整高）。整宽并回会铺到侧栏下面、把侧栏压矮，所以先停放侧栏，下栏回去后再把侧栏整高接回左边。
@@ -417,10 +416,8 @@ func Toggle(m Mux, s Spec, region string) error {
 			return err
 		}
 		defer func() {
-			if err := m.Unpark(sidebar, center, agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: strconv.Itoa(s.LeftWidth)}); err == nil {
-				Normalize(m, s)
-				m.Select(center)
-			}
+			err = errors.Join(err, restore(m, s, center, "侧栏", sidebar,
+				agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: strconv.Itoa(s.LeftWidth)}))
 		}()
 	}
 	prev := ""
@@ -446,6 +443,17 @@ func Toggle(m Mux, s Spec, region string) error {
 			return err
 		}
 		prev = p.ID
+	}
+	if err := Normalize(m, s); err != nil {
+		return err
+	}
+	return m.Select(center)
+}
+
+// restore 把为并回而暂时停放的窗格接回原位，再整理尺寸、选回中间。
+func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec) error {
+	if err := m.Unpark(pane, center, spec); err != nil {
+		return fmt.Errorf("%s接不回原位（它还在后台窗口 parked-*，再按一次显隐键或重开 deck up）：%w", what, err)
 	}
 	if err := Normalize(m, s); err != nil {
 		return err

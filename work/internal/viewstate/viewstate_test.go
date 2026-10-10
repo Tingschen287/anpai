@@ -19,6 +19,18 @@ type fakeCenter struct {
 	failReadRO bool
 	lastInput  time.Time
 	violations []string
+	captured   []string // Capture 收到的会话名
+	client     int      // ClientID：中间现在的 client（0 表示 testClient）
+}
+
+// testClient 是假中间 client 的进程号。
+const testClient = 7
+
+func (c *fakeCenter) ClientID() (int, error) {
+	if c.client == 0 {
+		return testClient, nil
+	}
+	return c.client, nil
 }
 
 func (c *fakeCenter) SetReadOnly(ro bool) error {
@@ -43,8 +55,11 @@ func (c *fakeCenter) Switch(s string) error {
 	c.log = append(c.log, "switch:"+s)
 	return nil
 }
-func (c *fakeCenter) LastInput() (time.Time, error)   { return c.lastInput, nil }
-func (c *fakeCenter) Capture(n int) ([]string, error) { return []string{"画面最后一行"}, nil }
+func (c *fakeCenter) LastInput() (time.Time, error) { return c.lastInput, nil }
+func (c *fakeCenter) Capture(s string, n int) ([]string, error) {
+	c.captured = append(c.captured, s)
+	return []string{"画面最后一行"}, nil
+}
 
 type world struct {
 	failNotify bool
@@ -276,7 +291,7 @@ func TestCenterResetHandsBackAndHidesFocus(t *testing.T) {
 	w := newWorld(t)
 	w.m.Open("subA")
 	w.m.Takeover("subA")
-	if err := w.m.CenterReset(); err != nil {
+	if err := w.m.CenterReset(testClient); err != nil {
 		t.Fatal(err)
 	}
 	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderWorkbench {
