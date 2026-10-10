@@ -102,7 +102,7 @@ func main() {
 		return
 	}
 
-	model := ui.New(reader)
+	model := ui.New(reader).WithScript(pc)
 	if leasesErr != nil {
 		model = model.WithLeasesError(leasesErr)
 	} else {

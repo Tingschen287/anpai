@@ -55,6 +55,8 @@ type Model struct {
 	dispatcher Dispatcher
 	// starter 在派工前对 Graph 开工（n042）。
 	starter Starter
+	// script 是控制器脚本路径。执行 brief 要把读合同与提交的完整命令写给执行者（n047）。
+	script string
 	// overlays 是派工后本地已知、快照还没刷到的 attempt（见 ledgerOverlay）。
 	overlays map[string]ledgerOverlay
 	// 光标停在哪个节点上。
@@ -170,6 +172,12 @@ func (m Model) WithDispatcher(d Dispatcher) Model {
 // WithStarter 接上 Graph 开工入口。没接时 ready / rework 的节点不派：派了也对不上账本的 attempt。
 func (m Model) WithStarter(s Starter) Model {
 	m.starter = s
+	return m
+}
+
+// WithScript 告诉界面控制器脚本在哪：执行 brief 要写出读合同与提交的完整命令（n047）。
+func (m Model) WithScript(script string) Model {
+	m.script = script
 	return m
 }
 
@@ -474,7 +482,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case m.detail != "":
 			m.detail, m.detailOf = "", ""
 		default:
-			return m, tea.Quit
+			// 主界面上 Esc 不退出（n047）：它在别处都是「关掉、回去」，这里却直接退出且不问，
+			// n045 attempt 2 的界面进程就是被一次顺手的 Esc 关掉的。退出只认 q。
+			m.notice, m.noticeOK = "Esc 在这里不退出；要退出按 q", true
 		}
 		return m, nil
 	}
@@ -949,6 +959,13 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 	if reason != "" {
 		start.Reason += "；理由：" + reason
 	}
+	// 执行 brief 里的 actor 必须是账本里这次 attempt 的执行者，否则 submit 会被控制器拒绝（n047）：
+	// 要开工的用这次 start 的 actor；已经开工的（补派）用账本记着的。
+	actor := start.Actor
+	if !needStart {
+		actor, _ = node.Actor.Get()
+	}
+	root, script := m.snap.ProjectRoot, m.script
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
@@ -961,7 +978,7 @@ func (m Model) confirmDispatch() (tea.Model, tea.Cmd) {
 			Title:         node.ID,
 			// 任务文本：没有它，派出去的就是个空会话（n039 attempt 3 评审）。登记写入权后经仲裁投递。
 			// 按最终的 attempt 生成：开工派单要等 start 之后才知道号（n044）。
-			MessageFor:   func(a int) string { return executorBrief(node, a) },
+			MessageFor:   func(a int) string { return executorBrief(node, a, root, script, actor) },
 			DispatchedBy: "work-deck",
 			ChosenBy:     chosenBy,
 			ChoiceReason: reason,
