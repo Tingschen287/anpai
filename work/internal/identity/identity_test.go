@@ -124,7 +124,9 @@ func TestRealTmuxPaneResolution(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "s")
-	tm := func(a ...string) *exec.Cmd { return exec.Command("tmux", append([]string{"-S", sock, "-f", "/dev/null"}, a...)...) }
+	tm := func(a ...string) *exec.Cmd {
+		return exec.Command("tmux", append([]string{"-S", sock, "-f", "/dev/null"}, a...)...)
+	}
 	if out, err := tm("new-session", "-d", "-s", "probe", "sh -c 'sleep 30 & wait'").CombinedOutput(); err != nil {
 		t.Fatalf("起 tmux 失败：%v %s", err, out)
 	}

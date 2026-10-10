@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -86,6 +87,9 @@ const (
 	EventConfirm  = "handback_confirmed"
 	EventRenew    = "renewed"
 	EventExternal = "external_takeover" // 投递前查到不经 Work Deck 的接入
+	// EventAutoHandback 是 Agent Deck 的自动交还（owner 在 n048 验收时选择，架构稿 §14.1）：
+	// owner 离开被接管的会话、中间窗格已确认只读之后，记下摘要并立即交还，不再等确认。
+	EventAutoHandback = "auto_handback"
 )
 
 type file struct {
@@ -295,6 +299,24 @@ func (s *Store) OwnerReturn(sessionID string, hb Handback) error {
 	h := hb
 	next.PendingHandback = &h
 	return s.commitLocked(sessionID, &next, Event{At: s.now(), SessionID: sessionID, Kind: EventReturn, From: HolderOwner, To: HolderOwner, Reason: "owner 已回来，自动投递仍暂停，等确认交还"})
+}
+
+// AutoHandback 是 Agent Deck 的自动交还：会话须由 owner 持有；摘要随事件留档，写入权立即回到 workbench。
+// 调用方负责先确认 owner 的输入已关闭（中间窗格只读），再调这里。
+func (s *Store) AutoHandback(sessionID string, hb Handback) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.leases[sessionID]
+	if !ok || l.Holder != HolderOwner {
+		return fmt.Errorf("会话 %s 没有登记为 owner 接管中，不能自动交还", sessionID)
+	}
+	now := s.now()
+	reason := fmt.Sprintf("owner 离开，自动交还：接管 %d 秒", hb.DurationSeconds)
+	if len(hb.Notes) > 0 {
+		reason += "；" + strings.Join(hb.Notes, "；")
+	}
+	next := &Lease{SessionID: sessionID, Holder: HolderWorkbench, Since: now, ExpiresAt: now.Add(s.ttl)}
+	return s.commitLocked(sessionID, next, Event{At: now, SessionID: sessionID, Kind: EventAutoHandback, From: HolderOwner, To: HolderWorkbench, Reason: reason})
 }
 
 // ConfirmHandback 是 owner 看过摘要后的确认：写入权回到 Work Deck，自动投递恢复。
