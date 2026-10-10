@@ -2,6 +2,7 @@ package deckstore
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -21,6 +22,7 @@ const (
 // 汇报状态。
 const (
 	ReportPending     = "pending"
+	ReportSending     = "sending" // 已开始发送、结果还没落盘：重启后一律当送达未确认，不重发
 	ReportDelivered   = "delivered"
 	ReportUnconfirmed = "unconfirmed"
 )
@@ -44,6 +46,9 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 	var out Report
 	added := false
 	err := s.mutate(func() (func() error, []Event, error) {
+		if !completionRe.MatchString(r.CompletionID) {
+			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)
+		}
 		if r.Source != ReportActive && r.Source != ReportInferred && r.Source != ReportGraph {
 			return nil, nil, fmt.Errorf("不认识的汇报来源 %q", r.Source)
 		}
@@ -62,7 +67,7 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			}
 		}
 		now := s.now()
-		x := &Report{ID: newID("rep"), Project: sub.Project, Main: main.Key, Sub: sub.Key, CompletionID: Clean(r.CompletionID, 80),
+		x := &Report{ID: newID("rep"), Project: sub.Project, Main: main.Key, Sub: sub.Key, CompletionID: r.CompletionID,
 			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now}
 		s.reports = append(s.reports, x)
 		out, added = *x, true
@@ -85,16 +90,21 @@ func (s *Store) PendingReports(main string) []Report {
 	return out
 }
 
-// MarkReport 记下送达结果：delivered 或 unconfirmed。只能从 pending 改。
+var completionRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
+// MarkReport 推进汇报状态：pending → sending → delivered / unconfirmed。sending 要在真正调发送之前落盘，
+// 这样「已发送但结果没落盘」时重启会看到 sending，并标为 unconfirmed，不重放（n050 评审建议）。
 func (s *Store) MarkReport(id, state string) error {
-	if state != ReportDelivered && state != ReportUnconfirmed {
-		return fmt.Errorf("汇报结果只能是 delivered 或 unconfirmed")
+	next := map[string]string{ReportSending: ReportPending, ReportDelivered: ReportSending, ReportUnconfirmed: ReportSending}
+	from, ok := next[state]
+	if !ok {
+		return fmt.Errorf("汇报状态只能推进到 sending、delivered 或 unconfirmed")
 	}
 	return s.mutate(func() (func() error, []Event, error) {
 		for _, x := range s.reports {
 			if x.ID == id {
-				if x.State != ReportPending {
-					return nil, nil, fmt.Errorf("汇报 %s 已是 %s", id, x.State)
+				if x.State != from {
+					return nil, nil, fmt.Errorf("汇报 %s 是 %s，不能改成 %s", id, x.State, state)
 				}
 				x.State, x.UpdatedAt = state, s.now()
 				return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil

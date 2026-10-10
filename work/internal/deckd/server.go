@@ -32,7 +32,7 @@ type Config struct {
 }
 
 type paneResolver interface {
-	Resolve(ctx context.Context, pid int) (identity.Pane, error)
+	ResolveAt(ctx context.Context, pid int, connectedAt time.Time) (identity.Pane, error)
 }
 
 // ProgressFunc 读一个项目的进度（只读）。
@@ -125,13 +125,27 @@ func storeErr(w http.ResponseWriter, err error) {
 }
 
 func readBody(r *http.Request, v any) error {
-	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	const max = 64 << 10
+	data, err := io.ReadAll(io.LimitReader(r.Body, max+1))
 	if err != nil {
 		return err
 	}
+	if len(data) > max {
+		return fmt.Errorf("请求体超过 %d 字节", max)
+	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+	}
+	return nil
 }
 
 // need 检查角色。写操作另要求身份查询本身没有出错。
@@ -468,7 +482,7 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 }
 
 type viewBody struct {
-	Op      string `json:"op"` // open、focus、hide、takeover
+	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）
 	Session string `json:"session"`
 }
 
@@ -479,6 +493,10 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.view == nil {
 		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
+		return
+	}
+	if err := s.store.Broken(); err != nil {
+		fail(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
 	var b viewBody
@@ -496,11 +514,24 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		err = s.view.Hide(b.Session)
 	case "takeover":
 		err = s.view.Takeover(b.Session)
+	case "handback":
+		err = s.view.RetryHandback(b.Session)
 	default:
 		fail(w, http.StatusBadRequest, "不认识的操作 %q", b.Op)
 		return
 	}
 	if err != nil {
+		var he *viewstate.ErrHandback
+		if errors.As(err, &he) {
+			// 操作本身已完成（例如已切走），但交还失败：会话保持接管、自动派送暂停
+			s.bus.publish(deckstore.Event{Kind: "view"})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State(), "handback_failed": he.Session})
+			return
+		}
+		if s.store.Broken() != nil {
+			fail(w, http.StatusServiceUnavailable, "%v", err)
+			return
+		}
 		fail(w, http.StatusConflict, "%v", err)
 		return
 	}

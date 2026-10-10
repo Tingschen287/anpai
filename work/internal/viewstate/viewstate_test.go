@@ -43,16 +43,19 @@ func (c *fakeCenter) Switch(s string) error {
 	c.log = append(c.log, "switch:"+s)
 	return nil
 }
-func (c *fakeCenter) LastInput() (time.Time, error) { return c.lastInput, nil }
+func (c *fakeCenter) LastInput() (time.Time, error)   { return c.lastInput, nil }
+func (c *fakeCenter) Capture(n int) ([]string, error) { return []string{"画面最后一行"}, nil }
 
 type world struct {
-	t       *testing.T
-	c       *fakeCenter
-	l       *lease.Store
-	m       *Machine
-	notes   []string
-	now     time.Time
-	targets map[string]Target
+	failNotify bool
+	stopErr    error
+	t          *testing.T
+	c          *fakeCenter
+	l          *lease.Store
+	m          *Machine
+	notes      []string
+	now        time.Time
+	targets    map[string]Target
 }
 
 func newWorld(t *testing.T) *world {
@@ -72,7 +75,23 @@ func newWorld(t *testing.T) *world {
 	for _, s := range []string{"subA", "subB"} {
 		l.Grant(s, "deck 派出")
 	}
-	w.m = New(w.c, l, func(s string) (Target, bool) { x, ok := w.targets[s]; return x, ok }, func(n string) { w.notes = append(w.notes, n) })
+	w.m = New(w.c, l, func(s string) (Target, bool) {
+		if x, ok := w.targets[s]; ok {
+			return x, true
+		}
+		for _, x := range w.targets { // 也认注册表 key（key-<id>）
+			if "key-"+x.Session == s {
+				return x, true
+			}
+		}
+		return Target{}, false
+	}, func(n string) error {
+		if w.failNotify {
+			return errors.New("通知写不进")
+		}
+		w.notes = append(w.notes, n)
+		return nil
+	}, func() error { return w.stopErr })
 	w.m.SetClock(func() time.Time { return w.now }, func(d time.Duration) { w.now = w.now.Add(d) })
 	return w
 }
@@ -218,8 +237,12 @@ func TestLeavingTakenOverSessionAutoHandsBackAfterClosingInput(t *testing.T) {
 		t.Fatalf("应发交还通知：%q", last)
 	}
 	ev, _ := w.l.Events()
-	if ev[len(ev)-1].Kind != lease.EventAutoHandback {
-		t.Fatalf("应记 auto_handback：%+v", ev[len(ev)-1])
+	last := ev[len(ev)-1]
+	if last.Kind != lease.EventAutoHandback || !strings.Contains(last.Reason, "画面最后一行") {
+		t.Fatalf("交还事件应带画面末行：%+v", last)
+	}
+	if n := w.notes[len(w.notes)-1]; !strings.Contains(n, "画面最后一行") {
+		t.Fatalf("交还通知应带画面末行：%q", n)
 	}
 }
 
@@ -301,5 +324,151 @@ func TestDeliverToMainGate(t *testing.T) {
 	}
 	if err := w.m.DeliverToMain("subA", deliver); err == nil {
 		t.Fatal("不能把汇报送进子 agent")
+	}
+}
+
+// B3：用注册表 key 打开、用 agent-deck id 送汇报，必须是同一个焦点，走同一道门。
+func TestSessionIdentifiersAreUnified(t *testing.T) {
+	w := newWorld(t)
+	if err := w.m.Open("key-main"); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.m.State(); st.Focus != "main" || st.Open[0] != "main" {
+		t.Fatalf("焦点应统一成 agent-deck id：%+v", st)
+	}
+	w.c.lastInput = w.now.Add(-time.Second)
+	if err := w.m.DeliverToMain("main", func() error { return nil }); !errors.Is(err, ErrOwnerTyping) {
+		t.Fatalf("用另一种标识送汇报也应被送达门拦下：%v", err)
+	}
+	w.m.Open("key-subA")
+	if err := w.m.Takeover("subA"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("lease 应登记在 agent-deck id 上：%+v", l)
+	}
+}
+
+// B4：等待中切走再切回，并由新请求接管成功；旧请求醒来后作废，不能动新接管的 lease。
+func TestStaleTakeoverDoesNotReleaseANewerTakeover(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	p, _ := w.l.Automatic("subA")
+	release, _ := p.Begin("subA")
+	done := false
+	w.m.SetClock(func() time.Time { return w.now }, func(d time.Duration) {
+		w.now = w.now.Add(d)
+		if done {
+			return
+		}
+		done = true
+		release()
+		w.m.Open("subB")
+		w.m.Open("subA")
+		if err := w.m.Takeover("subA"); err != nil {
+			t.Errorf("新请求应接管成功：%v", err)
+		}
+	})
+	if err := w.m.Takeover("subA"); !errors.Is(err, ErrTakeoverStale) {
+		t.Fatalf("旧请求应作废：%v", err)
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("新接管的 lease 不能被旧请求交还：%+v", l)
+	}
+	if w.c.ro {
+		t.Fatal("新接管应保持可写")
+	}
+	if st := w.m.State(); len(st.TakenOver) != 1 {
+		t.Fatalf("应只有新的那次接管：%+v", st)
+	}
+}
+
+// B4：放开输入失败、又确认不了输入已关闭：保持接管与暂停，不交还。
+type flakyCenter struct {
+	*fakeCenter
+	failOpen bool
+	failRO   bool
+}
+
+func (c *flakyCenter) SetReadOnly(ro bool) error {
+	if !ro && c.failOpen {
+		return errors.New("rw failed")
+	}
+	if ro && c.failRO {
+		return errors.New("ro failed")
+	}
+	return c.fakeCenter.SetReadOnly(ro)
+}
+
+func TestOpenFailureWithUnknownInputKeepsLease(t *testing.T) {
+	w := newWorld(t)
+	fc := &flakyCenter{fakeCenter: w.c}
+	w.m.center = fc
+	w.m.Open("subA")
+	fc.failOpen, fc.failRO = true, true
+	if err := w.m.Takeover("subA"); err == nil {
+		t.Fatal("放开失败应报错")
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("确认不了输入已关闭时不能交还：%+v", l)
+	}
+}
+
+// B5：交还通知写不进时不释放 lease，保持接管；修好后可重试交还。
+func TestHandbackKeepsLeaseWhenNotificationFailsAndCanRetry(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	w.m.Takeover("subA")
+	w.failNotify = true
+	err := w.m.Open("subB")
+	var he *ErrHandback
+	if !errors.As(err, &he) {
+		t.Fatalf("交还失败应报 ErrHandback：%v", err)
+	}
+	w.noViolations()
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderOwner {
+		t.Fatalf("通知写不进时不能释放 lease：%+v", l)
+	}
+	if st := w.m.State(); st.Focus != "subB" || len(st.TakenOver) != 1 {
+		t.Fatalf("应已切走但 subA 仍在接管中：%+v", st)
+	}
+	w.failNotify = false
+	if err := w.m.RetryHandback("subA"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderWorkbench {
+		t.Fatalf("重试后应交还：%+v", l)
+	}
+}
+
+// B5：存储停止后，一切会写 lease 或改变输入状态的操作都拒绝。
+func TestStoppedStoreRefusesViewChanges(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	w.stopErr = errors.New("磁盘坏了")
+	for name, op := range map[string]func() error{
+		"open":     func() error { return w.m.Open("subB") },
+		"takeover": func() error { return w.m.Takeover("subA") },
+		"hide":     func() error { return w.m.Hide("subA") },
+		"deliver":  func() error { return w.m.DeliverToMain("main", func() error { return nil }) },
+	} {
+		if err := op(); err == nil || !strings.Contains(err.Error(), "存储已停止") {
+			t.Errorf("%s 应被拒：%v", name, err)
+		}
+	}
+	if l, _ := w.l.Get("subA"); l.Holder != lease.HolderWorkbench {
+		t.Fatalf("lease 不该被改：%+v", l)
+	}
+}
+
+// 交还摘要带画面最后几行。
+func TestHandbackSummaryHasLastLines(t *testing.T) {
+	w := newWorld(t)
+	w.m.Open("subA")
+	w.m.Takeover("subA")
+	w.m.Open("subB")
+	ev, _ := w.l.Events()
+	if ev[len(ev)-1].Kind != lease.EventAutoHandback {
+		t.Fatalf("应记 auto_handback：%+v", ev[len(ev)-1])
 	}
 }

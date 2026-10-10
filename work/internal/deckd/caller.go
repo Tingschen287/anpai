@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
 )
@@ -27,9 +28,11 @@ type Caller struct {
 }
 
 type connKey struct{}
+type connAtKey struct{}
 
-// withConn 把底层连接放进 context，供 resolve 取对端 pid。
+// withConn 把底层连接与建立时间放进 context，供 resolve 取对端 pid 并核对它在连接前就已出生（n050 评审 B6）。
 func withConn(ctx context.Context, c net.Conn) context.Context {
+	ctx = context.WithValue(ctx, connAtKey{}, time.Now())
 	return context.WithValue(ctx, connKey{}, c)
 }
 
@@ -46,7 +49,8 @@ func (s *Server) resolve(ctx context.Context) Caller {
 	if s.peerOverride != nil {
 		pid = s.peerOverride(pid)
 	}
-	pane, err := s.resolver.Resolve(ctx, pid)
+	at, _ := ctx.Value(connAtKey{}).(time.Time)
+	pane, err := s.resolver.ResolveAt(ctx, pid, at)
 	if errors.Is(err, identity.ErrUnknown) {
 		return Caller{Role: RoleUnknown}
 	}

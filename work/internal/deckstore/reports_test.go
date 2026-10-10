@@ -1,6 +1,7 @@
 package deckstore
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,12 @@ func TestReportsDedupeAndState(t *testing.T) {
 	}
 	if got := s.PendingReports(m.Key); len(got) != 1 {
 		t.Fatalf("应有 1 条待送：%+v", got)
+	}
+	if err := s.MarkReport(r1.ID, ReportUnconfirmed); err == nil {
+		t.Fatal("没进入 sending 不能直接标结果")
+	}
+	if err := s.MarkReport(r1.ID, ReportSending); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.MarkReport(r1.ID, ReportUnconfirmed); err != nil {
 		t.Fatal(err)
@@ -84,5 +91,37 @@ func TestPanelsRegistry(t *testing.T) {
 		if p.Name == "progress" && !p.On {
 			t.Error("开关应落盘")
 		}
+	}
+}
+
+// 完成编号不合规就拒绝；合规的编号比较与保存用同一个值，不会因清洗而重复入队（n050 评审 B8）。
+func TestCompletionIDIsValidatedNotCleaned(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	_, sb := mainAndSub(t, s)
+	for _, bad := range []string{strings.Repeat("a", 65), "a\x1b[31m", "", "a b"} {
+		if _, _, err := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: bad, Source: ReportActive}); err == nil {
+			t.Errorf("编号 %q 应被拒", bad)
+		}
+	}
+	id := strings.Repeat("a", 64)
+	s.EnqueueReport(Report{Sub: sb.Key, CompletionID: id, Source: ReportActive})
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: id, Source: ReportActive}); added {
+		t.Fatal("同一编号不该再入队")
+	}
+}
+
+// 发送中（sending）的汇报在重启后标为送达未确认，不会再被当成待送（建议项：不重放）。
+func TestSendingReportBecomesUnconfirmedAfterRestart(t *testing.T) {
+	d := testDirs(t)
+	s := withProject(t, d, DefaultEnvelope("deck"))
+	m, sb := mainAndSub(t, s)
+	r, _, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "c1", Source: ReportActive})
+	s.MarkReport(r.ID, ReportSending)
+	s2, _ := Open(d)
+	if len(s2.PendingReports(m.Key)) != 0 {
+		t.Fatal("发送中的不该回到待送")
+	}
+	if err := s2.MarkReport(r.ID, ReportDelivered); err == nil {
+		t.Fatal("重启后应已是 unconfirmed，不能再改")
 	}
 }

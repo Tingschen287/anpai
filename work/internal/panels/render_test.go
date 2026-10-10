@@ -1,6 +1,7 @@
 package panels
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,17 @@ func TestNotificationsPanelKeepsNewestWithinHeight(t *testing.T) {
 	out := plain(RenderNotifications(ns, 4))
 	if strings.Contains(out, "第1条") || !strings.Contains(out, "第0条") {
 		t.Errorf("应只留最新的几条：\n%s", out)
+	}
+}
+
+// 面板显示的模型文本与错误都清洗过（n050 评审 B7）。
+func TestPanelsCleanModelTextAndErrors(t *testing.T) {
+	out := RenderActivity([]deckstore.Session{{Project: "p", Role: "sub", Title: "x\x1b]0;evil\x07 sk-abcdefghijklmnop", Agent: "claude", Status: "running"}}, time.Now())
+	if strings.Contains(out, "\x07") || strings.Contains(out, "sk-abc") {
+		t.Fatalf("标题应清洗：%q", out)
+	}
+	m := &model{name: "quota", err: errors.New("boom \x1b]0;evil\x07")}
+	if v := m.View(); strings.Contains(v, "\x07") || strings.Contains(v, "]0;evil") {
+		t.Fatalf("错误文本应清洗：%q", v)
 	}
 }

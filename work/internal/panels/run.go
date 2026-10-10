@@ -161,7 +161,7 @@ func (m *model) answer(i int) tea.Cmd {
 		defer cancel()
 		err := m.c.Do(ctx, "POST", "/v1/decisions/"+d.ID+"/answer", map[string]any{"option": opt, "version": d.Version}, nil)
 		if err != nil {
-			return answeredMsg{note: bad.Render("没答上：" + err.Error())}
+			return answeredMsg{note: bad.Render("没答上：" + deckstore.Clean(err.Error(), 300))}
 		}
 		return answeredMsg{note: good.Render("已回答：" + label(opt))}
 	}
@@ -169,7 +169,8 @@ func (m *model) answer(i int) tea.Cmd {
 
 func (m *model) View() string {
 	if m.err != nil {
-		return title.Render(m.name) + "\n" + bad.Render("取不到："+m.err.Error()) + "\n"
+		// 错误文本可能带上游或模型写的内容：显示前清洗（n050 评审 B7）
+		return title.Render(m.name) + "\n" + bad.Render("取不到："+deckstore.Clean(m.err.Error(), 300)) + "\n"
 	}
 	if m.name == "decisions" {
 		return RenderDecisions(m.decs, m.sel, m.note)

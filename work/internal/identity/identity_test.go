@@ -22,12 +22,22 @@ func (f fakeSource) Panes(context.Context) ([]Pane, error) { return f, nil }
 func fakeProc(t *testing.T, parents map[int]int) string {
 	root := t.TempDir()
 	for pid, ppid := range parents {
-		d := filepath.Join(root, strconv.Itoa(pid))
-		os.MkdirAll(d, 0o755)
-		// comm 故意带空格和右括号，验证解析取最后一个 ')'
-		os.WriteFile(filepath.Join(d, "stat"), []byte(fmt.Sprintf("%d (we ird) x) S %d 0 0", pid, ppid)), 0o644)
+		writeStat(root, pid, ppid, 1000)
 	}
+	os.WriteFile(filepath.Join(root, "stat"), []byte("cpu 1 2 3\nbtime 1790000000\n"), 0o644)
 	return root
+}
+
+// writeStat 写一个假的 /proc/<pid>/stat：comm 故意带空格和右括号，第 22 列是出生滴答数。
+func writeStat(root string, pid, ppid int, start uint64) {
+	d := filepath.Join(root, strconv.Itoa(pid))
+	os.MkdirAll(d, 0o755)
+	fields := []string{"S", strconv.Itoa(ppid)}
+	for i := 0; i < 17; i++ {
+		fields = append(fields, "0")
+	}
+	fields = append(fields, strconv.FormatUint(start, 10), "0", "0")
+	os.WriteFile(filepath.Join(d, "stat"), []byte(fmt.Sprintf("%d (we ird) x) %s", pid, strings.Join(fields, " "))), 0o644)
 }
 
 func TestResolveFindsNearestPaneOnTheChain(t *testing.T) {
@@ -162,5 +172,42 @@ func TestMissingServerIsEmpty(t *testing.T) {
 	panes, err := TmuxSource{Socket: filepath.Join(t.TempDir(), "none")}.Panes(context.Background())
 	if err != nil || len(panes) != 0 {
 		t.Fatalf("没在跑的 server 应为空：%v %v", panes, err)
+	}
+}
+
+// 列窗格的过程中调用进程退出、pid 被一个布局窗格的新进程复用：第二次读链时出生时间对不上，报错而不是判成 owner（B6）。
+type swapSource struct {
+	panes []Pane
+	swap  func()
+}
+
+func (s swapSource) Panes(context.Context) ([]Pane, error) {
+	s.swap()
+	return s.panes, nil
+}
+
+func TestPIDReuseDuringResolutionIsDetected(t *testing.T) {
+	proc := fakeProc(t, map[int]int{500: 400, 400: 1})
+	src := swapSource{panes: []Pane{{Server: "/s/deck", PaneID: "%1", PanePID: 500, Session: "layout"}}, swap: func() {
+		writeStat(proc, 500, 999, 5000) // 原 500 退出，新进程复用 500，父进程与出生时间都变了
+	}}
+	r := Resolver{ProcRoot: proc, Sources: []PaneSource{src}}
+	if p, err := r.Resolve(context.Background(), 500); err == nil {
+		t.Fatalf("pid 复用应报错，却判成了 %+v", p)
+	}
+}
+
+// 连接之后才出生的进程：疑似 pid 复用，拒绝。
+func TestProcessBornAfterConnectionIsRejected(t *testing.T) {
+	proc := fakeProc(t, map[int]int{500: 1})
+	writeStat(proc, 500, 1, 100*3600) // 开机后 1 小时出生
+	r := Resolver{ProcRoot: proc}
+	connectedAt := time.Unix(1790000000, 0).Add(30 * time.Minute) // 连接建立在开机后 30 分钟
+	if _, err := r.ResolveAt(context.Background(), 500, connectedAt); err == nil || !strings.Contains(err.Error(), "复用") {
+		t.Fatalf("连接之后出生的进程应被拒：%v", err)
+	}
+	connectedAt = time.Unix(1790000000, 0).Add(2 * time.Hour)
+	if _, err := r.ResolveAt(context.Background(), 500, connectedAt); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("连接之前出生的进程应正常判定：%v", err)
 	}
 }

@@ -61,14 +61,19 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			return err
 		}
 		defer leases.Close()
-		lookup := func(session string) (viewstate.Target, bool) {
-			x, ok := store.Session(session)
-			if !ok || x.TmuxSession == "" {
+		// 注册表 key 与 agent-deck id 都认，统一成 agent-deck id（lease 与派送用的就是它，n050 评审 B3）
+		lookup := func(id string) (viewstate.Target, bool) {
+			x, ok := store.Session(id)
+			if !ok || x.TmuxSession == "" || x.AgentDeckID == "" {
 				return viewstate.Target{}, false
 			}
 			return viewstate.Target{Session: x.AgentDeckID, Tmux: x.TmuxSession, Role: x.Role, BriefConfirmed: x.BriefConfirmed, Title: x.Title}, true
 		}
-		view = viewstate.New(center, leases, lookup, func(text string) { store.Notify("", "view", text, "deckd") })
+		notify := func(text string) error {
+			_, err := store.Notify("", "view", text, "deckd")
+			return err
+		}
+		view = viewstate.New(center, leases, lookup, notify, store.Broken)
 	}
 	srv := NewServer(cfg, store,
 		identity.Resolver{Sources: []identity.PaneSource{identity.TmuxSource{Socket: cfg.LayoutSocket}, identity.TmuxSource{Socket: cfg.AgentSocket}}},

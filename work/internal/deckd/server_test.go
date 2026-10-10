@@ -113,6 +113,14 @@ func TestPermissionMatrix(t *testing.T) {
 		{"POST", "/v1/decisions", `{"kind":"push","summary":"推送？"}`, map[string]int{"owner": 403, "sub": 403, "unknown": 403, "main": 201}},
 		{"POST", "/v1/view", `{"op":"open","session":"x"}`, map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 503}},
 		{"GET", "/v1/events?after=x", "", map[string]int{"sub": 403, "unknown": 403}},
+		{"POST", "/v1/decisions/x/answer", `{"option":"approve","version":1}`, map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 400}},
+		{"POST", "/v1/decisions/x/cancel", "", map[string]int{"owner": 403, "sub": 403, "unknown": 403, "main": 400}},
+		{"DELETE", "/v1/trust?project=alpha&tool=codex", "", map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 404}},
+		{"GET", "/v1/panels", "", map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 200}},
+		{"POST", "/v1/panels/quota", `{"on":false}`, map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 200}},
+		{"GET", "/v1/view", "", map[string]int{"main": 403, "sub": 403, "unknown": 403, "owner": 503}},
+		{"GET", "/v1/progress?project=alpha", "", map[string]int{"sub": 403, "unknown": 403, "owner": 200, "main": 200}},
+		{"GET", "/v1/whoami", "", map[string]int{"owner": 200, "main": 200, "sub": 200, "unknown": 200}},
 	}
 	for _, c := range cases {
 		for as, want := range c.want {
@@ -336,5 +344,17 @@ func TestRealDaemonOverUnixSocket(t *testing.T) {
 	}
 	if _, err := os.Stat(sock); !errors.Is(err, os.ErrNotExist) {
 		t.Error("退出后应清掉 socket")
+	}
+}
+
+// 请求体超长、对象后带多余内容：拒绝。
+func TestStrictBodyParsing(t *testing.T) {
+	f := newFixture(t)
+	if code, _ := f.do("main", "POST", "/v1/decisions", `{"kind":"push","summary":"x"}{"kind":"push"}`); code != 400 {
+		t.Errorf("对象后多余内容应被拒：%d", code)
+	}
+	big := `{"kind":"push","summary":"` + strings.Repeat("a", 70<<10) + `"}`
+	if code, _ := f.do("main", "POST", "/v1/decisions", big); code != 400 {
+		t.Errorf("超长请求体应被拒：%d", code)
 	}
 }

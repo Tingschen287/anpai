@@ -2,6 +2,7 @@ package deckstore
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -117,6 +118,9 @@ func (s *Store) CreateDecision(in NewDecision) (Decision, error) {
 		}
 		add(OptReject)
 		add(OptStop)
+		if err := checkScope(in.Scope); err != nil {
+			return nil, nil, err
+		}
 		ttl := in.TTL
 		if ttl <= 0 {
 			ttl = DefaultDecisionTTL
@@ -130,10 +134,42 @@ func (s *Store) CreateDecision(in NewDecision) (Decision, error) {
 			Options: opts, Recommend: Clean(in.Recommend, 80), Scope: scope, ScopeHash: ScopeHash(scope),
 			Version: 1, State: StateOpen, CreatedBy: in.CreatedBy, CreatedAt: now, ExpiresAt: now.Add(ttl), UpdatedAt: now}
 		s.decs[d.ID] = d
-		out = *d
+		out = d.clone()
 		return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, nil
 	})
 	return out, err
+}
+
+var scopeKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// checkScope：scope 会原样落盘、经 API 返回，并参与执行前的比对，所以不能清洗（会改变语义），只能拒绝。
+// 键只许小写字母开头的字母、数字与下划线，值限长、不许控制字符，疑似密钥直接拒（n050 评审 B7）。
+func checkScope(scope map[string]string) error {
+	if len(scope) > 32 {
+		return fmt.Errorf("scope 字段太多")
+	}
+	for k, v := range scope {
+		if !scopeKeyRe.MatchString(k) {
+			return fmt.Errorf("scope 的键 %q 不合规（小写字母开头，只含小写字母、数字、下划线）", k)
+		}
+		if len(v) > 300 || Clean(v, 0) != v {
+			return fmt.Errorf("scope 的 %s 含控制字符、疑似密钥或过长", k)
+		}
+	}
+	return nil
+}
+
+// clone 返回不与内部共享切片与 map 的副本。
+func (d *Decision) clone() Decision {
+	c := *d
+	c.Options = append([]string(nil), d.Options...)
+	if d.Scope != nil {
+		c.Scope = make(map[string]string, len(d.Scope))
+		for k, v := range d.Scope {
+			c.Scope[k] = v
+		}
+	}
+	return c
 }
 
 // ErrVersion 表示回答时带的 version 已过时（别人先改了）。
@@ -179,7 +215,7 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 		}
 		d.Answer, d.AnsweredBy, d.UpdatedAt = option, by, s.now()
 		d.Version++
-		out = *d
+		out = d.clone()
 		return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, nil
 	})
 	return out, err
@@ -195,7 +231,7 @@ func (s *Store) BeginExecute(id string, scopeNow map[string]string) (Decision, e
 			return nil, nil, fmt.Errorf("没有决定 %s", id)
 		}
 		if s.expireLocked(d) {
-			out = *d
+			out = d.clone()
 			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期", id)
 		}
 		if d.State != StateApproved {
@@ -204,12 +240,12 @@ func (s *Store) BeginExecute(id string, scopeNow map[string]string) (Decision, e
 		if ScopeHash(scopeNow) != d.ScopeHash {
 			d.State, d.Result, d.UpdatedAt = StateStale, "执行时的请求与批准时不一致，不执行", s.now()
 			d.Version++
-			out = *d
+			out = d.clone()
 			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 批准的范围与本次请求不一致，已作废", id)
 		}
 		d.State, d.UpdatedAt = StateExecuting, s.now()
 		d.Version++
-		out = *d
+		out = d.clone()
 		return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, nil
 	})
 	// 过期或作废时，状态改变已经落盘，只是执行被拒：out 带着新状态一起返回。
@@ -262,7 +298,7 @@ func (s *Store) Decisions(project string) []Decision {
 	for _, d := range s.decs {
 		if project == "" || d.Project == project {
 			s.expireLocked(d)
-			out = append(out, *d)
+			out = append(out, d.clone())
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -278,7 +314,7 @@ func (s *Store) Decision(id string) (Decision, bool) {
 		return Decision{}, false
 	}
 	s.expireLocked(d)
-	return *d, true
+	return d.clone(), true
 }
 
 // expireLocked：open 或 approved 但已过有效期的转为 expired（只改内存，落盘随下一次写）。

@@ -59,7 +59,15 @@ func writeAtomic(path string, data []byte) error {
 		os.Remove(name)
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	// 同步父目录，rename 才算真正落盘
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 func writeJSON(path string, v any) error {

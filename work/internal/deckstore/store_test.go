@@ -176,23 +176,65 @@ func TestLaunchingBecomesUncertainAfterRestart(t *testing.T) {
 	}
 }
 
-// 超额例外：只认本项目、正在执行的 cost 决定。
+// 超额例外：只认本项目、正在执行、scope 与本次请求一致的 cost 决定；用一次即消费，不能再用（n050 评审 B2）。
 func TestReserveExceptionRequiresExecutingCostDecision(t *testing.T) {
-	s := withProject(t, testDirs(t), Envelope{ID: "e", Version: 1, MaxSubagents: 0, MaxFrontier: 0, TokenSoftCap: 1})
-	scope := map[string]string{"action": "spawn", "request": "r1"}
+	env := Envelope{ID: "e", Version: 1, MaxSubagents: 0, MaxFrontier: 0, TokenSoftCap: 1}
+	s := withProject(t, testDirs(t), env)
+	req := sub(Economy)
+	scope := SpawnScope(req, env)
 	d, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "多开一个", Scope: scope, CreatedBy: "main"})
-	if _, err := s.Reserve(sub(Economy), d.ID); err == nil {
+	if _, err := s.Reserve(req, d.ID); err == nil {
 		t.Fatal("未批准的决定不能当例外")
 	}
 	d, _ = s.Answer(d.ID, OptApprove, d.Version, "owner")
-	if _, err := s.Reserve(sub(Economy), d.ID); err == nil {
+	if _, err := s.Reserve(req, d.ID); err == nil {
 		t.Fatal("批准但未进入执行的决定不能当例外")
 	}
 	if _, err := s.BeginExecute(d.ID, scope); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Reserve(sub(Economy), d.ID); err != nil {
-		t.Fatalf("正在执行的 cost 决定应能当例外：%v", err)
+	other := req
+	other.Model = "another-model"
+	if _, err := s.Reserve(other, d.ID); err == nil {
+		t.Fatal("批准的是另一个请求，不能用于这次")
+	}
+	if _, err := s.Reserve(req, d.ID); err != nil {
+		t.Fatalf("scope 一致、正在执行的 cost 决定应能当例外：%v", err)
+	}
+	if got, _ := s.Decision(d.ID); got.State != StateApplied {
+		t.Fatalf("用过的例外应标为 applied：%s", got.State)
+	}
+	if _, err := s.Reserve(req, d.ID); err == nil {
+		t.Fatal("同一个例外不能用第二次")
+	}
+}
+
+// 并发用同一个例外：恰好一次成功。
+func TestConcurrentUseOfOneExceptionSucceedsOnce(t *testing.T) {
+	env := Envelope{ID: "e", Version: 1, MaxSubagents: 0, MaxFrontier: 0, TokenSoftCap: 1}
+	s := withProject(t, testDirs(t), env)
+	req := sub(Economy)
+	scope := SpawnScope(req, env)
+	d, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "x", Scope: scope, CreatedBy: "main"})
+	d, _ = s.Answer(d.ID, OptApprove, d.Version, "owner")
+	s.BeginExecute(d.ID, scope)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok := 0
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.Reserve(req, d.ID); err == nil {
+				mu.Lock()
+				ok++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if ok != 1 {
+		t.Fatalf("同一个例外并发使用应恰好成功一次，得到 %d", ok)
 	}
 }
 
@@ -259,6 +301,54 @@ func TestExecuteRechecksScope(t *testing.T) {
 	got, err := s.BeginExecute(d.ID, changed)
 	if err == nil || got.State != StateStale {
 		t.Fatalf("scope 变了应作废为 stale：%+v %v", got, err)
+	}
+}
+
+// 作废（stale）要落盘：重启后仍是 stale，旧批准不能再执行（n050 评审 B1）。
+func TestStaleIsPersistedAcrossRestart(t *testing.T) {
+	d := testDirs(t)
+	s := withProject(t, d, DefaultEnvelope("deck"))
+	scopeA := map[string]string{"action": "spawn", "task_sha256": "aa"}
+	dec, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "x", Scope: scopeA, CreatedBy: "main"})
+	dec, _ = s.Answer(dec.ID, OptApprove, dec.Version, "owner")
+	s.BeginExecute(dec.ID, map[string]string{"action": "spawn", "task_sha256": "bb"})
+	s2, _ := Open(d)
+	got, _ := s2.Decision(dec.ID)
+	if got.State != StateStale {
+		t.Fatalf("重启后应仍是 stale：%s", got.State)
+	}
+	if _, err := s2.BeginExecute(dec.ID, scopeA); err == nil {
+		t.Fatal("作废的批准不能再执行")
+	}
+}
+
+// scope 里的疑似密钥、控制字符、不合规的键都被拒，不会落盘（n050 评审 B7）。
+func TestScopeWithSecretsOrControlCharsIsRejected(t *testing.T) {
+	d := testDirs(t)
+	s := withProject(t, d, DefaultEnvelope("deck"))
+	for _, scope := range []map[string]string{
+		{"token": "sk-abcdefghijklmnop"},
+		{"title": "a\x1b]0;evil\x07"},
+		{"Bad-Key": "x"},
+	} {
+		if _, err := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "x", Scope: scope, CreatedBy: "main"}); err == nil {
+			t.Errorf("scope %v 应被拒", scope)
+		}
+	}
+	if data, _ := os.ReadFile(filepath.Join(d.State, "decisions.json")); strings.Contains(string(data), "sk-abc") {
+		t.Fatal("疑似密钥落了盘")
+	}
+}
+
+// 返回的是副本：改返回值不影响存储。
+func TestReturnedValuesAreCopies(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	dec, _ := s.CreateDecision(NewDecision{Project: "deck", Kind: KindCost, Summary: "x", Scope: map[string]string{"a": "1"}, CreatedBy: "main"})
+	dec.Scope["a"] = "2"
+	dec.Options[0] = "hacked"
+	got, _ := s.Decision(dec.ID)
+	if got.Scope["a"] != "1" || got.Options[0] == "hacked" {
+		t.Fatalf("改返回值影响了存储：%+v", got)
 	}
 }
 

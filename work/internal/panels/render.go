@@ -73,9 +73,10 @@ func RenderQuota(qs []dashquota.ToolQuota, width int) string {
 				label = w.Key
 			}
 			style := good
-			if w.Pct >= dashquota.DefaultThresholds.Exhausted {
+			switch q.Status {
+			case dashquota.Exhausted:
 				style = bad
-			} else if w.Pct >= dashquota.DefaultThresholds.Warn {
+			case dashquota.Warn:
 				style = warn
 			}
 			// 按显示宽度补齐：「周」是全角，占两格，%-3s 按字节数补会错位
@@ -128,7 +129,7 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 			k = d.Kind
 		}
 		b.WriteString(mark + warn.Render("["+k+"]") + " " + dim.Render(d.Project) + "\n")
-		b.WriteString("  " + d.Summary + "\n")
+		b.WriteString("  " + deckstore.Clean(d.Summary, 800) + "\n")
 		if d.Recommend != "" {
 			b.WriteString(dim.Render("  推荐："+label(d.Recommend)) + "\n")
 		}
@@ -235,7 +236,7 @@ func RenderActivity(ss []deckstore.Session, now time.Time) string {
 		if name == "" {
 			name = x.Agent
 		}
-		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, x.Title, name, st))
+		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, deckstore.Clean(x.Title, 80), name, st))
 	}
 	return b.String()
 }

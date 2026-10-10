@@ -95,6 +95,12 @@ func Open(dirs Dirs) (*Store, error) {
 	if _, err := readJSON(s.path("reports.json"), &s.reports); err != nil {
 		return nil, err
 	}
+	for _, r := range s.reports {
+		if r.State == ReportSending {
+			r.State = ReportUnconfirmed
+			changed = true
+		}
+	}
 	if s.panels, err = LoadPanels(dirs.Config); err != nil {
 		return nil, fmt.Errorf("面板注册表不可用：%w", err)
 	}
@@ -103,6 +109,9 @@ func Open(dirs Dirs) (*Store, error) {
 			return nil, err
 		}
 		if err := s.saveDecisions(); err != nil {
+			return nil, err
+		}
+		if err := s.saveReports(); err != nil {
 			return nil, err
 		}
 	}
@@ -135,15 +144,20 @@ func (s *Store) mutate(f func() (persist func() error, ev []Event, err error)) e
 		return &ErrBroken{Cause: s.broken}
 	}
 	persist, evs, err := f()
-	if err == nil && persist != nil {
+	// f 可以同时返回错误与 persist：动作被拒，但状态已经改变（例如批准作废为 stale、过期），改变照样落盘并发事件
+	// （n050 评审 B1）。只返回错误、不带 persist 的，表示什么都没改。
+	persisted := false
+	if persist != nil {
 		if perr := persist(); perr != nil {
 			s.broken = perr
 			err = &ErrBroken{Cause: perr}
+		} else {
+			persisted = true
 		}
 	}
 	hook := s.hook
 	s.mu.Unlock()
-	if err == nil && hook != nil {
+	if persisted && hook != nil {
 		for _, e := range evs {
 			hook(e)
 		}
@@ -223,6 +237,16 @@ type Session struct {
 	Note           string     `json:"note,omitempty"`
 }
 
+// clone 返回不与内部共享指针的副本。
+func (x *Session) clone() Session {
+	c := *x
+	if x.Graph != nil {
+		g := *x.Graph
+		c.Graph = &g
+	}
+	return c
+}
+
 func (x Session) holdsSlot() bool {
 	return x.Status == StatusLaunching || x.Status == StatusRunning || x.Status == StatusUncertain
 }
@@ -234,7 +258,7 @@ func (s *Store) Sessions(project string) []Session {
 	var out []Session
 	for _, x := range s.sessions {
 		if project == "" || x.Project == project {
-			out = append(out, *x)
+			out = append(out, x.clone())
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -247,7 +271,7 @@ func (s *Store) SessionByTmux(tmux string) (Session, bool) {
 	defer s.mu.Unlock()
 	for _, x := range s.sessions {
 		if x.TmuxSession == tmux && tmux != "" {
-			return *x, true
+			return x.clone(), true
 		}
 	}
 	return Session{}, false
@@ -258,11 +282,11 @@ func (s *Store) Session(id string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if x, ok := s.sessions[id]; ok {
-		return *x, true
+		return x.clone(), true
 	}
 	for _, x := range s.sessions {
 		if x.AgentDeckID == id && id != "" {
-			return *x, true
+			return x.clone(), true
 		}
 	}
 	return Session{}, false
@@ -313,11 +337,29 @@ type Reservation struct {
 	Key string
 }
 
-// Reserve 在锁内「检查并预留」名额，写一条 launching 记录。exception 非空表示已批准的一次性超额例外：
-// 它必须是本项目、approved、未过期、scope 与本次请求一致的 cost 决定，用掉后标为 applied 由调用方负责。
+// SpawnScope 是「开一个子 agent」这个动作的批准范围：超额例外按它绑定，预留时重新计算比对（n050 评审 B2）。
+func SpawnScope(x Session, env Envelope) map[string]string {
+	graph := "none"
+	if x.Graph != nil {
+		graph = fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt)
+	}
+	return map[string]string{
+		"action": "spawn", "project": x.Project, "parent": x.Parent, "agent": x.Agent, "tool": x.Tool,
+		"model": x.Model, "tier": string(x.Tier), "title": x.Title, "graph": graph,
+		"envelope": env.ID, "envelope_version": fmt.Sprint(env.Version),
+	}
+}
+
+// Reserve 在锁内「检查并预留」名额，写一条 launching 记录。exception 非空表示一次性超额例外：
+// 它必须是本项目、正在执行（BeginExecute 过）的 cost 决定，且其 scope 与本次请求的 SpawnScope 一致；
+// 通过后在同一把锁里把它标为 applied（已消费），同一个例外不能再用（n050 评审 B2）。
 func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error) {
 	var res Reservation
 	err := s.mutate(func() (func() error, []Event, error) {
+		if err := checkIDs(x); err != nil {
+			return nil, nil, err
+		}
+		var consumed *Decision
 		p, ok := s.settings.Project(x.Project)
 		if !ok {
 			return nil, nil, fmt.Errorf("没有项目 %s", x.Project)
@@ -338,16 +380,33 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 				}
 				d, ok := s.decs[exceptionDecision]
 				if !ok || d.Kind != KindCost || d.Project != x.Project || d.State != StateExecuting {
-					return nil, nil, fmt.Errorf("超额例外 %s 无效（须是本项目、正在执行的 cost 决定）", exceptionDecision)
+					return nil, nil, fmt.Errorf("超额例外 %s 无效（须是本项目、正在执行的 cost 决定；用过的不能再用）", exceptionDecision)
 				}
+				if ScopeHash(SpawnScope(x, env)) != d.ScopeHash {
+					return nil, nil, fmt.Errorf("超额例外 %s 批准的是另一个请求（工具、模型、档位、标题、父会话或包络不一致）", exceptionDecision)
+				}
+				consumed = d
 			}
 		}
 		x.Key = newID("ses")
 		x.Status = StatusLaunching
 		x.CreatedAt = s.now()
+		x.Title = Clean(x.Title, 80)
 		s.sessions[x.Key] = &x
 		res.Key = x.Key
-		return s.saveRegistry, []Event{{Kind: "session", Project: x.Project, ID: x.Key}}, nil
+		evs := []Event{{Kind: "session", Project: x.Project, ID: x.Key}}
+		if consumed != nil {
+			consumed.State, consumed.Result, consumed.UpdatedAt = StateApplied, "已用于预留 "+x.Key, s.now()
+			consumed.Version++
+			evs = append(evs, Event{Kind: "decision", Project: consumed.Project, ID: consumed.ID})
+			return func() error {
+				if err := s.saveRegistry(); err != nil {
+					return err
+				}
+				return s.saveDecisions()
+			}, evs, nil
+		}
+		return s.saveRegistry, evs, nil
 	})
 	return res, err
 }
@@ -587,4 +646,14 @@ func ScopeHash(scope map[string]string) string {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
+}
+
+// checkIDs 拒绝带控制字符或过长的标识（会落盘并显示）。标题另行清洗。
+func checkIDs(x Session) error {
+	for name, v := range map[string]string{"agent": x.Agent, "tool": x.Tool, "model": x.Model, "parent": x.Parent, "created_by": x.CreatedBy} {
+		if len(v) > 120 || Clean(v, 0) != v {
+			return fmt.Errorf("会话的 %s 含非法字符或过长", name)
+		}
+	}
+	return nil
 }
