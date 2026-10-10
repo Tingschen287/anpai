@@ -280,6 +280,19 @@ func (m *Machine) CenterReset() error {
 	return m.Hide(focus)
 }
 
+// Resync 在中间 client 新建之后（deck center 首次连上、或 deckd 重启后）调用：client 代次 +1，
+// 按当前焦点重做一次切换（先只读确认、再切、再按目标放开），让新 client 显示的与 deckd 记的一致。
+// 与 CenterReset 不同，它不隐藏任何会话（n049）。
+func (m *Machine) Resync() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.writable(); err != nil {
+		return err
+	}
+	m.clientGen++
+	return m.switchLocked(m.focus)
+}
+
 // RetryHandback 重试一次失败的交还。会话必须不在中间可写（是焦点时先关输入并确认）。
 func (m *Machine) RetryHandback(id string) error {
 	m.mu.Lock()

@@ -79,6 +79,10 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		identity.Resolver{Sources: []identity.PaneSource{identity.TmuxSource{Socket: cfg.LayoutSocket}, identity.TmuxSource{Socket: cfg.AgentSocket}}},
 		&dashquota.Client{URL: cfg.DashboardURL},
 		view, graphProgress(cfg.Projectctl))
+	if cfg.UpstreamAddr != "" {
+		srv.activity = newActivityCache(upstreamActivity(cfg.Profile, cfg.UpstreamAddr, cfg.UpstreamToken))
+		go srv.activity.run(ctx)
+	}
 
 	sock := SocketPath(cfg.Dirs)
 	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {

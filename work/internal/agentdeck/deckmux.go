@@ -266,27 +266,31 @@ func parseClients(out string) []TmuxClient {
 }
 
 // ClientState 读一个 client 当前的会话、只读标记与最后输入时间。
+//
+// 从 list-clients 里按 tty 挑，不用 `display-message -c tty -p`：在 tmux 外执行时，后者格式里的 session_name
+// 不是这个 client 所在的会话（n049 实测：切换成功后读回的仍是另一个会话名）。
 func ClientState(ctx context.Context, socket, tty string) (TmuxClient, error) {
-	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
-	defer cancel()
-	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "display-message", "-c", tty, "-p",
-		"#{client_tty}\t#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_activity}"))
+	list, err := ListTmuxClients(ctx, socket)
 	if err != nil {
 		return TmuxClient{}, fmt.Errorf("读 client %s 失败：%w", tty, err)
 	}
-	list := parseClients(string(out))
-	if len(list) != 1 || list[0].TTY != tty {
-		return TmuxClient{}, fmt.Errorf("读 client %s 得到的不是它自己：%q", tty, strings.TrimSpace(string(out)))
+	for _, c := range list {
+		if c.TTY == tty {
+			return c, nil
+		}
 	}
-	return list[0], nil
+	return TmuxClient{}, fmt.Errorf("client %s 不在了", tty)
 }
 
 // ToggleClientReadOnly 翻转 client 的只读标记。tmux 3.4 只有翻转（switch-client -r），没有「设为」：
 // refresh-client -f read-only 不改变只读状态（n049 实测）。所以调用方要先读、不一致才翻、翻完再读回核对。
-func ToggleClientReadOnly(ctx context.Context, socket, tty string) error {
+//
+// 必须带 -t 指明 client 现在所在的会话：只写 -r 时，tmux 在翻转的同时会把 client 切到它眼里的「当前会话」
+// （在 tmux 外执行时是最近用过的那个），n049 实测切到了另一个子 agent。
+func ToggleClientReadOnly(ctx context.Context, socket, tty, session string) error {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
 	defer cancel()
-	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "switch-client", "-c", tty, "-r"))
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "switch-client", "-c", tty, "-r", "-t", exactTarget(session)))
 	return err
 }
 

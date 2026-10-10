@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/config"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
@@ -64,6 +65,7 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	agent := fs.String("agent-socket", tmuxSocket("default"), "agent-deck tmux server 的 socket")
 	dash := fs.String("dashboard", "http://127.0.0.1:8899", "Token 看板地址")
 	script := fs.String("projectctl", "", "Graph 控制器脚本路径，留空按工作区布局查找")
+	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（读会话运行状态），留空则状态显示未知")
 	fs.Parse(args)
 	pc := *script
 	if pc == "" {
@@ -71,9 +73,10 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc}
+	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc,
+		UpstreamAddr: *upstream, UpstreamToken: config.Token()}
 	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", deckd.SocketPath(dirs), *profile)
-	if err := deckd.Run(ctx, cfg, nil); err != nil {
+	if err := deckd.Run(ctx, cfg, deckd.NewTmuxCenter(*layout, *agent)); err != nil {
 		fail("%v", err)
 	}
 }

@@ -29,6 +29,9 @@ type Config struct {
 	AgentSocket  string // agent-deck tmux server 的 socket 路径
 	DashboardURL string // Token 看板，默认 http://127.0.0.1:8899
 	Projectctl   string // Graph 控制器脚本路径（进度面板只读用）
+	// UpstreamAddr 是 agent-deck headless 服务地址（例如 127.0.0.1:8420），用来读会话运行状态；留空则状态一律 unknown。
+	UpstreamAddr  string
+	UpstreamToken string
 }
 
 type paneResolver interface {
@@ -49,7 +52,8 @@ type Server struct {
 	progress ProgressFunc
 	// 只在测试里设置：按请求决定调用者。生产路径没有任何方式设置它。
 	callerFn func(*http.Request) Caller
-	// 只在测试里设置：改写对端 pid。
+	// activity 是 agent-deck 会话状态的缓存（n049，侧栏状态圆点）；没配上游地址时为 nil。
+	activity *activityCache
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
@@ -258,7 +262,21 @@ func (s *Server) getSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		list = self
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, s.withActivity(list))
+}
+
+// SessionView 是会话加上 agent-deck 报告的运行状态（running、waiting、idle、error、unknown）。
+type SessionView struct {
+	deckstore.Session
+	Activity string `json:"activity"`
+}
+
+func (s *Server) withActivity(list []deckstore.Session) []SessionView {
+	out := make([]SessionView, 0, len(list))
+	for _, x := range list {
+		out = append(out, SessionView{Session: x, Activity: s.activity.of(x.TmuxSession)})
+	}
+	return out
 }
 
 // Snapshot 是界面与主 agent 重连后取的全量；EventID 之后的事件从 SSE 续接。
@@ -502,7 +520,7 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 }
 
 type viewBody struct {
-	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）
+	Op      string `json:"op"` // open、focus、hide、takeover、handback（重试失败的交还）、resync、reset（中间 client 重建）
 	Session string `json:"session"`
 }
 
@@ -536,6 +554,12 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		err = s.view.Takeover(b.Session)
 	case "handback":
 		err = s.view.RetryHandback(b.Session)
+	case "resync":
+		// 中间 client 新建后（deck center 首次连上）：按当前焦点重做一次切换，不隐藏任何会话（n049）
+		err = s.view.Resync()
+	case "reset":
+		// 中间 client 断开（Ctrl-Q）后、新 client 以只读连上时：焦点会话按隐藏处理（架构稿 §1、§7）
+		err = s.view.CenterReset()
 	default:
 		fail(w, http.StatusBadRequest, "不认识的操作 %q", b.Op)
 		return

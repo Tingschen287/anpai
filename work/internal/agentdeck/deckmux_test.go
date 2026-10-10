@@ -87,13 +87,14 @@ func TestDeckMuxCenterClientLifecycle(t *testing.T) {
 		t.Fatalf("布局窗格应是 center 且就是 client 进程：%+v %v（client pid %d）", panes, err, c.PID)
 	}
 	// 只读翻转两次回到原状
-	if err := ToggleClientReadOnly(ctx, agent, c.TTY); err != nil {
+	if err := ToggleClientReadOnly(ctx, agent, c.TTY, c.Session); err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := ClientState(ctx, agent, c.TTY); s.ReadOnly {
-		t.Fatal("翻转后应可写")
+	if s, _ := ClientState(ctx, agent, c.TTY); s.ReadOnly || s.Session != "deck-idle" {
+		// 有多个会话时，只写 -r 不带 -t 会把 client 切到「最近用过」的 agentdeck_a（n049 实测）
+		t.Fatalf("翻转后应可写，且仍在 deck-idle：%+v", s)
 	}
-	ToggleClientReadOnly(ctx, agent, c.TTY)
+	ToggleClientReadOnly(ctx, agent, c.TTY, c.Session)
 	if s, _ := ClientState(ctx, agent, c.TTY); !s.ReadOnly {
 		t.Fatal("再翻转应回到只读")
 	}
