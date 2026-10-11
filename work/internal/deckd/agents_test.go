@@ -29,6 +29,18 @@ type fakeUp struct {
 	mainErr   error
 	output    string
 	sendHook  func(ctx context.Context) // 测试：送消息时先调它（模拟上游等 CLI 就绪）
+	stops     []string
+	stopErr   error
+}
+
+func (f *fakeUp) StopSession(_ context.Context, p lease.Permit, id string) error {
+	if err := p.Allows(id); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops = append(f.stops, id)
+	return f.stopErr
 }
 
 func (f *fakeUp) Launch(_ context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
@@ -85,6 +97,9 @@ type agentWorld struct {
 	up      *fakeUp
 	leases  *lease.Store
 	version string
+	// 上游侧绕过检查的假结果：按工具给配置检查的错误；启动后命令行核对的错误
+	cfgBypass  map[string]error
+	procBypass error
 }
 
 func newAgentWorld(t *testing.T) *agentWorld {
@@ -106,6 +121,11 @@ func newAgentWorld(t *testing.T) *agentWorld {
 	f.srv.WithAgents(w.up, l, func(_ context.Context, bin string) (string, string, error) {
 		return "/usr/bin/" + bin, w.version, nil
 	}, nil)
+	// 上游侧绕过检查换成可控的假检查（不读本机真实的 agent-deck 配置）
+	f.srv.WithBypassChecks(BypassChecks{
+		Config:    func(tool string) error { return w.cfgBypass[tool] },
+		Processes: func(_ context.Context, tmux string) error { return w.procBypass },
+	})
 	return w
 }
 

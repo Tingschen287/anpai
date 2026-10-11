@@ -29,7 +29,10 @@ func streamEvents(t *testing.T, f *fixture, as, query string, n int, during func
 	if resp.StatusCode != 200 {
 		return resp.StatusCode, nil
 	}
-	go during()
+	// 等发事件的 goroutine 做完再返回：它里面的 f.do 失败会调 t.Fatal，不能晚于测试结束
+	done := make(chan struct{})
+	go func() { defer close(done); during() }()
+	defer func() { <-done }()
 	var got [][2]string
 	sc := bufio.NewScanner(resp.Body)
 	kind := ""

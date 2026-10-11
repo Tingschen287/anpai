@@ -137,6 +137,11 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			gs = projectctlGraphStart(cfg.Projectctl)
 		}
 		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		agentSock := cfg.AgentSocket
+		srv.WithBypassChecks(BypassChecks{Config: agentdeck.CheckUpstreamConfigNoBypass,
+			Processes: func(ctx context.Context, tmux string) error {
+				return agentdeck.CheckSessionNoBypass(ctx, agentSock, tmux)
+			}})
 		go srv.runReports(ctx)
 	} else {
 		store.Notify("", "deckd", "没接上 agent-deck，开子 agent 不可用："+err.Error(), "deckd")

@@ -38,6 +38,15 @@ type Upstream interface {
 	SendMessage(ctx context.Context, p lease.Permit, sessionID, message string) error
 	SendToMain(ctx context.Context, p lease.Permit, sessionID, message string) error
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
+	StopSession(ctx context.Context, p lease.Permit, sessionID string) error
+}
+
+// BypassChecks 是上游侧的绕过检查（n051 真模型端到端实测：agent-deck v1.15 默认给 Claude 加 --dangerously-skip-permissions）。
+// Config 在启动前看上游配置（agentdeck.CheckUpstreamConfigNoBypass）；Processes 在启动后看 tmux 会话里实际在跑的命令行
+// （agentdeck.CheckSessionNoBypass）。没接上就不开（确认不了）。
+type BypassChecks struct {
+	Config    func(tool string) error
+	Processes func(ctx context.Context, tmuxSession string) error
 }
 
 // GraphStartFunc 为 Graph 通道开一轮（projectctl start），返回账本给的 attempt。
@@ -52,11 +61,23 @@ type agentsDeps struct {
 	leases     *lease.Store
 	toolInfo   ToolInfoFunc
 	graphStart GraphStartFunc
+	bypass     BypassChecks
 }
 
 // WithAgents 接上开子 agent 需要的依赖（daemon 与测试调用）。
 func (s *Server) WithAgents(up Upstream, leases *lease.Store, toolInfo ToolInfoFunc, graphStart GraphStartFunc) {
 	s.agents = &agentsDeps{upstream: up, leases: leases, toolInfo: toolInfo, graphStart: graphStart}
+}
+
+// WithBypassChecks 接上上游侧的绕过检查（daemon 与测试调用；不接就不开任何 agent）。
+func (s *Server) WithBypassChecks(b BypassChecks) { s.agents.bypass = b }
+
+// upstreamConfigNoBypass：上游配置会不会给这个工具加跳过权限的参数。
+func (s *Server) upstreamConfigNoBypass(tool string) error {
+	if s.agents.bypass.Config == nil {
+		return fmt.Errorf("deckd 没接上上游配置检查，确认不了 agent-deck 不会加跳过权限的参数，不开")
+	}
+	return s.agents.bypass.Config(tool)
 }
 
 // maxTaskBytes 是一次开子 agent 的任务正文上限。
@@ -167,6 +188,9 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 	}
 	a := res.Agent
 	if err := agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model, b.Title); err != nil {
+		return plan, err
+	}
+	if err := s.upstreamConfigNoBypass(a.Tool); err != nil {
 		return plan, err
 	}
 	if err := agentdeck.CheckToolModel(a.Tool, false); err != nil {
@@ -316,6 +340,12 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if list, err := s.agents.upstream.ListSessions(ctx); err == nil {
 		tmux, _ = agentdeck.TmuxSessionOf(list, id)
 	}
+	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
+	if err := s.processesNoBypass(ctx, tmux); err != nil {
+		s.stopBypassed(ctx, key, id, x, err)
+		fail(w, http.StatusBadGateway, "会话 %s 起来后带着跳过权限的参数（或核对不了），已停掉、不送任务：%v", id, err)
+		return
+	}
 	if err := s.store.LaunchSucceeded(key, id, tmux); err != nil {
 		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下：%v", id, err)
 		return
@@ -356,6 +386,34 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	s.store.Notify(x.Project, "spawn", fmt.Sprintf("%s开了%s「%s」（%s · %s）", who, what, x.Title, plan.agent.Name, x.Model), creatorOf(c))
 	got, _ := s.store.Session(key)
 	writeJSON(w, http.StatusCreated, map[string]any{"session": got, "brief_delivered": delivered, "note": note})
+}
+
+func (s *Server) processesNoBypass(ctx context.Context, tmux string) error {
+	if s.agents.bypass.Processes == nil {
+		return fmt.Errorf("deckd 没接上启动后的命令行核对")
+	}
+	return s.agents.bypass.Processes(ctx, tmux)
+}
+
+// stopBypassed 停掉带绕过参数的会话：先把写入权登记给工作台，用自动许可停。停成了释放名额；没停成（或停不了）
+// 标结果不明、继续占名额，交给 owner 处理。都通知 owner。
+func (s *Server) stopBypassed(ctx context.Context, key, id string, x deckstore.Session, why error) {
+	stopErr := s.agents.leases.Grant(id, "deck 停掉带绕过参数的会话")
+	if stopErr == nil {
+		var permit lease.Permit
+		if permit, stopErr = s.agents.leases.Automatic(id); stopErr == nil {
+			stopErr = s.agents.upstream.StopSession(ctx, permit, id)
+		}
+	}
+	note := "启动后核对：" + deckstore.Clean(why.Error(), 300)
+	if stopErr != nil {
+		note += "；停会话失败：" + deckstore.Clean(stopErr.Error(), 200)
+		s.store.LaunchFailed(key, true, note)
+		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」起来后带着跳过权限的参数，deck 没能停掉它（%s），请 owner 立即处理 agent-deck 会话 %s", x.Title, deckstore.Clean(stopErr.Error(), 120), id), "deckd")
+		return
+	}
+	s.store.LaunchFailed(key, false, note)
+	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」起来后带着跳过权限的参数，deck 已停掉它、没送任务：%s", x.Title, deckstore.Clean(why.Error(), 200)), "deckd")
 }
 
 // launchOutcome 判断启动结果：拿到会话号就算起来了；上游明确报错（有错误码或错误文字）是失败，释放名额；
@@ -442,7 +500,7 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a := res.Agent
-	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckToolModel(a.Tool, false),
+	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
 		agentdeck.CheckTakesTaskText(a.Tool, a.Agent), deckstore.CheckPath(p.Path)} {
 		if check != nil {
 			fail(w, http.StatusBadRequest, "%v", check)

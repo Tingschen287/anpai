@@ -403,6 +403,19 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
   只有测试在调，二进制里也没有相应字符串。按设计它是每会话一个文件、整体覆盖写，两次快速翻转会互相覆盖、丢中间态，
   本来就只能当「该刷新了」的信号，不能当队列。Work Deck 不读它，按固定间隔轮询 writer-status 与 export。
 
+## 7c. 已知约束：上游凭自己的配置给 CLI 加跳过权限的参数（n051）
+
+- **v1.15.0 的 `[claude] dangerous_mode` 不写时默认为 true**（`internal/session/userconfig.go` `GetDangerousMode`；
+  它自己的配置模板注释写着默认 false，与代码不符）。`launch` 没有按会话关掉它的参数，配置的 profile 覆盖也只有 `config_dir`。
+  结果是每个 Claude 会话都以 `--dangerously-skip-permissions` 起来。n051 真模型端到端实测在包装脚本的参数记录里看到它。
+- Work Deck 的对策（`bypasscfg.go`、`procbypass.go`）：
+  1. 启动前读上游实际会用的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck`，否则 `~/.agent-deck`）：
+     claude 必须显式 `dangerous_mode = false`，`allow_dangerous_mode`、`auto_mode` 不能为 true；codex、gemini 的 `yolo_mode` 不能为 true；
+     整个文件（去掉注释）出现任何绕过参数都拒绝；点号写法与内联表读不懂，按确认不了拒绝。改配置的是 owner，deck 不替 owner 改。
+  2. 启动后按 tmux 会话里窗格进程及其全部子孙的 `/proc/<pid>/cmdline` 再核一次；带绕过参数或核对不了就停掉会话、不送任务、通知 owner。
+- 升级上游时重查：`GetDangerousMode` 的默认值、`ClaudeOptions` 加参数的分支（`tooloptions.go`、`instance.go` `buildClaudeExtraFlags`）、
+  有没有新的配置来源（profile、group、conductor 覆盖）能打开绕过。
+
 ## 8. 上游变更时怎么核对
 
 1. 跑 `go test ./internal/agentdeck/`（设 `WORKDECK_UPSTREAM_SRC` 指向新快照）。
