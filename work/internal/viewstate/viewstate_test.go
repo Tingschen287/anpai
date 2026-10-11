@@ -23,13 +23,18 @@ type fakeCenter struct {
 	captured   []string // Capture 收到的会话名
 	client     int      // ClientID：中间现在的 client（0 表示 testClient）
 	bound      int      // Bind 绑定的 client
+	noClient   bool     // 中间没有 client（布局没起来、正在重连）
 }
 
 func (c *fakeCenter) Bind(client int) { c.bound = client }
 
 // stale：绑定的 client 已被替换（同真实实现，SetReadOnly、ReadOnly、Switch、LastInput 都查）。
 func (c *fakeCenter) stale() error {
-	if id, _ := c.ClientID(); c.bound != 0 && id != c.bound {
+	id, err := c.ClientID()
+	if c.bound == NoClient && err != nil {
+		return err // 开始时没有、现在也没有
+	}
+	if c.bound != 0 && (err != nil || id != c.bound) {
 		return fmt.Errorf("%w（假 client %d → %d）", ErrStaleClient, c.bound, id)
 	}
 	return nil
@@ -39,6 +44,9 @@ func (c *fakeCenter) stale() error {
 const testClient = 7
 
 func (c *fakeCenter) ClientID() (int, error) {
+	if c.noClient {
+		return 0, errors.New("中间没有 client")
+	}
 	if c.client == 0 {
 		return testClient, nil
 	}

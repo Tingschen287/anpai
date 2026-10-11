@@ -530,6 +530,20 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	if !need(w, c, true, RoleOwner) {
 		return
 	}
+	var b viewBody
+	if err := readBody(r, &b); err != nil {
+		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		return
+	}
+	if b.Op == "fence" {
+		// 中间 client 退出后、新 client 连上前（deck center 调）：等正在进行的视图操作做完再回（n049 评审 2 B1）。
+		// 排在「布局没接上」「存储已停」之前：那两种情况也必须先等进行中的操作，不能提前回答
+		if s.view != nil {
+			s.view.Fence()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"fenced": true})
+		return
+	}
 	if s.view == nil {
 		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
 		return
@@ -538,18 +552,8 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
-	var b viewBody
-	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
-		return
-	}
 	var err error
 	switch b.Op {
-	case "fence":
-		// 中间 client 退出后、新 client 连上前（deck center 调）：等正在进行的视图操作做完（n049 评审 2 B1）
-		s.view.Fence()
-		writeJSON(w, http.StatusOK, s.view.State())
-		return
 	case "open":
 		err = s.view.Open(b.Session)
 	case "focus":
@@ -580,6 +584,12 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.stopped() != nil {
 			fail(w, http.StatusServiceUnavailable, "%v", err)
+			return
+		}
+		if errors.Is(err, viewstate.ErrStaleClient) || errors.As(err, new(*viewstate.ErrPartial)) {
+			// 中途停下：状态可能已部分提交（见 ErrPartial），面板要按最新状态重画
+			s.bus.publish(deckstore.Event{Kind: "view"})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State()})
 			return
 		}
 		fail(w, http.StatusConflict, "%v", err)

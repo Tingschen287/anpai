@@ -97,7 +97,9 @@ func (c *TmuxCenter) find(bound int) (agentdeck.TmuxClient, error) {
 	switch {
 	case len(hits) > 1:
 		return agentdeck.TmuxClient{}, fmt.Errorf("中间窗格下有 %d 个 client，无法判定", len(hits))
-	case bound != 0 && (len(hits) == 0 || hits[0].PID != bound):
+	case len(hits) == 0 && (bound == 0 || bound == viewstate.NoClient):
+		return agentdeck.TmuxClient{}, ErrNoCenter
+	case bound != 0 && (len(hits) == 0 || hits[0].PID != bound): // bound 为 NoClient 时，出现的任何 client 都不是这次的
 		// 重建的 client 与旧的共用中间窗格的 tty：不核对进程号就会把旧操作做到新 client 上（n049 评审 2 B1）
 		return agentdeck.TmuxClient{}, fmt.Errorf("%w（这次操作绑定的 client %d 已不在中间）", viewstate.ErrStaleClient, bound)
 	case len(hits) == 0:
@@ -124,7 +126,8 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 		return err
 	}
 	if st.PID != cl.PID {
-		return fmt.Errorf("翻转只读时中间 client 被替换了（%d → %d）", cl.PID, st.PID) // tty 被新 client 复用
+		// 翻转落到了共用 tty 的新 client 上（它还被切到了旧 client 的会话）：还原它
+		return c.replaced(ctx, "翻转只读", cl, st)
 	}
 	if st.ReadOnly != ro {
 		return fmt.Errorf("只读标记读回不对（要 %v，得 %v）", ro, st.ReadOnly)
@@ -156,7 +159,7 @@ func (c *TmuxCenter) ReadOnly() (bool, error) {
 		return false, err
 	}
 	if st.PID != cl.PID {
-		return false, fmt.Errorf("读只读标记时中间 client 被替换了（%d → %d）", cl.PID, st.PID)
+		return false, fmt.Errorf("%w（读只读标记时中间 client 被替换了：%d → %d）", viewstate.ErrStaleClient, cl.PID, st.PID)
 	}
 	return st.ReadOnly, nil
 }
@@ -167,7 +170,36 @@ func (c *TmuxCenter) Switch(tmuxSession string) error {
 	if err != nil {
 		return err
 	}
-	return agentdeck.SwitchClient(context.Background(), c.AgentSocket, cl.TTY, tmuxSession)
+	ctx := context.Background()
+	if err := agentdeck.SwitchClient(ctx, c.AgentSocket, cl.TTY, tmuxSession); err != nil {
+		return err
+	}
+	st, err := agentdeck.ClientState(ctx, c.AgentSocket, cl.TTY)
+	if err != nil {
+		return fmt.Errorf("%w（切换后读不到中间 client：%v）", viewstate.ErrStaleClient, err)
+	}
+	if st.PID != cl.PID {
+		return c.replaced(ctx, "切换", cl, st)
+	}
+	return nil
+}
+
+// replaced：命令执行后读回发现落到了新 client 上（新旧 client 共用中间窗格的 tty，「找到 client」与「执行命令」
+// 之间新 client 恰好连上）。把新 client 还原到起点（deck-idle、只读），返回 ErrStaleClient（n049 评审 3 B1-A 的第二道）。
+// 新 client 自己的重连通知要等这次操作放锁后才执行，还原不会与它交错。
+func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentdeck.TmuxClient) error {
+	var errs []error
+	if now.Session != viewstate.Idle {
+		errs = append(errs, agentdeck.SwitchClient(ctx, c.AgentSocket, now.TTY, viewstate.Idle))
+	}
+	if st, err := agentdeck.ClientState(ctx, c.AgentSocket, now.TTY); err == nil && st.PID == now.PID && !st.ReadOnly {
+		errs = append(errs, agentdeck.ToggleClientReadOnly(ctx, c.AgentSocket, now.TTY, st.Session))
+	}
+	note := "已把新 client 还原到起点"
+	if err := errors.Join(errs...); err != nil {
+		note = "还原新 client 失败：" + err.Error()
+	}
+	return fmt.Errorf("%w（%s时中间 client 被替换了：%d → %d；%s）", viewstate.ErrStaleClient, what, old.PID, now.PID, note)
 }
 
 // LastInput 是 owner 最后一次在中间打字的时间（client_activity，精度 1 秒）。

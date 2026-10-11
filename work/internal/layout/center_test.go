@@ -143,7 +143,7 @@ func TestCenterLoopCancelsAnnounceWhenItsClientExits(t *testing.T) {
 	}
 }
 
-// 每个 client 退出后、起下一个之前先过栅栏（n049 评审 2 B1）。
+// 每次起 client 之前先过栅栏（含第一次），栅栏的等待不算进 client 的存活时长（n049 评审 2 B1、评审 3 B8）。
 func TestCenterLoopFencesBeforeReattaching(t *testing.T) {
 	var order []string
 	n, clock := 0, time.Unix(0, 0)
@@ -163,7 +163,65 @@ func TestCenterLoopFencesBeforeReattaching(t *testing.T) {
 		MaxQuick: 1,
 	}
 	l.Run()
-	if got := strings.Join(order, ","); got != "attach,exit,fence,attach,exit,fence" {
-		t.Fatalf("顺序应是 连上 → 退出 → 栅栏 → 再连：%s", got)
+	if got := strings.Join(order, ","); got != "fence,attach,exit,fence,attach,exit,fence" {
+		t.Fatalf("顺序应是 栅栏 → 连上 → 退出 → 栅栏 → 再连：%s", got)
+	}
+}
+
+// 评审 3 B8：client 每次一连上就退出，栅栏每次等 5 秒：仍按快速断开计数，第 3 次后停下。
+func TestFenceWaitDoesNotHideQuickExits(t *testing.T) {
+	clock, n := time.Unix(0, 0), 0
+	l := &CenterLoop{
+		Now: func() time.Time { return clock }, MaxQuick: 3, QuickExit: 3 * time.Second,
+		Attach: func() (int, func() error, error) {
+			n++
+			if n > 5 {
+				return 0, nil, errors.New("测试兜底：不该连到第 6 次")
+			}
+			return n, func() error { return errors.New("一连上就退出") }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence:    func() { clock = clock.Add(5 * time.Second) },
+		Pause:    func(string) bool { return false },
+	}
+	l.Run()
+	if n != 3 {
+		t.Fatalf("应在第 3 次快速断开后停下：连了 %d 次", n)
+	}
+}
+
+// 栅栏没返回就不起新 client。
+func TestNoAttachUntilFenceReturns(t *testing.T) {
+	gate := make(chan struct{})
+	attached := make(chan struct{}, 4)
+	fences := 0
+	l := &CenterLoop{
+		Now: time.Now,
+		Attach: func() (int, func() error, error) {
+			attached <- struct{}{}
+			return 1, func() error { return nil }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence: func() {
+			fences++
+			if fences == 2 {
+				<-gate // 第一个 client 退出后，deckd 还有操作没做完
+			}
+		},
+		Pause:    func(string) bool { return false },
+		MaxQuick: 2,
+	}
+	go l.Run()
+	<-attached
+	select {
+	case <-attached:
+		t.Fatal("栅栏没返回就起了新 client")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-attached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("栅栏返回后应起新 client")
 	}
 }

@@ -52,7 +52,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("连不上 deckd（%v）：先运行 deck daemon", err)
+		return fmt.Errorf("连不上 deckd（%w）：先运行 deck daemon", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))

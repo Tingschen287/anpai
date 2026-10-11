@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -160,13 +161,9 @@ func center(dirs deckstore.Dirs, args []string) {
 			announce(ctx, client, filepath.Join(dirs.State, "center.log"), *agentSock, op, pid)
 		},
 		Fence: func() {
-			// deckd 不在或 5 秒内没回应就照常重连（没有进行中的操作可等），结果记进 center.log
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var out any
-			if err := client.Do(ctx, "POST", "/v1/view", map[string]any{"op": "fence"}, &out); err != nil {
-				centerLog(filepath.Join(dirs.State, "center.log"), "重连前等 deckd 做完进行中的操作失败（照常重连）：%v", err)
-			}
+			fence(client, filepath.Join(dirs.State, "center.log"), func(msg string) {
+				fmt.Print("\x1b[2J\x1b[H\n  " + msg + "\n")
+			})
 		},
 		Pause: func(reason string) bool {
 			fmt.Print("\x1b[2J\x1b[H")
@@ -177,6 +174,34 @@ func center(dirs deckstore.Dirs, args []string) {
 	}
 	loop.Run()
 }
+
+// fence 在起新的中间 client 之前，确认 deckd 没有做到一半的视图操作（n049 评审 3 B1-A）：
+//   - deckd 回了 fence：它拿到过一次状态机的锁，之前的操作都做完了；
+//   - deckd 根本没在运行（连接被拒、socket 不存在）：不可能有进行中的操作；
+//   - 其他情况（超时、deckd 忙、答非所问）都不能证明操作已结束：不起新 client，在中间显示原因，每秒再试。
+func fence(c *deckclient.Client, logPath string, show func(string)) {
+	for i := 0; ; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), fenceTimeout)
+		var out any
+		err := c.Do(ctx, "POST", "/v1/view", map[string]any{"op": "fence"}, &out)
+		cancel()
+		if err == nil {
+			return
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
+			centerLog(logPath, "deckd 没在运行，不用等进行中的操作：%v", err)
+			return
+		}
+		if i == 0 {
+			centerLog(logPath, "重连前等 deckd 做完进行中的操作，还没确认：%v（不起新 client，每秒再试）", err)
+		}
+		show("等 deckd 做完进行中的操作再重连中间窗格…（" + deckstore.Clean(err.Error(), 160) + "）")
+		time.Sleep(fenceRetry)
+	}
+}
+
+// 栅栏每次等多久、没确认时隔多久再试（测试可调小）。
+var fenceTimeout, fenceRetry = 5 * time.Second, time.Second
 
 // centerLog 往 center.log 记一行（client 连着时界面看不到 deck center 的输出）。
 func centerLog(logPath, format string, a ...any) {

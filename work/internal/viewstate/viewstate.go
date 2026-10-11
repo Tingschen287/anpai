@@ -50,8 +50,31 @@ type Center interface {
 	Bind(client int)
 }
 
-// ErrStaleClient 表示 reset、resync 的通知来自已经不在中间的旧 client：不执行，免得作用到新 client 与新焦点上。
+// NoClient 用于 Bind：操作开始时中间没有 client，之后出现的 client 都不是这次操作的。
+const NoClient = -1
+
+// ErrStaleClient 表示操作绑定的中间 client 已被替换或不在了（reset、resync 的通知来自旧 client 也是它）：
+// 不作用到新 client 上。
 var ErrStaleClient = errors.New("通知来自已经不在中间的旧 client")
+
+// ErrPartial 表示操作做到一半停下，但已经写下了不可撤销的部分（lease 交还已落盘），或中间已经切了过去。
+// 状态按操作的目标补齐（焦点、打开集合一致），没做完的是 Cause（例如中间 client 被替换、放开输入失败）。
+// 调用方按「已完成、但有后续问题」处理；中间 client 被替换时由新 client 的重连通知收尾（n049 评审 3 B1-B）。
+type ErrPartial struct {
+	Done  string
+	Cause error
+}
+
+func (e *ErrPartial) Error() string { return "部分完成（" + e.Done + "）：" + e.Cause.Error() }
+func (e *ErrPartial) Unwrap() error { return e.Cause }
+
+func isPartial(err error) bool {
+	var pe *ErrPartial
+	return errors.As(err, &pe)
+}
+
+// committed：操作的状态已按目标提交（成功、交还失败但切换完成、部分完成）。
+func committed(err error) bool { return err == nil || isHandback(err) || isPartial(err) }
 
 // Leases 是写入权记账（lease.Store 满足它）。
 type Leases interface {
@@ -218,7 +241,7 @@ func (m *Machine) Open(id string) error {
 		return err
 	}
 	herr := m.switchLocked(t.Session)
-	if herr != nil && !isHandback(herr) {
+	if !committed(herr) {
 		return herr
 	}
 	if !contains(m.open, t.Session) {
@@ -283,8 +306,8 @@ func (m *Machine) hideLocked(id string) error {
 			next = rest[len(rest)-1]
 		}
 		herr = m.switchLocked(next)
-		if herr != nil && !isHandback(herr) {
-			return herr // 关不上输入：不改打开集合
+		if !committed(herr) {
+			return herr // 关不上输入、或中途 client 被替换而没写下任何东西：不改打开集合
 		}
 	} else if _, ok := m.taken[session]; ok {
 		herr = m.handbackLocked(session, "隐藏")
@@ -309,7 +332,7 @@ func (m *Machine) CenterReset(client int) error {
 	defer unbind()
 	if m.focus != "" {
 		if err := m.hideLocked(m.focus); err != nil {
-			if errors.Is(err, ErrStaleClient) {
+			if errors.Is(err, ErrStaleClient) && !isPartial(err) {
 				return err // 做到一半 client 被替换：什么都没改（输入关闭之前就停了，或停在切换之前）
 			}
 			m.clientGen++
@@ -321,11 +344,11 @@ func (m *Machine) CenterReset(client int) error {
 }
 
 // bind 把这一次操作绑定到中间现在的 client（见 Center.Bind），返回解除函数。中间没有 client（布局没起来、
-// 正在重连）时不绑定，操作照常，由各步自己报错。
+// 正在重连）时绑定为 NoClient：操作中途冒出来的 client 一律不认，由各步自己报错（n049 评审 3 建议）。
 func (m *Machine) bind() func() {
 	id, err := m.center.ClientID()
 	if err != nil {
-		return func() {}
+		id = NoClient
 	}
 	m.center.Bind(id)
 	return func() { m.center.Bind(0) }
@@ -367,7 +390,7 @@ func (m *Machine) Resync(client int) error {
 	}
 	defer unbind()
 	if err := m.switchLocked(m.focus); err != nil {
-		if !errors.Is(err, ErrStaleClient) {
+		if !errors.Is(err, ErrStaleClient) || isPartial(err) {
 			m.clientGen++
 		}
 		return err
@@ -407,10 +430,13 @@ func (m *Machine) switchLocked(target string) error {
 	if err := m.closeInputLocked(); err != nil {
 		return err
 	}
+	prev := m.focus
 	var herr error
-	if old := m.focus; old != "" && old != target {
-		if _, ok := m.taken[old]; ok {
-			herr = m.handbackLocked(old, "切走")
+	handedBack := false // 交还已落盘：之后再出错也不能整体撤回，只能补齐到目标
+	if prev != "" && prev != target {
+		if _, ok := m.taken[prev]; ok {
+			herr = m.handbackLocked(prev, "切走")
+			handedBack = herr == nil
 		}
 	}
 	if err := m.writable(); err != nil {
@@ -429,12 +455,21 @@ func (m *Machine) switchLocked(target string) error {
 		tmux = t.Tmux
 	}
 	if err := m.center.Switch(tmux); err != nil {
+		if handedBack {
+			m.focus = target
+			return &ErrPartial{Done: "已交还 " + prev, Cause: fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)}
+		}
 		return fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)
 	}
 	m.focus = target
 	if target != "" && t.Role == "main" && t.BriefConfirmed {
 		if err := m.center.SetReadOnly(false); err != nil {
-			return fmt.Errorf("主 agent 会话放开输入失败（保持只读）：%w", err)
+			if errors.Is(err, ErrStaleClient) && !handedBack {
+				m.focus = prev // 只动过内存与已不在的旧 client：整体撤回
+				return err
+			}
+			// 中间已经切了过去（或交还已落盘）：焦点按目标提交，输入保持只读
+			return &ErrPartial{Done: "已切到 " + title(t), Cause: fmt.Errorf("主 agent 会话放开输入失败（保持只读）：%w", err)}
 		}
 	}
 	return herr
@@ -529,6 +564,8 @@ func (m *Machine) Takeover(id string) error {
 		if !m.now().Before(deadline) {
 			return ErrTakeoverBusy
 		}
+		unbind() // 绑定只在持锁时有效：放锁前解除，醒来在循环开头重新绑定原 client
+		unbind = func() {}
 		m.mu.Unlock()
 		m.sleep(100 * time.Millisecond)
 		m.mu.Lock()
@@ -546,6 +583,14 @@ func (m *Machine) openTakenLocked(session string, t Target, note string) error {
 		return fmt.Errorf("%v；输入保持关闭，会话保持接管、自动派送暂停", err)
 	}
 	if err := m.center.SetReadOnly(false); err != nil {
+		if errors.Is(err, ErrStaleClient) {
+			// 新 client 一连上就是只读、旧的已不在：输入从没放开过。按交还收回（带画面摘要），
+			// 不留一个没生效的接管；交还不成就保持接管与暂停（既有的安全恢复）（n049 评审 3 B1-B）
+			if herr := m.handbackLocked(session, "中间 client 被替换"); herr != nil {
+				return fmt.Errorf("%w；接管没有生效，交还也没完成：%v", err, herr)
+			}
+			return fmt.Errorf("%w；接管没有生效，已交还", err)
+		}
 		if cerr := m.closeInputLocked(); cerr != nil {
 			return fmt.Errorf("放开输入失败，且确认不了输入已关闭，保持接管、自动派送暂停：%v", err)
 		}
