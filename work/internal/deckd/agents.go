@@ -389,6 +389,13 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		note = "不能送 brief：" + err.Error()
 	} else if derr := s.agents.upstream.SendMessage(ctx, permit, id, plan.brief); derr != nil {
 		note = "brief " + deckstore.Clean(derr.Error(), 200)
+		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
+		// 主 agent 照常放开输入；记下并请 owner 看一眼（没提交的话，brief 留在输入框里看得见）
+		if x.Role == "main" && agentdeck.IsDeliveryUnconfirmed(derr) {
+			s.store.ConfirmBrief(key)
+			note = "brief 已送出，上游没证实提交，请 owner 在中间窗格看一眼：" + deckstore.Clean(derr.Error(), 160)
+			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的第一条 brief 已送出，但上游没证实提交，请在中间窗格看一眼", x.Title), "deckd")
+		}
 	} else {
 		delivered = true
 		if x.Role == "main" {
@@ -467,9 +474,21 @@ func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain 
 	return "", true, deckstore.Clean(err.Error(), 300)
 }
 
+// DeckCommand 是 brief 里写给 agent 的 deck 命令（daemon 换成 deckd 自己的可执行文件绝对路径）。
+// n051 Codex 端到端实测：Codex 用登录 shell 跑命令，PATH 按 owner 的 profile 重设，只写 deck 会 command not found。
+var DeckCommand = "deck"
+
+// withDeckCommand 把 brief 里的「deck agent …」换成 DeckCommand。
+func withDeckCommand(brief string) string {
+	if DeckCommand == "deck" {
+		return brief
+	}
+	return strings.ReplaceAll(brief, "deck agent ", DeckCommand+" agent ")
+}
+
 // subBrief 是送给子 agent 的第一条消息：任务正文，加上收尾时必须上报的约定（§14.4）。
 func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
-	return fmt.Sprintf(`你是项目「%s」的子 agent（%s），由主 agent 通过 Agent Deck 派出。
+	return withDeckCommand(fmt.Sprintf(`你是项目「%s」的子 agent（%s），由主 agent 通过 Agent Deck 派出。
 
 任务：
 %s
@@ -478,13 +497,13 @@ func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
 - 只做这一件事；需要 owner 决定的事（花额度、改电脑设置、推送代码、和别人意见不一、偏离 owner 的决定）先停下，在汇报里写明，由主 agent 上报。
 - 不要使用跳过权限确认的参数。
 - 做完（或做不下去）时运行：deck agent report --done --text "<结论、改了什么、证据在哪、还有什么没做>"
-`, p.Name, x.Title, task)
+`, p.Name, x.Title, task))
 }
 
 // MainBrief 是送给主 agent 的第一条消息：项目、工具用法与规矩（§5）。
 func MainBrief(p deckstore.ProjectDef) string {
 	env := p.Envelope
-	return fmt.Sprintf(`你是项目「%s」（%s，目录 %s）的主 agent，通过 Agent Deck 工作。
+	return withDeckCommand(fmt.Sprintf(`你是项目「%s」（%s，目录 %s）的主 agent，通过 Agent Deck 工作。
 
 规矩：
 - 只和 owner 对接。方案先与 owner 确认，再开子 agent。
@@ -496,7 +515,7 @@ func MainBrief(p deckstore.ProjectDef) string {
 - 不使用任何跳过权限确认的参数。子 agent 做完会自动转告你，标明「主动报告」或「推断」。
 
 预算包络 %s v%d：同时最多 %d 个子 agent，frontier 子 agent 最多 %d 个；超出 deck 会生成决定等 owner 批准。
-`, p.Name, p.ID, p.Path, env.ID, env.Version, env.MaxSubagents, env.MaxFrontier)
+`, p.Name, p.ID, p.Path, env.ID, env.Version, env.MaxSubagents, env.MaxFrontier))
 }
 
 // postMain：owner 起项目的主 agent（POST /v1/projects/{id}/main）。按项目设置的主 agent 与档位，走同一套准入。

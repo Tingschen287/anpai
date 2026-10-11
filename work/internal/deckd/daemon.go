@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -137,6 +138,10 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			gs = projectctlGraphStart(cfg.Projectctl)
 		}
 		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		// brief 里写 deck 的绝对路径：agent 的 shell 未必有 deck 所在的 PATH（Codex 用登录 shell）
+		if exe, err := os.Executable(); err == nil && !strings.ContainsAny(exe, " \t'\"$`\\") {
+			DeckCommand = exe
+		}
 		agentSock := cfg.AgentSocket
 		srv.WithBypassChecks(BypassChecks{Config: agentdeck.CheckUpstreamConfigNoBypass,
 			Alive: func(ctx context.Context, tmux string) (bool, error) {
