@@ -33,6 +33,12 @@ func TestUpstreamConfigBypass(t *testing.T) {
 		{"codex 默认不开", "codex", "", true},
 		{"codex yolo", "codex", "[codex]\nyolo_mode = true\n", false},
 		{"codex 命令带绕过参数", "codex", "[codex]\ncommand = \"codex --dangerously-bypass-approvals-and-sandbox\"\n", false},
+		{"codex 的 -c 覆盖", "codex", "[codex]\ncommand = \"codex -c approval_policy=never\"\n", false},
+		{"codex 的 --config= 覆盖", "codex", "[codex]\ncommand = \"codex --config=sandbox_mode=danger-full-access\"\n", false},
+		{"codex 的其他 -c 覆盖不算", "codex", "[codex]\ncommand = \"codex -c model_reasoning_effort=high\"\n", true},
+		{"自定义工具 dangerous_mode", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = true\n", false},
+		{"自定义工具 dangerous_mode = false", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = false\n", true},
+		{"MCP 的 npx -y 不算", "claude", safe + "[mcps.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"@x/fs\"]\n", true},
 	}
 	for _, c := range cases {
 		err := checkConfigText(c.tool, c.text)
@@ -95,6 +101,12 @@ func TestSessionProcessesBypass(t *testing.T) {
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "good"); err != nil {
 		t.Fatalf("干净的会话应通过：%v", err)
+	}
+	if ok, err := TmuxSessionAlive(ctx, sock, "good"); !ok || err != nil {
+		t.Fatalf("在的会话应报在：%v %v", ok, err)
+	}
+	if ok, err := TmuxSessionAlive(ctx, sock, "none"); ok || err != nil {
+		t.Fatalf("不在的会话应报不在：%v %v", ok, err)
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "none"); err == nil {
 		t.Fatal("没有这个会话：核对不了，应报错")

@@ -435,6 +435,12 @@ func (s *Server) postDecision(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "主 agent 只能上报 cost、config、push、disagree、deviation，不是 %q", b.Kind)
 		return
 	}
+	// 开子 agent 的超额例外与 Codex trust 的批准范围只能由 deckd 在开子 agent 时生成（n051 自查）：
+	// 主 agent 自己写的话，owner 在面板上只看到说明，批准的却是一个藏在范围里的启动
+	if a := b.Scope["action"]; a == "spawn" || a == "codex_trust" {
+		fail(w, http.StatusBadRequest, "action=%s 的批准范围只能由 deck 在开子 agent 时生成；超额请直接运行 deck agent spawn，deck 会自己生成决定", a)
+		return
+	}
 	d, err := s.store.CreateDecision(deckstore.NewDecision{Project: c.Project, Kind: b.Kind, Summary: b.Summary,
 		Options: b.Options, Recommend: b.Recommend, Scope: b.Scope, CreatedBy: c.Session})
 	if err != nil {

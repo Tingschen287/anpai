@@ -27,7 +27,8 @@ import (
 //     owner 批准即记住（§14.3），之后同一项目、工具、目录、可执行文件路径与版本不再问；
 //  4. 预算包络：在锁内检查并预留名额；超出就生成 cost 决定（202），批准后主 agent 带同一请求与决定 id 再来一次，
 //     这一次 BeginExecute → Reserve 消费例外；
-//  5. Graph 通道先 projectctl start 拿到 attempt，普通通道不写 node/attempt；启动、登记写入权、送第一条 brief、通知。
+//  5. 启动，按实际命令行核对没有绕过参数；Graph 通道此时才 projectctl start 拿到 attempt（开不成就停掉刚起的会话），
+//     普通通道不写 node/attempt；登记写入权、送第一条 brief、通知。
 //
 // 与架构稿 §5 的顺序不同：绕过参数等硬拒绝提前到两道门之前，免得先生成一个批了也没用的决定。
 
@@ -47,6 +48,8 @@ type Upstream interface {
 type BypassChecks struct {
 	Config    func(tool string) error
 	Processes func(ctx context.Context, tmuxSession string) error
+	// Alive 看 tmux 会话还在不在（agentdeck.TmuxSessionAlive）。起主 agent 时用它认出已经退出的旧主 agent；没接上就不认。
+	Alive func(ctx context.Context, tmuxSession string) (bool, error)
 }
 
 // GraphStartFunc 为 Graph 通道开一轮（projectctl start），返回账本给的 attempt。
@@ -263,11 +266,17 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		}
 		s.store.Notify(x.Project, "spawn", fmt.Sprintf("按已记住的授权启动 %s，~/.codex/config.toml 会被上游改写", plan.agent.Name), "deckd")
 	}
-	// 主 agent：每个项目同时只能有一个
+	// 主 agent：每个项目同时只能有一个。旧主 agent 的 tmux 会话已经不在（退出或被关掉）就记为已结束、放行
+	// （n051 自查：此前没有任何路径结束主 agent，它一退出，这个项目就再也起不了主 agent）。
 	if x.Role == "main" {
 		for _, y := range s.store.Sessions(x.Project) {
 			if y.Role == "main" && (y.Status == deckstore.StatusLaunching || y.Status == deckstore.StatusRunning || y.Status == deckstore.StatusUncertain) {
-				fail(w, http.StatusConflict, "项目 %s 已有主 agent %s（%s）", x.Project, y.Key, y.Status)
+				if s.mainGone(ctx, y) {
+					s.store.SetSessionStatus(y.Key, deckstore.StatusStopped, "tmux 会话 "+y.TmuxSession+" 已不在，deck 记为已结束")
+					s.store.Notify(x.Project, "spawn", fmt.Sprintf("旧主 agent「%s」的会话已不在，记为已结束", y.Title), "deckd")
+					continue
+				}
+				fail(w, http.StatusConflict, "项目 %s 已有主 agent %s（%s），它的会话还在或确认不了；先在 agent-deck 里停掉它再起", x.Project, y.Key, y.Status)
 				return
 			}
 		}
@@ -302,24 +311,16 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		return
 	}
 	key := res.Key
-	// Graph 通道：先开一轮
-	if graphNode != "" {
-		if s.agents.graphStart == nil {
-			s.store.LaunchFailed(key, false, "deckd 没配置 projectctl")
-			fail(w, http.StatusServiceUnavailable, "deckd 没配置 projectctl，不能走 Graph 通道")
-			return
+	if exception != "" {
+		// 批准后名额又够了：Reserve 没消耗例外，它会一直停在 executing（n051 自查）。收尾为已执行、作废，不能再用
+		if d, ok := s.store.Decision(exception); ok && d.State == deckstore.StateExecuting {
+			s.store.FinishExecute(exception, deckstore.StateApplied, "名额已够用，本次没有消耗这个例外；它已作废，不能再用")
 		}
-		attempt, err := s.agents.graphStart(ctx, p, graphNode, "deck:"+key, x.Model, x.Tier)
-		if err != nil {
-			var notStarted *projectctl.ErrStartNotStarted
-			s.store.LaunchFailed(key, !errors.As(err, &notStarted), "projectctl start："+err.Error())
-			fail(w, http.StatusConflict, "Graph 节点 %s 开工失败：%v", graphNode, err)
-			return
-		}
-		if err := s.store.SetGraphAttempt(key, graphNode, attempt); err != nil {
-			fail(w, http.StatusServiceUnavailable, "记不下 Graph attempt：%v", err)
-			return
-		}
+	}
+	if graphNode != "" && s.agents.graphStart == nil {
+		s.store.LaunchFailed(key, false, "deckd 没配置 projectctl")
+		fail(w, http.StatusServiceUnavailable, "deckd 没配置 projectctl，不能走 Graph 通道")
+		return
 	}
 	// 启动
 	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: x.Title, Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true}
@@ -342,9 +343,31 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
 	if err := s.processesNoBypass(ctx, tmux); err != nil {
-		s.stopBypassed(ctx, key, id, x, err)
+		s.stopLaunched(ctx, key, id, x, "启动后核对："+err.Error(), false, "起来后带着跳过权限的参数（或核对不了）")
 		fail(w, http.StatusBadGateway, "会话 %s 起来后带着跳过权限的参数（或核对不了），已停掉、不送任务：%v", id, err)
 		return
+	}
+	// Graph 通道：会话起来并核过之后才开一轮（n051 自查：先开一轮再启动，启动失败时账本里会留下没人干活的 attempt）。
+	// 开不成就停掉刚起的会话；projectctl 结果不明（可能已经开了一轮）时继续占名额，请 owner 核对账本。
+	if graphNode != "" {
+		attempt, err := s.agents.graphStart(ctx, p, graphNode, "deck:"+key, x.Model, x.Tier)
+		if err != nil {
+			var notStarted *projectctl.ErrStartNotStarted
+			unknown := !errors.As(err, &notStarted)
+			what := "Graph 节点 " + graphNode + " 没开成一轮"
+			if unknown {
+				what = "Graph 节点 " + graphNode + " 开没开成一轮不确定，请核对账本"
+			}
+			s.stopLaunched(ctx, key, id, x, "projectctl start："+err.Error(), unknown, what)
+			fail(w, http.StatusConflict, "Graph 节点 %s 开工失败，刚起的会话已停掉、不送任务：%v", graphNode, err)
+			return
+		}
+		if err := s.store.SetGraphAttempt(key, graphNode, attempt); err != nil {
+			s.stopLaunched(ctx, key, id, x, fmt.Sprintf("记不下 Graph attempt %s#%d：%v", graphNode, attempt, err), true,
+				fmt.Sprintf("Graph 节点 %s 已开第 %d 轮，但 deck 记不下，请核对账本", graphNode, attempt))
+			fail(w, http.StatusServiceUnavailable, "记不下 Graph attempt：%v", err)
+			return
+		}
 	}
 	if err := s.store.LaunchSucceeded(key, id, tmux); err != nil {
 		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下：%v", id, err)
@@ -388,6 +411,15 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	writeJSON(w, http.StatusCreated, map[string]any{"session": got, "brief_delivered": delivered, "note": note})
 }
 
+// mainGone：旧主 agent 已经起来过（有 tmux 会话名），且那个 tmux 会话确实不在了。还在启动中、查不了、出错都按「还在」算。
+func (s *Server) mainGone(ctx context.Context, y deckstore.Session) bool {
+	if y.Status == deckstore.StatusLaunching || y.TmuxSession == "" || s.agents.bypass.Alive == nil {
+		return false
+	}
+	alive, err := s.agents.bypass.Alive(ctx, y.TmuxSession)
+	return err == nil && !alive
+}
+
 func (s *Server) processesNoBypass(ctx context.Context, tmux string) error {
 	if s.agents.bypass.Processes == nil {
 		return fmt.Errorf("deckd 没接上启动后的命令行核对")
@@ -395,25 +427,25 @@ func (s *Server) processesNoBypass(ctx context.Context, tmux string) error {
 	return s.agents.bypass.Processes(ctx, tmux)
 }
 
-// stopBypassed 停掉带绕过参数的会话：先把写入权登记给工作台，用自动许可停。停成了释放名额；没停成（或停不了）
-// 标结果不明、继续占名额，交给 owner 处理。都通知 owner。
-func (s *Server) stopBypassed(ctx context.Context, key, id string, x deckstore.Session, why error) {
-	stopErr := s.agents.leases.Grant(id, "deck 停掉带绕过参数的会话")
+// stopLaunched 停掉刚起、但不能交任务的会话（带绕过参数、Graph 开不成一轮等）：先把写入权登记给工作台，用自动许可停。
+// 停成了且 keep 为假，释放名额；没停成或 keep 为真（例如账本结果不明），标结果不明、继续占名额，交给 owner 处理。都通知 owner。
+func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.Session, why string, keep bool, what string) {
+	stopErr := s.agents.leases.Grant(id, "deck 停掉不能交任务的会话")
 	if stopErr == nil {
 		var permit lease.Permit
 		if permit, stopErr = s.agents.leases.Automatic(id); stopErr == nil {
 			stopErr = s.agents.upstream.StopSession(ctx, permit, id)
 		}
 	}
-	note := "启动后核对：" + deckstore.Clean(why.Error(), 300)
+	note := deckstore.Clean(why, 300)
 	if stopErr != nil {
 		note += "；停会话失败：" + deckstore.Clean(stopErr.Error(), 200)
 		s.store.LaunchFailed(key, true, note)
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」起来后带着跳过权限的参数，deck 没能停掉它（%s），请 owner 立即处理 agent-deck 会话 %s", x.Title, deckstore.Clean(stopErr.Error(), 120), id), "deckd")
+		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s，deck 没能停掉它（%s），请 owner 立即处理 agent-deck 会话 %s", x.Title, what, deckstore.Clean(stopErr.Error(), 120), id), "deckd")
 		return
 	}
-	s.store.LaunchFailed(key, false, note)
-	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」起来后带着跳过权限的参数，deck 已停掉它、没送任务：%s", x.Title, deckstore.Clean(why.Error(), 200)), "deckd")
+	s.store.LaunchFailed(key, keep, note)
+	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s，deck 已停掉它、没送任务：%s", x.Title, what, deckstore.Clean(why, 200)), "deckd")
 }
 
 // launchOutcome 判断启动结果：拿到会话号就算起来了；上游明确报错（有错误码或错误文字）是失败，释放名额；

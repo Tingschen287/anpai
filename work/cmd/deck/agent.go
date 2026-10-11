@@ -234,9 +234,12 @@ func agentEscalate(ctx context.Context, c *deckclient.Client, args []string) (an
 		}
 		body["scope"] = sc
 	}
-	var out any
-	err := c.Do(ctx, "POST", "/v1/decisions", body, &out)
-	return out, err
+	var d any
+	if err := c.Do(ctx, "POST", "/v1/decisions", body, &d); err != nil {
+		return nil, err
+	}
+	// 上报之后要等 owner 在右侧面板决定：按文档的退出码 3 返回（n051 自查）
+	return map[string]any{"pending": *kind, "decision": d, "next": "等 owner 在右侧面板决定；用 deck agent decisions 查看结果"}, nil
 }
 
 // projectCmd：owner 新建项目（deck project add）。读出整份设置、加一个项目、整份写回（deckd 校验）。

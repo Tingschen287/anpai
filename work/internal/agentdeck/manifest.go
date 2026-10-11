@@ -775,6 +775,9 @@ var NotUsed = []string{
 var BypassFlags = []string{"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
 	"--dangerously-bypass-approvals-and-sandbox", "--yolo"}
 
+// codexConfigBypass 是 codex `-c key=value` 覆盖里的绕过（小写、去引号与空格后比较）。
+var codexConfigBypass = []string{"approval_policy=never", "sandbox_mode=danger-full-access"}
+
 // bypassValues 是「参数 + 取值」形式的绕过：参数名 → 被拒的取值（小写比较）。
 var bypassValues = map[string]string{
 	"--permission-mode":  "bypasspermissions",
@@ -797,6 +800,20 @@ func CheckNoBypass(fields ...string) error {
 				if name == b {
 					return fmt.Errorf("拒绝绕过权限的参数 %s（硬拒绝，owner 也批不过）", w)
 				}
+			}
+			if name == "-c" || name == "--config" {
+				// codex 的配置覆盖：-c approval_policy=never、-c sandbox_mode=danger-full-access 与 -a never、-s danger-full-access 等价
+				v := value
+				if !hasValue && i+1 < len(words) {
+					v = strings.ToLower(words[i+1])
+				}
+				v = strings.NewReplacer(`"`, "", `'`, "", " ", "").Replace(v)
+				for _, bad := range codexConfigBypass {
+					if v == bad {
+						return fmt.Errorf("拒绝绕过权限的参数 %s %s（硬拒绝，owner 也批不过）", w, v)
+					}
+				}
+				continue
 			}
 			bad, ok := bypassValues[name]
 			if !ok {

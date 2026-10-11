@@ -47,6 +47,20 @@ func CheckSessionNoBypass(ctx context.Context, socket, tmuxSession string) error
 	return nil
 }
 
+// TmuxSessionAlive 看 socket 对应的 tmux server 上还有没有这个会话的窗格（server 没在跑算没有）。
+func TmuxSessionAlive(ctx context.Context, socket, tmuxSession string) (bool, error) {
+	panes, err := ListTmuxPanes(ctx, socket)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range panes {
+		if p.Session == tmuxSession {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // cmdlineNoBypass 读一个进程的命令行并检查。进程已经退出（读不到）不算错：它不再运行任何东西。
 func cmdlineNoBypass(proc string, pid int) error {
 	data, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(pid), "cmdline"))

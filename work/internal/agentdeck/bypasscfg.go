@@ -92,6 +92,9 @@ func checkConfigText(tool, text string) error {
 			}
 		case section == "claude":
 			claude[key] = value
+		case strings.HasPrefix(section, "tools.") && (key == "dangerous_mode" || key == "yolo_mode") && value != "false":
+			// 上游自定义工具声明了 dangerous_mode 时，会把它的 dangerous_flag 加到命令上（n051 自查）
+			return fmt.Errorf("第 %d 行：[%s] %s 会让这个自定义工具跳过权限确认，请 owner 去掉或改为 false", n, section, key)
 		case section == "codex" || section == "gemini":
 			if key == "yolo_mode" {
 				yolo[section] = value
