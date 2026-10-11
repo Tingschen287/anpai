@@ -4,8 +4,10 @@
 //	deck daemon                 启动后台服务 deckd
 //	deck panel <名字> [-project] 在当前窗格里跑一个面板（decisions、quota、progress、notifications、activity）
 //	deck whoami                 deckd 把当前进程认成谁
+//	deck agent …                主 agent 与子 agent 的工具（n051，见 agent.go）
+//	deck project add …          owner 新建项目（n051）
 //
-// 布局窗格里的程序（n049）：center、sidebar、tabs、settings、idle、layout；deck agent（主 agent 工具）在 n051。
+// 布局窗格里的程序（n049）：center、sidebar、tabs、settings、idle、layout。
 package main
 
 import (
@@ -54,6 +56,10 @@ func main() {
 		settings(dirs, os.Args[2:])
 	case "panel":
 		panel(dirs, os.Args[2:])
+	case "agent":
+		agentCmd(dirs, os.Args[2:])
+	case "project":
+		projectCmd(dirs, os.Args[2:])
 	case "whoami":
 		var out map[string]any
 		if err := deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/whoami", &out); err != nil {

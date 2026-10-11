@@ -76,12 +76,20 @@ func writeAtomic(path string, data []byte) error {
 }
 
 func writeJSON(path string, v any) error {
+	if writeFault != nil {
+		if err := writeFault(path); err != nil {
+			return err
+		}
+	}
 	data, err := json.MarshalIndent(v, "", " ")
 	if err != nil {
 		return err
 	}
 	return writeAtomic(path, data)
 }
+
+// writeFault 是故障注入点：只有测试会设置它，模拟某个状态文件写失败（n051 承接 n050：超额例外消费的两次写入）。
+var writeFault func(path string) error
 
 // readJSON 读一份 JSON。文件不存在返回 false；文件坏了报错，不当成空的——空的会把已有授权和名额当成没有。
 func readJSON(path string, v any) (bool, error) {
