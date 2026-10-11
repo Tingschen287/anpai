@@ -19,7 +19,7 @@ Work Deck 对 upstream agent-deck 的依赖，按整理时找到的列在这里�
 | `web` | 起 headless HTTP 服务 | `--no-tui`、`--listen`、`--token` |
 | `session attach` | 进入会话，把终端交给真实 CLI | 只带会话号 |
 | `session output` | 只读预览会话当前画面 | `-pane` |
-| `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话 | `--message-file -`（文本走标准输入，不进 argv）、`--json`（n042，读失败时的 `delivery` 字段） |
+| `session send` | 把任务文本（执行 brief、评审 brief）与决策队列的回答投进已登记写入权的会话；n051 起也把子 agent 的汇报转告主 agent | `--message-file -`（文本走标准输入，不进 argv）、`--json`（n042，读失败时的 `delivery` 字段）、`--defer-if-busy --defer-timeout 10s`（n051，只用于转告主 agent：对方正在回答就等这一轮结束，超时报 `defer-if-busy: target still busy`、什么都没送；上游 `cmd/agent-deck/session_cmd.go:2695-2696,2825-2831`、`internal/send/deferbusy.go:49-80`） |
 | `session stop` | 停掉派工器刚起、却没拿到任务说明的会话（n044） | 只带会话号与 `--json` |
 | `list` | 直连 tmux 时取会话名，不经 headless 服务 | `--json` |
 | `inbox export` | 决策队列：非消费式读全机 completion/transition 记录（n038） | `--json` |

@@ -172,7 +172,7 @@ func contains(list []string, s string) bool {
 }
 
 // SendFlags 是 Work Deck 会传给 session send 的全部参数（n042 加 --json，用来读 delivery 字段）。
-var SendFlags = []string{"--message-file", "--json"}
+var SendFlags = []string{"--message-file", "--json", "--defer-if-busy", "--defer-timeout"}
 
 // SendDeliveryField 是 session send --json 失败时 Work Deck 读的字段；取值 typed 视为「送达未确认」。
 // 出处：上游 cmd/agent-deck/session_cmd.go:3056-3087、3116-3125。
@@ -767,4 +767,48 @@ var NotUsed = []string{
 	"state.db：没有 hook overlay 时 instances.status 不权威，只可排障时看，不作真相来源",
 	"上游的配置文件与 profile 目录内容：Work Deck 只通过 AGENTDECK_PROFILE 指定名字，不读写其中文件",
 	"上游源码：Work Deck 不修改、不编译进自己的二进制，只调用它的命令与端点",
+}
+
+// BypassFlags 是各家 CLI 跳过权限确认或沙箱的参数（架构稿 §5 准入第 4 条：硬拒绝，owner 也批不过）。
+// 出处：claude --dangerously-skip-permissions、--permission-mode bypassPermissions；codex --dangerously-bypass-approvals-and-sandbox、
+// -a/--ask-for-approval never；gemini、kimi 等的 --yolo。
+var BypassFlags = []string{"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+	"--dangerously-bypass-approvals-and-sandbox", "--yolo"}
+
+// bypassValues 是「参数 + 取值」形式的绕过：参数名 → 被拒的取值（小写比较）。
+var bypassValues = map[string]string{
+	"--permission-mode":  "bypasspermissions",
+	"-a":                 "never",
+	"--ask-for-approval": "never",
+	"--approval-mode":    "yolo",
+	"--sandbox":          "danger-full-access",
+	"-s":                 "danger-full-access",
+}
+
+// CheckNoBypass 检查会进入启动命令的各个字段（工具、可执行文件、模型、标题）里有没有绕过权限的参数。
+// 按空白切词，认 `--flag` 与 `--flag=value` 两种写法。命中就硬拒绝。
+func CheckNoBypass(fields ...string) error {
+	for _, f := range fields {
+		words := strings.Fields(f)
+		for i, w := range words {
+			lw := strings.ToLower(w)
+			name, value, hasValue := strings.Cut(lw, "=")
+			for _, b := range BypassFlags {
+				if name == b {
+					return fmt.Errorf("拒绝绕过权限的参数 %s（硬拒绝，owner 也批不过）", w)
+				}
+			}
+			bad, ok := bypassValues[name]
+			if !ok {
+				continue
+			}
+			if !hasValue && i+1 < len(words) {
+				value, hasValue = strings.ToLower(words[i+1]), true
+			}
+			if hasValue && value == bad {
+				return fmt.Errorf("拒绝绕过权限的参数 %s %s（硬拒绝，owner 也批不过）", w, value)
+			}
+		}
+	}
+	return nil
 }

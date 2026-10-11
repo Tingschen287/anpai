@@ -29,7 +29,7 @@ func TestEveryWriteIntoASessionNeedsAPermit(t *testing.T) {
 		pos token.Pos
 	}
 	var sends []site
-	var allowsPos token.Pos
+	allowsPos := map[string]token.Pos{}
 	for _, f := range files {
 		for _, d := range f.Decls {
 			fn, ok := d.(*ast.FuncDecl)
@@ -45,8 +45,8 @@ func TestEveryWriteIntoASessionNeedsAPermit(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if fn.Name.Name == "SendMessage" && sel.Sel.Name == "Begin" && allowsPos == token.NoPos {
-					allowsPos = call.Pos()
+				if sendFuncs[fn.Name.Name] && sel.Sel.Name == "Begin" && allowsPos[fn.Name.Name] == token.NoPos {
+					allowsPos[fn.Name.Name] = call.Pos()
 				}
 				var args []ast.Expr
 				switch sel.Sel.Name {
@@ -66,21 +66,29 @@ func TestEveryWriteIntoASessionNeedsAPermit(t *testing.T) {
 			})
 		}
 	}
-	if len(sends) != 1 || sends[0].fn != "SendMessage" {
-		var where []string
-		for _, s := range sends {
-			where = append(where, s.fn+" @ "+fset.Position(s.pos).String())
+	// 往会话写字的上游调用只许出现在 sendFuncs 里，每个函数恰好一处（n051 加 SendToMain：转告主 agent 带 --defer-if-busy）
+	per := map[string][]site{}
+	var where []string
+	for _, s := range sends {
+		per[s.fn] = append(per[s.fn], s)
+		where = append(where, s.fn+" @ "+fset.Position(s.pos).String())
+	}
+	if len(sends) != len(sendFuncs) {
+		t.Fatalf("往会话写字的上游调用应当恰好 %d 处（%v 各一处），实际：%v", len(sendFuncs), sendFuncs, where)
+	}
+	for name := range sendFuncs {
+		if len(per[name]) != 1 {
+			t.Fatalf("%s 里应恰好一处 session send，实际：%v", name, where)
 		}
-		t.Fatalf("往会话写字的上游调用应当恰好一处、在 SendMessage 里，实际：%v", where)
+		if allowsPos[name] == token.NoPos || allowsPos[name] > per[name][0].pos {
+			t.Errorf("%s 必须在执行 session send 之前核对并登记许可（Permit.Begin）", name)
+		}
+		m, ok := reflect.TypeOf(&Client{}).MethodByName(name)
+		if !ok || m.Type.NumIn() < 3 || m.Type.In(2) != reflect.TypeOf(lease.Permit{}) {
+			t.Errorf("%s 的第二个参数必须是 lease.Permit", name)
+		}
 	}
-	if allowsPos == token.NoPos || allowsPos > sends[0].pos {
-		t.Error("SendMessage 必须在执行 session send 之前核对并登记许可（Permit.Begin）")
-	}
-	m, ok := reflect.TypeOf(&Client{}).MethodByName("SendMessage")
-	if !ok || m.Type.NumIn() < 3 || m.Type.In(2) != reflect.TypeOf(lease.Permit{}) {
-		t.Error("SendMessage 的第二个参数必须是 lease.Permit")
-	}
-	m, ok = reflect.TypeOf(&Client{}).MethodByName("DeliverAnswer")
+	m, ok := reflect.TypeOf(&Client{}).MethodByName("DeliverAnswer")
 	if !ok || m.Type.NumIn() < 3 || m.Type.In(2) != reflect.TypeOf(lease.Permit{}) {
 		t.Error("DeliverAnswer 的第二个参数必须是 lease.Permit")
 	}
@@ -192,3 +200,6 @@ func TestSendMessageReportsUnconfirmedDeliverySeparately(t *testing.T) {
 		}
 	}
 }
+
+// sendFuncs 是允许往会话写字的函数：每个都必须先核对登记许可。
+var sendFuncs = map[string]bool{"SendMessage": true, "SendToMain": true}

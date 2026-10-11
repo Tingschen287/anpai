@@ -44,6 +44,9 @@ type AgentDef struct {
 	Tool   string     `yaml:"tool" json:"tool"`     // agent-deck 的工具名
 	Binary string     `yaml:"binary" json:"binary"` // 用来检查是否已安装、取版本
 	Models []ModelDef `yaml:"models" json:"models"`
+	// Agent：不是 agent-deck 内置工具的自定义 agent（例如 grok、kimi）要显式声明 agent: true，
+	// 才确认它会把任务说明当任务读，而不是当命令执行（agentdeck.CheckTakesTaskText，n051）。
+	Agent bool `yaml:"agent,omitempty" json:"agent,omitempty"`
 }
 
 // Envelope 是预算包络（架构稿 §5、O5）。
@@ -91,11 +94,11 @@ func DefaultAgents() []AgentDef {
 			{"claude-opus-5-5", Frontier}, {"claude-fable-5-1", Frontier}, {"claude-sonnet-5", Balanced}, {"claude-haiku-4-5", Economy}}},
 		{ID: "codex", Name: "Codex", Tool: "codex", Binary: "codex", Models: []ModelDef{
 			{"gpt-6.1-sol", Frontier}, {"gpt-5.6-terra", Balanced}, {"gpt-5.6-luna", Economy}}},
-		{ID: "grok", Name: "Grok Build", Tool: "grok", Binary: "grok", Models: []ModelDef{
+		{ID: "grok", Name: "Grok Build", Tool: "grok", Binary: "grok", Agent: true, Models: []ModelDef{
 			{"grok-4.6", Balanced}, {"grok-4.5", Economy}}},
 		{ID: "opencode", Name: "OpenCode", Tool: "opencode", Binary: "opencode", Models: []ModelDef{
 			{"opencode/muse-spark-1.3-contributor-free", Frontier}}},
-		{ID: "kimi", Name: "Kimi Code", Tool: "kimi", Binary: "kimi", Models: []ModelDef{
+		{ID: "kimi", Name: "Kimi Code", Tool: "kimi", Binary: "kimi", Agent: true, Models: []ModelDef{
 			{"kimi-code/k3", Balanced}, {"kimi-for-coding", Economy}}},
 	}
 }

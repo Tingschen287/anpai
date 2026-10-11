@@ -41,6 +41,41 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 	// 不等的话消息可能落在 CLI 还没就绪的窗口里。超时由 Client.Timeout 兜着。
 	out, err := c.execWithStdin(ctx, strings.NewReader(message),
 		"session", "send", sessionID, "--message-file", "-", "--json")
+	return sendResult(sessionID, out, err, false)
+}
+
+// SendToMain 给主 agent 送一条子 agent 的汇报（架构稿 §14.4 第 1 条，n051）：带 --defer-if-busy，
+// 主 agent 正在回答就等它这一轮结束，最多等 MainDeferTimeout。还在忙就返回 ErrTargetBusy——上游在打字之前就放弃了，
+// 什么都没送，调用方稍后再试。等的时候 deckd 持着中间窗格的锁（送前关输入、送后再放开），所以只等一小会儿。
+// 与 SendMessage 一样必须带许可、先核对登记再调上游（TestEveryWriteIntoASessionNeedsAPermit）。
+func (c *Client) SendToMain(ctx context.Context, p lease.Permit, sessionID, message string) error {
+	if sessionID == "" {
+		return fmt.Errorf("没有会话号，无法投递消息")
+	}
+	release, err := p.Begin(sessionID)
+	if err != nil {
+		return fmt.Errorf("不投递：%w", err)
+	}
+	defer release()
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("消息是空的，不投递")
+	}
+	out, err := c.execWithStdin(ctx, strings.NewReader(message),
+		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", MainDeferTimeout)
+	return sendResult(sessionID, out, err, true)
+}
+
+// MainDeferTimeout 是 SendToMain 每次最多等主 agent 结束这一轮的时间（上游 --defer-timeout）。
+const MainDeferTimeout = "10s"
+
+// ErrTargetBusy：--defer-if-busy 等到时限对方还在忙，上游没有投递（session_cmd.go:2825、internal/send/deferbusy.go:80）。
+var ErrTargetBusy = errors.New("对方还在回答，这次没送（稍后再试）")
+
+// deferBusyMarker 是上游 WaitUntilNotBusy 超时报错的前缀。
+const deferBusyMarker = "defer-if-busy: target still busy"
+
+// sendResult 按上游回执判断送达。
+func sendResult(sessionID string, out []byte, err error, deferIfBusy bool) error {
 	var rep struct {
 		Delivery  string `json:"delivery"`
 		Submitted *bool  `json:"submitted"`
@@ -59,6 +94,10 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 			detail += "（delivery=" + rep.Delivery + "）"
 		}
 		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: detail}
+	}
+	// --defer-if-busy 等到时限对方还忙：上游在打字之前就退出了，什么都没送
+	if deferIfBusy && jsonErr == nil && strings.Contains(rep.Error, deferBusyMarker) {
+		return ErrTargetBusy
 	}
 	// 上游失败时 --json 的输出里有 delivery 字段（上游 session_cmd.go:3056-3087）。
 	// delivery=typed：正文到了会话画面，但没有证据说明对方接了这一轮——上游按失败退出（issue #1793），
