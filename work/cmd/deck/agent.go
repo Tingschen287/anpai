@@ -43,7 +43,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 	case "whoami":
 		err = c.Get(ctx, "/v1/whoami", &out)
 	case "spawn":
-		out, err = agentSpawn(ctx, c, rest)
+		out, err = agentSpawn(ctx, c.WithTimeout(deckclient.LongTimeout), rest)
 	case "list":
 		err = c.Get(ctx, "/v1/sessions", &out)
 	case "output":
@@ -56,7 +56,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 		file := fs.String("text-file", "", "从文件读内容（- 为标准输入）")
 		fs.Parse(rest[1:])
 		body := textArg(*text, *file)
-		err = c.Do(ctx, "POST", "/v1/agents/"+url.PathEscape(id)+"/send", map[string]string{"text": body}, &out)
+		err = c.WithTimeout(deckclient.LongTimeout).Do(ctx, "POST", "/v1/agents/"+url.PathEscape(id)+"/send", map[string]string{"text": body}, &out)
 	case "escalate":
 		out, err = agentEscalate(ctx, c, rest)
 	case "decisions":
@@ -75,7 +75,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 		if *project == "" {
 			fail("要给 --project")
 		}
-		err = c.Do(ctx, "POST", "/v1/projects/"+url.PathEscape(*project)+"/main", map[string]string{"request_id": newRequestID()}, &out)
+		err = c.WithTimeout(deckclient.LongTimeout).Do(ctx, "POST", "/v1/projects/"+url.PathEscape(*project)+"/main", map[string]string{"request_id": newRequestID()}, &out)
 	default:
 		agentUsage()
 	}

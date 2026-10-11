@@ -133,8 +133,13 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
 	}
-	s.runSpawn(w, r.Context(), c, plan, b.Exception, b.GraphNode)
+	s.runSpawn(w, detached(r), c, plan, b.Exception, b.GraphNode)
 }
+
+// detached：启动与送 brief、给子 agent 发话不随调用方断开而中止（n051 端到端实测：真实 Claude Code 起来加送 brief 超过
+// 客户端 30 秒，客户端一断，请求的 context 取消，正在进行的 session send 被杀，会话留下却没有 brief）。
+// 每次调用 agent-deck 仍有自己的上限（agentdeck.Client.Timeout）。
+func detached(r *http.Request) context.Context { return context.WithoutCancel(r.Context()) }
 
 // planSpawn 解析 agent 与模型，做全部硬拒绝。
 func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spawnBody) (spawnPlan, error) {
@@ -453,7 +458,7 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 	x := deckstore.Session{Project: p.ID, Role: "main", Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model, Tier: res.Tier,
 		Title: title, CreatedBy: "owner", RequestID: reqID, Dir: p.Path, TaskSHA256: TaskSHA256(brief),
 		ArgsSHA256: SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, title, p.Path, "")}
-	s.runSpawn(w, r.Context(), c, spawnPlan{project: p, agent: a, x: x, brief: brief}, "", "")
+	s.runSpawn(w, detached(r), c, spawnPlan{project: p, agent: a, x: x, brief: brief}, "", "")
 }
 
 // agentTarget 取 {id} 指的会话，并检查调用者能不能对它操作：主 agent 只能对本项目的子 agent；owner 任意。
@@ -534,7 +539,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "现在不能给它发话：%v", err)
 		return
 	}
-	if err := s.agents.upstream.SendMessage(r.Context(), permit, x.AgentDeckID, b.Text); err != nil {
+	if err := s.agents.upstream.SendMessage(detached(r), permit, x.AgentDeckID, b.Text); err != nil {
 		if agentdeck.IsDeliveryUnconfirmed(err) {
 			writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
 			return

@@ -28,6 +28,7 @@ type fakeUp struct {
 	sendErr   error
 	mainErr   error
 	output    string
+	sendHook  func(ctx context.Context) // 测试：送消息时先调它（模拟上游等 CLI 就绪）
 }
 
 func (f *fakeUp) Launch(_ context.Context, req agentdeck.LaunchRequest) (agentdeck.LaunchResult, error) {
@@ -49,9 +50,15 @@ func (f *fakeUp) ListSessions(context.Context) ([]agentdeck.ListedSession, error
 	}
 	return out, nil
 }
-func (f *fakeUp) SendMessage(_ context.Context, p lease.Permit, id, msg string) error {
+func (f *fakeUp) SendMessage(ctx context.Context, p lease.Permit, id, msg string) error {
 	if err := p.Allows(id); err != nil {
 		return err
+	}
+	if f.sendHook != nil {
+		f.sendHook(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
