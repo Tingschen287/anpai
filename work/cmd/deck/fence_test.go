@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -51,7 +52,7 @@ func TestFenceWaitsUntilDeckdConfirms(t *testing.T) {
 	if got := n.Load(); got != 4 {
 		t.Fatalf("应等到第 4 次（deckd 确认）才返回：%d 次", got)
 	}
-	if len(shown) != 3 || !strings.Contains(shown[0], "等 deckd 做完进行中的操作") {
+	if len(shown) != 3 || !strings.Contains(shown[0], "等 deckd 确认没有进行中的操作") {
 		t.Fatalf("没确认的每一次都应在中间显示原因：%v", shown)
 	}
 	if time.Since(start) < 400*time.Millisecond {
@@ -67,6 +68,10 @@ func TestFenceWaitsUntilDeckdConfirms(t *testing.T) {
 func TestFenceReturnsWhenDeckdIsNotRunning(t *testing.T) {
 	shortFence(t)
 	d := t.TempDir()
+	// deckd 起来过、已经退出：单实例锁文件还在，但没人持有
+	if err := os.WriteFile(filepath.Join(d, "deckd.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	dead := filepath.Join(d, "dead.sock")
 	ln, err := net.Listen("unix", dead)
 	if err != nil {
@@ -83,7 +88,58 @@ func TestFenceReturnsWhenDeckdIsNotRunning(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("%s：deckd 没在运行应立刻返回", filepath.Base(sock))
+			t.Fatalf("%s：单实例锁空闲（deckd 没在运行）应立刻返回", filepath.Base(sock))
 		}
+	}
+}
+
+// n049 评审 4：连不上 deckd 但单实例锁还被持有（deckd 正在关闭、手上还有请求），或锁文件根本不存在
+// （deckd 还没起来），都不能放行；锁一放开就放行。
+func TestFenceWaitsWhileDeckdLockIsHeldOrMissing(t *testing.T) {
+	shortFence(t)
+	d := t.TempDir()
+	sock := filepath.Join(d, "deckd.sock") // 不存在：连接失败
+	shown := make(chan string, 64)
+	done := make(chan struct{})
+	go func() {
+		fence(deckclient.New(sock), filepath.Join(d, "center.log"), func(m string) {
+			select {
+			case shown <- m:
+			default:
+			}
+		})
+		close(done)
+	}()
+	waitShown := func(want string) {
+		t.Helper()
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case m := <-shown:
+				if strings.Contains(m, want) {
+					return
+				}
+			case <-done:
+				t.Fatalf("不该放行（期待提示 %q）", want)
+			case <-deadline:
+				t.Fatalf("没看到提示 %q", want)
+			}
+		}
+	}
+	waitShown("还没起来") // 锁文件不存在
+	lock := filepath.Join(d, "deckd.lock")
+	f, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	waitShown("还被持有") // deckd 正在关闭
+	f.Close()         // deckd 退出：锁释放
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("锁释放后应放行")
 	}
 }

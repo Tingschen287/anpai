@@ -22,6 +22,51 @@ import (
 // SocketPath 是 deckd 的 socket 路径。
 func SocketPath(d deckstore.Dirs) string { return filepath.Join(d.State, "deckd.sock") }
 
+// LockPathForSocket 是 deckd 的单实例锁文件：与 socket 同目录。
+func LockPathForSocket(sock string) string { return filepath.Join(filepath.Dir(sock), "deckd.lock") }
+
+// LockState 是探测 deckd 单实例锁的结果。
+type LockState int
+
+const (
+	LockMissing LockState = iota // 锁文件不存在：deckd 还没在这个状态目录起来过（或目录不对）
+	LockFree                     // 锁空闲：没有 deckd 进程持有它（锁随 deckd 退出才释放，见 Run）
+	LockHeld                     // 锁被持有：deckd 在运行（可能正在关闭，手上还有请求）
+)
+
+// ProbeLock 探测 deckd 的单实例锁，不创建锁文件。拿得到锁时立刻放开；deckd 启动时抢锁会稍等重试，
+// 不会因为恰好撞上这一瞬而起不来（n049 评审 4：「deckd 没在运行」要以锁为准，不能只凭 socket 不在或连接被拒）。
+func ProbeLock(path string) (LockState, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return LockMissing, nil
+	}
+	if err != nil {
+		return LockMissing, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return LockHeld, nil
+		}
+		return LockMissing, err
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return LockFree, nil
+}
+
+// flockRetry 抢单实例锁；被占着时稍等重试（别的进程的 ProbeLock 只持锁一瞬），总共等 wait。
+func flockRetry(f *os.File, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil || !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // Run 启动 deckd，直到 ctx 结束。
 //
 // 启动顺序：状态目录 0700 → deckd 单实例锁（进程生命周期）→ profile 写入者锁（与旧 work 互斥，架构稿 §3）→
@@ -41,7 +86,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		return err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flockRetry(lf, 2*time.Second); err != nil {
 		return fmt.Errorf("deckd 已经在运行（%s 被占用）", lockPath)
 	}
 	wl, err := writerlock.Acquire(cfg.Profile, "deckd")
@@ -104,9 +149,11 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		hs.Shutdown(sctx)
+		closeView(view)
 		os.Remove(sock)
 		return nil
 	case err := <-errc:
+		closeView(view)
 		os.Remove(sock)
 		return err
 	}
@@ -162,5 +209,13 @@ func graphProgress(script string) ProgressFunc {
 			out.Budgets = append(out.Budgets, bv)
 		}
 		return out, nil
+	}
+}
+
+// closeView 在放单实例锁之前调用：Shutdown 超时后可能还有视图请求在跑，等它做完，之后的一律拒绝。
+// 这样锁一空闲，就不可能再有操作作用到中间 client 上（deck center 的栅栏以此为准，n049 评审 4）。
+func closeView(view *viewstate.Machine) {
+	if view != nil {
+		view.Close()
 	}
 }

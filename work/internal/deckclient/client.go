@@ -15,6 +15,8 @@ import (
 // Client 经 unix socket 调 deckd。
 type Client struct {
 	hc *http.Client
+	// Socket 是 deckd 的 unix socket 路径（deck center 的栅栏据此找到同目录的单实例锁）。
+	Socket string
 }
 
 // New 建客户端。
@@ -22,7 +24,7 @@ func New(socket string) *Client {
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
 	}}
-	return &Client{hc: &http.Client{Transport: tr, Timeout: 30 * time.Second}}
+	return &Client{hc: &http.Client{Transport: tr, Timeout: 30 * time.Second}, Socket: socket}
 }
 
 // Error 是 deckd 返回的错误。

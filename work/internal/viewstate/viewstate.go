@@ -57,6 +57,11 @@ const NoClient = -1
 // 不作用到新 client 上。
 var ErrStaleClient = errors.New("通知来自已经不在中间的旧 client")
 
+// ErrRestoreUnconfirmed 表示命令落到了共用 tty 的新 client 上，且没能确认把新 client 还原成起点（deck-idle、只读）：
+// 新 client 可能停在焦点会话上、输入开着。总是与 ErrStaleClient 一起出现。遇到它不交还写入权、不恢复自动派送
+// （n049 评审 4，n051 承接）。
+var ErrRestoreUnconfirmed = errors.New("落到新 client 上的命令没能确认还原：新 client 的输入状态不确定")
+
 // ErrPartial 表示操作做到一半停下，但已经写下了不可撤销的部分（lease 交还已落盘），或中间已经切了过去。
 // 状态按操作的目标补齐（焦点、打开集合一致），没做完的是 Cause（例如中间 client 被替换、放开输入失败）。
 // 调用方按「已完成、但有后续问题」处理；中间 client 被替换时由新 client 的重连通知收尾（n049 评审 3 B1-B）。
@@ -142,6 +147,7 @@ type Machine struct {
 	focus     string
 	layoutGen int
 	clientGen int
+	closed    bool // Close 之后不再接受操作
 	taken     map[string]taken
 	// TakeoverWait 是接管时等待在途派送完成的上限。
 	TakeoverWait time.Duration
@@ -212,6 +218,9 @@ func (m *Machine) canon(id string) (Target, error) {
 // writable 汇总两个存储的停止状态（n050 评审 R3）。入口查一次；操作中途做了可能失败的写之后、
 // 切换或放开输入之前再查一次。
 func (m *Machine) writable() error {
+	if m.closed {
+		return ErrClosed
+	}
 	if err := m.stopped(); err != nil {
 		return fmt.Errorf("存储已停止，不改变中间窗格与写入权：%w", err)
 	}
@@ -375,6 +384,17 @@ func (m *Machine) Fence() {
 	m.mu.Unlock()
 }
 
+// ErrClosed 表示 deckd 正在退出，状态机不再接受操作。
+var ErrClosed = errors.New("deckd 正在退出，不再改变中间窗格与写入权")
+
+// Close 让状态机不再接受操作：等正在进行的那个做完（拿一次锁），之后的一律返回 ErrClosed。
+// deckd 退出、放单实例锁之前调用（n049 评审 4）。
+func (m *Machine) Close() {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+}
+
 // Resync 在中间 client 新建之后（deck center 首次连上、或 deckd 重启后）调用：client 代次 +1，
 // 按当前焦点重做一次切换（先只读确认、再切、再按目标放开），让新 client 显示的与 deckd 记的一致。
 // 与 CenterReset 不同，它不隐藏任何会话（n049）。client 的核对同 CenterReset。
@@ -455,6 +475,7 @@ func (m *Machine) switchLocked(target string) error {
 		tmux = t.Tmux
 	}
 	if err := m.center.Switch(tmux); err != nil {
+		m.protectUnconfirmed(err)
 		if handedBack {
 			m.focus = target
 			return &ErrPartial{Done: "已交还 " + prev, Cause: fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)}
@@ -464,6 +485,7 @@ func (m *Machine) switchLocked(target string) error {
 	m.focus = target
 	if target != "" && t.Role == "main" && t.BriefConfirmed {
 		if err := m.center.SetReadOnly(false); err != nil {
+			m.protectUnconfirmed(err)
 			if errors.Is(err, ErrStaleClient) && !handedBack {
 				m.focus = prev // 只动过内存与已不在的旧 client：整体撤回
 				return err
@@ -477,6 +499,7 @@ func (m *Machine) switchLocked(target string) error {
 
 func (m *Machine) closeInputLocked() error {
 	if err := m.center.SetReadOnly(true); errors.Is(err, ErrStaleClient) {
+		m.protectUnconfirmed(err)
 		return err // 绑定的 client 已被替换：不是「关不上」，什么都没做
 	} else if err != nil {
 		m.notify("中间窗格输入已关闭（异常）：设置只读失败")
@@ -583,6 +606,12 @@ func (m *Machine) openTakenLocked(session string, t Target, note string) error {
 		return fmt.Errorf("%v；输入保持关闭，会话保持接管、自动派送暂停", err)
 	}
 	if err := m.center.SetReadOnly(false); err != nil {
+		if errors.Is(err, ErrRestoreUnconfirmed) {
+			// 放开输入的命令落到了新 client 上，又没能确认还原：新 client 可能在这个会话上、输入开着。
+			// 不交还：写入权留在 owner 手上，自动派送保持暂停，等 owner 在中间确认后重新接管或交还
+			m.protectUnconfirmed(err)
+			return fmt.Errorf("%w；接管没有生效，保持接管、自动派送暂停", err)
+		}
 		if errors.Is(err, ErrStaleClient) {
 			// 新 client 一连上就是只读、旧的已不在：输入从没放开过。按交还收回（带画面摘要），
 			// 不留一个没生效的接管；交还不成就保持接管与暂停（既有的安全恢复）（n049 评审 3 B1-B）
@@ -747,4 +776,29 @@ func remove(xs []string, x string) []string {
 		}
 	}
 	return out
+}
+
+// protectUnconfirmed：命令落到新 client 上且没能确认还原（ErrRestoreUnconfirmed）时调用。新 client 可能停在焦点会话上、
+// 输入开着：焦点是子 agent，就把写入权留在（或收到）owner 手上、自动派送暂停，等 owner 处理；任何情况都发通知说明原因。
+// 其他错误什么都不做。调用方持锁。
+func (m *Machine) protectUnconfirmed(err error) {
+	if !errors.Is(err, ErrRestoreUnconfirmed) {
+		return
+	}
+	session := m.focus
+	t, ok := m.lookup(session)
+	note := "中间 client 被替换，且没能确认把新 client 还原成只读：它可能还开着输入。请在中间确认显示的是什么，再重新接管或交还"
+	if ok && t.Role == "sub" {
+		if tk, held := m.taken[session]; held {
+			tk.writable = false
+			m.taken[session] = tk
+			note = title(t) + "：" + note + "；写入权保持在你手上，自动派送暂停"
+		} else if lerr := m.leases.OwnerTakeover(session, "deck"); lerr == nil {
+			m.taken[session] = taken{since: m.now()}
+			note = title(t) + "：" + note + "；已把写入权收到你手上，自动派送暂停"
+		} else {
+			note = title(t) + "：" + note + "；收回写入权失败（" + lerr.Error() + "），请立刻处理"
+		}
+	}
+	m.notify(note)
 }

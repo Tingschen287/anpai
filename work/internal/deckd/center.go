@@ -195,11 +195,18 @@ func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentde
 	if st, err := agentdeck.ClientState(ctx, c.AgentSocket, now.TTY); err == nil && st.PID == now.PID && !st.ReadOnly {
 		errs = append(errs, agentdeck.ToggleClientReadOnly(ctx, c.AgentSocket, now.TTY, st.Session))
 	}
-	note := "已把新 client 还原到起点"
-	if err := errors.Join(errs...); err != nil {
-		note = "还原新 client 失败：" + err.Error()
+	// 还原要读回确认：还是这个新 client、在 deck-idle、只读，才算回到起点（n049 评审 4：还原命令可能失败）
+	st, err := agentdeck.ClientState(ctx, c.AgentSocket, now.TTY)
+	if err == nil && st.PID == now.PID && st.Session == viewstate.Idle && st.ReadOnly {
+		return fmt.Errorf("%w（%s时中间 client 被替换了：%d → %d；已把新 client 还原到起点）", viewstate.ErrStaleClient, what, old.PID, now.PID)
 	}
-	return fmt.Errorf("%w（%s时中间 client 被替换了：%d → %d；%s）", viewstate.ErrStaleClient, what, old.PID, now.PID, note)
+	why := errors.Join(append(errs, err)...)
+	state := "读不回"
+	if err == nil {
+		state = fmt.Sprintf("client %d 在 %s、只读 %v", st.PID, st.Session, st.ReadOnly)
+	}
+	return fmt.Errorf("%w：%w（%s时中间 client 被替换了：%d → %d；还原后%s；%v）",
+		viewstate.ErrStaleClient, viewstate.ErrRestoreUnconfirmed, what, old.PID, now.PID, state, why)
 }
 
 // LastInput 是 owner 最后一次在中间打字的时间（client_activity，精度 1 秒）。

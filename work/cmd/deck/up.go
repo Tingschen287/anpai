@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -180,22 +179,40 @@ func center(dirs deckstore.Dirs, args []string) {
 //   - deckd 根本没在运行（连接被拒、socket 不存在）：不可能有进行中的操作；
 //   - 其他情况（超时、deckd 忙、答非所问）都不能证明操作已结束：不起新 client，在中间显示原因，每秒再试。
 func fence(c *deckclient.Client, logPath string, show func(string)) {
+	lock := deckd.LockPathForSocket(c.Socket)
 	for i := 0; ; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), fenceTimeout)
-		var out any
+		var out struct {
+			Fenced bool `json:"fenced"`
+		}
 		err := c.Do(ctx, "POST", "/v1/view", map[string]any{"op": "fence"}, &out)
 		cancel()
-		if err == nil {
+		if err == nil && out.Fenced {
 			return
 		}
-		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
-			centerLog(logPath, "deckd 没在运行，不用等进行中的操作：%v", err)
-			return
+		var why string
+		switch {
+		case err == nil:
+			why = "deckd 的回答没有确认（fenced 不是 true）"
+		default:
+			// 连不上不等于没有进行中的操作：deckd 关闭时先关监听、再等手上的请求。以单实例锁为准（n049 评审 4）
+			st, perr := deckd.ProbeLock(lock)
+			switch {
+			case perr == nil && st == deckd.LockFree:
+				centerLog(logPath, "deckd 没在运行（单实例锁已释放），不用等进行中的操作：%v", err)
+				return
+			case perr != nil:
+				why = fmt.Sprintf("探测 deckd 单实例锁失败：%v（%v）", perr, err)
+			case st == deckd.LockHeld:
+				why = fmt.Sprintf("deckd 的单实例锁还被持有（可能正在关闭、手上还有请求）（%v）", err)
+			default:
+				why = fmt.Sprintf("deckd 还没起来（%s 不存在）（%v）", lock, err)
+			}
 		}
 		if i == 0 {
-			centerLog(logPath, "重连前等 deckd 做完进行中的操作，还没确认：%v（不起新 client，每秒再试）", err)
+			centerLog(logPath, "重连前等 deckd 确认没有进行中的操作，还没确认：%s（不起新 client，每秒再试）", why)
 		}
-		show("等 deckd 做完进行中的操作再重连中间窗格…（" + deckstore.Clean(err.Error(), 160) + "）")
+		show("等 deckd 确认没有进行中的操作再重连中间窗格…（" + deckstore.Clean(why, 160) + "）")
 		time.Sleep(fenceRetry)
 	}
 }
