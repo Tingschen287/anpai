@@ -54,6 +54,8 @@ type Server struct {
 	callerFn func(*http.Request) Caller
 	// activity 是 agent-deck 会话状态的缓存（n049，侧栏状态圆点）；没配上游地址时为 nil。
 	activity *activityCache
+	// agents 是开子 agent、发话、转告主 agent 需要的依赖（n051）；没接上时相关接口返回 503。
+	agents *agentsDeps
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
@@ -87,6 +89,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/panels", s.getPanels)
 	mux.HandleFunc("POST /v1/panels/{name}", s.setPanel)
 	mux.HandleFunc("GET /v1/events", s.events)
+	mux.HandleFunc("POST /v1/agents", s.postAgents)
+	mux.HandleFunc("GET /v1/agents/{id}/output", s.getAgentOutput)
+	mux.HandleFunc("POST /v1/agents/{id}/send", s.postAgentSend)
+	mux.HandleFunc("POST /v1/projects/{id}/main", s.postMain)
+	mux.HandleFunc("POST /v1/reports", s.postReport)
 	return mux
 }
 
@@ -457,6 +464,14 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		storeErr(w, err)
 		return
+	}
+	// Codex trust 批准即记住（§14.3，n051）；记不下就如实报出，决定转为 failed
+	if err := s.executeCodexTrust(d); err != nil {
+		fail(w, http.StatusServiceUnavailable, "已批准，但记不下授权：%v", err)
+		return
+	}
+	if got, ok := s.store.Decision(d.ID); ok {
+		d = got
 	}
 	writeJSON(w, http.StatusOK, d)
 }

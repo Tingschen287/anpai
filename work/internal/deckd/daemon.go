@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
@@ -99,13 +100,14 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	if err != nil {
 		return err
 	}
+	// 写入权记账：中间窗格的接管交还与开子 agent 后的自动派送都用它（n051 起总是打开）
+	leases, err := leaseStore(cfg.Dirs)
+	if err != nil {
+		return err
+	}
+	defer leases.Close()
 	var view *viewstate.Machine
 	if center != nil {
-		leases, err := leaseStore(cfg.Dirs)
-		if err != nil {
-			return err
-		}
-		defer leases.Close()
 		// 注册表 key 与 agent-deck id 都认，统一成 agent-deck id（lease 与派送用的就是它，n050 评审 B3）
 		lookup := func(id string) (viewstate.Target, bool) {
 			x, ok := store.Session(id)
@@ -127,6 +129,17 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	if cfg.UpstreamAddr != "" {
 		srv.activity = newActivityCache(upstreamActivity(cfg.Profile, cfg.UpstreamAddr, cfg.UpstreamToken))
 		go srv.activity.run(ctx)
+	}
+	// 开子 agent、发话、转告主 agent（n051）：经 agent-deck 命令行
+	if up, err := agentdeck.NewClient(cfg.agentDeckBinary(), cfg.Profile, cfg.UpstreamAddr, cfg.UpstreamToken); err == nil {
+		var gs GraphStartFunc
+		if cfg.Projectctl != "" {
+			gs = projectctlGraphStart(cfg.Projectctl)
+		}
+		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		go srv.runReports(ctx)
+	} else {
+		store.Notify("", "deckd", "没接上 agent-deck，开子 agent 不可用："+err.Error(), "deckd")
 	}
 
 	sock := SocketPath(cfg.Dirs)
@@ -218,4 +231,12 @@ func closeView(view *viewstate.Machine) {
 	if view != nil {
 		view.Close()
 	}
+}
+
+// agentDeckBinary 是 agent-deck 可执行文件（环境变量 WORKDECK_AGENTDECK_BIN 可覆盖，与旧 work 一致）。
+func (c Config) agentDeckBinary() string {
+	if b := os.Getenv("WORKDECK_AGENTDECK_BIN"); b != "" {
+		return b
+	}
+	return "agent-deck"
 }

@@ -469,6 +469,14 @@ func (s *Store) SetSessionStatus(key, status, note string) error {
 	})
 }
 
+// SetGraphAttempt 记下 Graph 通道开工后账本给的 attempt（n051）。
+func (s *Store) SetGraphAttempt(key, node string, attempt int) error {
+	return s.setSession(key, func(x *Session) error {
+		x.Graph = &GraphLink{Node: node, Attempt: attempt}
+		return nil
+	})
+}
+
 // ConfirmBrief 记下主 agent 的第一条 brief 已确认送达。
 func (s *Store) ConfirmBrief(key string) error {
 	return s.setSession(key, func(x *Session) error { x.BriefConfirmed = true; return nil })

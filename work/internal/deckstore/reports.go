@@ -92,10 +92,11 @@ func (s *Store) PendingReports(main string) []Report {
 
 var completionRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
-// MarkReport 推进汇报状态：pending → sending → delivered / unconfirmed。sending 要在真正调发送之前落盘，
+// MarkReport 推进汇报状态：pending → sending → delivered / unconfirmed（或确认没送时回到 pending）。sending 要在真正调发送之前落盘，
 // 这样「已发送但结果没落盘」时重启会看到 sending，并标为 unconfirmed，不重放（n050 评审建议）。
 func (s *Store) MarkReport(id, state string) error {
-	next := map[string]string{ReportSending: ReportPending, ReportDelivered: ReportSending, ReportUnconfirmed: ReportSending}
+	// sending → pending 只用于「上游确认什么都没送」（主 agent 正在回答，--defer-if-busy 超时，n051）
+	next := map[string]string{ReportSending: ReportPending, ReportDelivered: ReportSending, ReportUnconfirmed: ReportSending, ReportPending: ReportSending}
 	from, ok := next[state]
 	if !ok {
 		return fmt.Errorf("汇报状态只能推进到 sending、delivered 或 unconfirmed")
