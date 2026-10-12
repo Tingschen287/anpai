@@ -98,12 +98,15 @@ func TestCheckNoBypass(t *testing.T) {
 		"claude --dangerously-skip-permissions", "--DANGEROUSLY-SKIP-PERMISSIONS", "codex --dangerously-bypass-approvals-and-sandbox",
 		"gemini --yolo", "--yolo=true", "claude --permission-mode bypassPermissions", "--permission-mode=bypassPermissions",
 		"codex -a never", "codex --ask-for-approval=never", "codex --sandbox danger-full-access", "gemini --approval-mode yolo",
+		// n051 评审 1 B1：带空格、带引号的 codex -c 完整赋值
+		`codex -c "approval_policy = \"never\""`, `approval_policy = "never"`, `sandbox_mode = 'danger-full-access'`, "-c APPROVAL_POLICY=NEVER",
 	} {
 		if err := CheckNoBypass("claude", bad); err == nil {
 			t.Errorf("应拒绝 %q", bad)
 		}
 	}
-	for _, ok := range []string{"claude", "claude-opus-5-5", "codex -a on-request", "--permission-mode plan", "--sandbox workspace-write", "主 agent：整理 yolo 文档"} {
+	for _, ok := range []string{"claude", "claude-opus-5-5", "codex -a on-request", "--permission-mode plan", "--sandbox workspace-write", "主 agent：整理 yolo 文档",
+		`codex -c "approval_policy = \"on-request\""`, `sandbox_mode = "workspace-write"`} {
 		if err := CheckNoBypass(ok); err != nil {
 			t.Errorf("不该拒绝 %q：%v", ok, err)
 		}

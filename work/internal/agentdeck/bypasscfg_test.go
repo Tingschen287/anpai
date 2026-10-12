@@ -36,6 +36,7 @@ func TestUpstreamConfigBypass(t *testing.T) {
 		{"codex 的 -c 覆盖", "codex", "[codex]\ncommand = \"codex -c approval_policy=never\"\n", false},
 		{"codex 的 --config= 覆盖", "codex", "[codex]\ncommand = \"codex --config=sandbox_mode=danger-full-access\"\n", false},
 		{"codex 的其他 -c 覆盖不算", "codex", "[codex]\ncommand = \"codex -c model_reasoning_effort=high\"\n", true},
+		{"带空格的 codex -c 覆盖", "codex", "[codex]\nextra_args = [\"-c\", \"approval_policy = \\\"never\\\"\"]\n", false},
 		{"自定义工具 dangerous_mode", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = true\n", false},
 		{"自定义工具 dangerous_mode = false", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = false\n", true},
 		{"MCP 的 npx -y 不算", "claude", safe + "[mcps.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"@x/fs\"]\n", true},
@@ -94,6 +95,7 @@ func TestSessionProcessesBypass(t *testing.T) {
 	run("new-session", "-d", "-s", "good", "bash", "-c", "sleep 30")
 	// 参数名与取值分在两个 argv 元素里（bash -c 脚本之后的位置参数）
 	run("new-session", "-d", "-s", "split", "bash", "-c", "sleep 30; :", "x", "--permission-mode", "bypassPermissions")
+	run("new-session", "-d", "-s", "spaced", "bash", "-c", "sleep 30; :", "x", "-c", `approval_policy = "never"`)
 	time.Sleep(300 * time.Millisecond)
 	ctx := context.Background()
 	if err := CheckSessionNoBypass(ctx, sock, "bad"); err == nil {
@@ -101,6 +103,9 @@ func TestSessionProcessesBypass(t *testing.T) {
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "child"); err == nil {
 		t.Fatal("子进程带绕过参数应报错")
+	}
+	if err := CheckSessionNoBypass(ctx, sock, "spaced"); err == nil {
+		t.Fatal("带空格的 codex -c 完整赋值也应报错（评审 1 B1）")
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "split"); err == nil {
 		t.Fatal("参数名与取值分在两个 argv 元素里也应报错")

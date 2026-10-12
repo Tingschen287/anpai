@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // 本文件是 Work Deck 对 upstream agent-deck 依赖的机器可读清单：子命令白名单在 client.go，
@@ -792,6 +793,18 @@ var bypassValues = map[string]string{
 // 按空白切词，认 `--flag` 与 `--flag=value` 两种写法。命中就硬拒绝。
 func CheckNoBypass(fields ...string) error {
 	for _, f := range fields {
+		// codex 配置覆盖的完整赋值：去掉空白与引号后整段比对（n051 评审 1 B1：-c 'approval_policy = "never"' 按空白切词会漏掉）
+		compact := strings.ToLower(strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) || r == '"' || r == '\'' || r == '\\' {
+				return -1
+			}
+			return r
+		}, f))
+		for _, bad := range codexConfigBypass {
+			if strings.Contains(compact, bad) {
+				return fmt.Errorf("拒绝绕过权限的配置覆盖 %s（硬拒绝，owner 也批不过）", bad)
+			}
+		}
 		words := strings.Fields(f)
 		for i, w := range words {
 			lw := strings.ToLower(w)
