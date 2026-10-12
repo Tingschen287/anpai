@@ -512,19 +512,21 @@ func (s *Store) saveRegistry() error {
 type TrustGrant struct {
 	Project     string    `json:"project"`
 	Tool        string    `json:"tool"`
-	Dir         string    `json:"dir"`
+	ProjectDir  string    `json:"project_dir"` // 批准时的项目目录（n051 评审 1 B3：项目目录变化也要重新问，与工作目录分开绑定）
+	Dir         string    `json:"dir"`         // 实际工作目录
 	ToolPath    string    `json:"tool_path"`
 	ToolVersion string    `json:"tool_version"`
 	ApprovedAt  time.Time `json:"approved_at"`
 }
 
-// TrustValid 判断记住的授权是否仍有效：项目目录、工具路径或版本任一变化都失效（重新问）。
-func (s *Store) TrustValid(project, tool, dir, toolPath, toolVersion string) bool {
+// TrustValid 判断记住的授权是否仍有效：项目目录、实际工作目录、工具路径或版本任一变化都失效（重新问，§14.3）。
+// 旧记录没有项目目录，按不一致处理（重新问）。
+func (s *Store) TrustValid(project, tool, projectDir, dir, toolPath, toolVersion string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, g := range s.trust {
 		if g.Project == project && g.Tool == tool {
-			return g.Dir == dir && g.ToolPath == toolPath && g.ToolVersion == toolVersion
+			return g.ProjectDir != "" && g.ProjectDir == projectDir && g.Dir == dir && g.ToolPath == toolPath && g.ToolVersion == toolVersion
 		}
 	}
 	return false

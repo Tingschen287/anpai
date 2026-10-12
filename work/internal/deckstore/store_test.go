@@ -419,16 +419,24 @@ func TestOnlyCreatorCanCancel(t *testing.T) {
 
 func TestTrustInvalidatesOnDirOrToolChange(t *testing.T) {
 	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
-	s.GrantTrust(TrustGrant{Project: "deck", Tool: "codex", Dir: "/p", ToolPath: "/bin/codex", ToolVersion: "0.162.1"})
-	if !s.TrustValid("deck", "codex", "/p", "/bin/codex", "0.162.1") {
+	s.GrantTrust(TrustGrant{Project: "deck", Tool: "codex", ProjectDir: "/proj", Dir: "/p", ToolPath: "/bin/codex", ToolVersion: "0.162.1"})
+	if !s.TrustValid("deck", "codex", "/proj", "/p", "/bin/codex", "0.162.1") {
 		t.Fatal("同条件应有效")
 	}
 	for _, c := range [][3]string{{"/q", "/bin/codex", "0.162.1"}, {"/p", "/usr/bin/codex", "0.162.1"}, {"/p", "/bin/codex", "0.163.0"}} {
-		if s.TrustValid("deck", "codex", c[0], c[1], c[2]) {
+		if s.TrustValid("deck", "codex", "/proj", c[0], c[1], c[2]) {
 			t.Errorf("条件变化应失效：%v", c)
 		}
 	}
-	if ok, _ := s.RevokeTrust("deck", "codex"); !ok || s.TrustValid("deck", "codex", "/p", "/bin/codex", "0.162.1") {
+	// 项目目录变了：重新问（n051 评审 1 B3）；没记项目目录的旧记录也重新问
+	if s.TrustValid("deck", "codex", "/moved-proj", "/p", "/bin/codex", "0.162.1") {
+		t.Fatal("项目目录变了，授权应失效")
+	}
+	s.GrantTrust(TrustGrant{Project: "old", Tool: "codex", Dir: "/p", ToolPath: "/bin/codex", ToolVersion: "0.162.1"})
+	if s.TrustValid("old", "codex", "", "/p", "/bin/codex", "0.162.1") {
+		t.Fatal("没记项目目录的旧记录不算有效")
+	}
+	if ok, _ := s.RevokeTrust("deck", "codex"); !ok || s.TrustValid("deck", "codex", "/proj", "/p", "/bin/codex", "0.162.1") {
 		t.Error("撤销后应失效")
 	}
 }

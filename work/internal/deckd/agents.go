@@ -253,10 +253,10 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			fail(w, http.StatusBadRequest, "确认不了 %s 的可执行文件与版本（Codex trust 门要按它们记住授权）：%v", plan.agent.Binary, err)
 			return
 		}
-		if !s.store.TrustValid(x.Project, x.Tool, x.Dir, path, version) {
+		if !s.store.TrustValid(x.Project, x.Tool, p.Path, x.Dir, path, version) {
 			d, err := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCodexTrust,
 				Summary: fmt.Sprintf("启动 %s 会让上游整份改写 ~/.codex/config.toml（加入 %s 的信任）。批准后记住：同一项目、工具、目录、可执行文件与版本以后不再问", plan.agent.Name, x.Dir),
-				Scope: map[string]string{"action": "codex_trust", "project": x.Project, "tool": x.Tool, "dir": x.Dir,
+				Scope: map[string]string{"action": "codex_trust", "project": x.Project, "tool": x.Tool, "project_dir": p.Path, "dir": x.Dir,
 					"tool_path": path, "tool_version": version, "request_id": x.RequestID},
 				Recommend: deckstore.OptApprove, CreatedBy: creatorOf(c)})
 			if err != nil {
@@ -713,7 +713,7 @@ func (s *Server) executeCodexTrust(d deckstore.Decision) error {
 		return err
 	}
 	sc := d.Scope
-	err := s.store.GrantTrust(deckstore.TrustGrant{Project: sc["project"], Tool: sc["tool"], Dir: sc["dir"],
+	err := s.store.GrantTrust(deckstore.TrustGrant{Project: sc["project"], Tool: sc["tool"], ProjectDir: sc["project_dir"], Dir: sc["dir"],
 		ToolPath: sc["tool_path"], ToolVersion: sc["tool_version"], ApprovedAt: time.Now()})
 	if err != nil {
 		s.store.FinishExecute(d.ID, deckstore.StateFailed, "记不下授权："+err.Error())

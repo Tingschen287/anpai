@@ -274,7 +274,7 @@ func TestSpawnCodexTrustRememberedPerToolVersion(t *testing.T) {
 	if code, b := w.do("owner", "POST", "/v1/decisions/"+dec["id"].(string)+"/answer", fmt.Sprintf(`{"option":"approve","version":%v}`, dec["version"])); code != 200 || decode(t, b)["state"] != deckstore.StateApplied {
 		t.Fatalf("批准即记住并标为 applied：%d %s", code, b)
 	}
-	if !w.store.TrustValid("alpha", "codex", "/tmp/alpha", "/usr/bin/codex", "codex 1.0") {
+	if !w.store.TrustValid("alpha", "codex", "/tmp/alpha", "/tmp/alpha", "/usr/bin/codex", "codex 1.0") {
 		t.Fatal("应记住授权")
 	}
 	if code, b := w.do("main", "POST", "/v1/agents", codex("c2")); code != 201 {
@@ -293,6 +293,20 @@ func TestSpawnCodexTrustRememberedPerToolVersion(t *testing.T) {
 	w.version = "codex 2.0" // 版本变了：重新问
 	if code, _ := w.do("main", "POST", "/v1/agents", codex("c3")); code != 202 {
 		t.Fatalf("版本变了应重新问：%d", code)
+	}
+	w.version = "codex 1.0"
+	// 项目目录变了、实际工作目录没变：也重新问（n051 评审 1 B3，§14.3）
+	set := w.store.Settings()
+	for i := range set.Projects {
+		if set.Projects[i].ID == "alpha" {
+			set.Projects[i].Path = "/tmp/moved-alpha"
+		}
+	}
+	if err := w.store.ReplaceSettings(set); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := w.do("main", "POST", "/v1/agents", codex("c4")); code != 202 || !strings.Contains(b, "codex_trust") {
+		t.Fatalf("项目目录变了应重新问：%d %s", code, b)
 	}
 }
 
