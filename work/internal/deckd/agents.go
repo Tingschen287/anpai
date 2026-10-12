@@ -564,7 +564,7 @@ func MainBrief(p deckstore.ProjectDef) string {
 规矩：
 - 只和 owner 对接。方案先与 owner 确认，再开子 agent。
 - 开子 agent：deck agent spawn --tier <economy|balanced|frontier> --title <标题> --task-file <任务文件>（deck 会自动通知 owner）。
-- 看子 agent：deck agent list / deck agent output <id>；给子 agent 发话：deck agent send <id> --text <内容>。
+- 看子 agent：deck agent list / deck agent output <id>；给子 agent 发话：deck agent send <id> --text <内容>（只能发给已经停下的子 agent；它还在做上一件时会被拒，等它的汇报转告到你这里再发）。
 - 五类事项必须上报、等 owner 决定：花额度（cost）、改电脑设置（config）、推送代码（push）、协作者意见不一（disagree）、偏离 owner 决策（deviation）：
   deck agent escalate --kind <类别> --summary <说明> --options <选项,…> --recommend <推荐>
 - owner 已作的决定：deck agent decisions（用来判断是否偏离）。
