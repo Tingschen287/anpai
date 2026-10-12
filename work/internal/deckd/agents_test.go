@@ -29,6 +29,7 @@ type fakeUp struct {
 	mainErr   error
 	output    string
 	sendHook  func(ctx context.Context) // 测试：送消息时先调它（模拟上游等 CLI 就绪）
+	subBusy   bool                      // 测试：子 agent 还在跑，SendIfIdle 什么都不送
 	stops     []string
 	stopErr   error
 }
@@ -76,6 +77,25 @@ func (f *fakeUp) SendMessage(ctx context.Context, p lease.Permit, id, msg string
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, id+"|"+msg)
 	return f.sendErr
+}
+// SendIfIdle：subBusy 时像上游一样在打字前放弃（ErrTargetBusy，什么都没送）；sendHook 在判断忙不忙之前跑。
+func (f *fakeUp) SendIfIdle(ctx context.Context, p lease.Permit, id, msg string) error {
+	if err := p.Allows(id); err != nil {
+		return err
+	}
+	if f.sendHook != nil {
+		f.sendHook(ctx)
+	}
+	f.mu.Lock()
+	busy := f.subBusy
+	f.mu.Unlock()
+	if busy {
+		return agentdeck.ErrTargetBusy
+	}
+	hook := f.sendHook
+	f.sendHook = nil
+	defer func() { f.sendHook = hook }()
+	return f.SendMessage(ctx, p, id, msg)
 }
 func (f *fakeUp) SendToMain(_ context.Context, p lease.Permit, id, msg string) error {
 	if err := p.Allows(id); err != nil {

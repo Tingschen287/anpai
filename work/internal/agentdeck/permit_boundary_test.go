@@ -202,4 +202,5 @@ func TestSendMessageReportsUnconfirmedDeliverySeparately(t *testing.T) {
 }
 
 // sendFuncs 是允许往会话写字的函数：每个都必须先核对登记许可。
-var sendFuncs = map[string]bool{"SendMessage": true, "SendToMain": true}
+// n051 attempt 3 加 SendIfIdle：给子 agent 发新的话，只在它停下时发（--defer-if-busy 很短的时限）。
+var sendFuncs = map[string]bool{"SendMessage": true, "SendToMain": true, "SendIfIdle": true}

@@ -73,6 +73,10 @@ func Open(dirs Dirs) (*Store, error) {
 			x.Note = "deckd 重启时仍在启动中，结果不明"
 			changed = true
 		}
+		if x.SendInFlight {
+			x.SendInFlight = false // 发话那一路已随旧进程结束；代次保留（话可能已送到）
+			changed = true
+		}
 		s.sessions[x.Key] = x
 	}
 	if _, err := readJSON(s.path("trust.json"), &s.trust); err != nil {
@@ -253,6 +257,9 @@ type Session struct {
 	// TaskGen 是子 agent 的任务代次（n051 评审 1 B4）：第一条 brief 是第 1 代，主 agent 每成功给它发一次话加 1。
 	// 「同一次完成只送一次」按代次去重：主动报告与账本提交在同一代里只转告一次（推断只是提醒，不占完成）。0 按 1 算。
 	TaskGen int `json:"task_gen,omitempty"`
+	// SendInFlight：主 agent 给它的新话正在发（代次已加 1、上游还没返回）。这时到的完成分不清属于哪件任务：
+	// 上一代还没有完成就算上一代的（子 agent 正好做完上一件），否则算新的一代（n051 attempt 3，owner 选 A'）。
+	SendInFlight bool `json:"send_in_flight,omitempty"`
 }
 
 // Gen 是当前任务代次（没记过按 1）。
@@ -496,10 +503,16 @@ func (s *Store) BumpTaskGen(key string) (int, error) {
 	gen := 0
 	err := s.setSession(key, func(x *Session) error {
 		x.TaskGen = x.Gen() + 1
+		x.SendInFlight = true
 		gen = x.TaskGen
 		return nil
 	})
 	return gen, err
+}
+
+// EndSend：发话返回了（送达或送达未确认），之后到的完成都属于新的一代。
+func (s *Store) EndSend(key string) error {
+	return s.setSession(key, func(x *Session) error { x.SendInFlight = false; return nil })
 }
 
 // RevertTaskGen 发话没送成：把代次从 gen 退回 gen-1。代次已经不是 gen（又发了新的话），或这一代已经收到真正的完成，就不退。
@@ -507,6 +520,7 @@ func (s *Store) BumpTaskGen(key string) (int, error) {
 func (s *Store) RevertTaskGen(key string, gen int) (bool, error) {
 	reverted := false
 	err := s.setSession(key, func(x *Session) error {
+		x.SendInFlight = false
 		if x.Gen() != gen || gen <= 1 || s.hasCompletionLocked(key, CompletionIDFor(gen)) {
 			return nil
 		}

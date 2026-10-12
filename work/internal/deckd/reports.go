@@ -77,8 +77,8 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 	}
 	// 同一次完成只送一次（n051 评审 1 B4）：完成编号是子 agent 的任务代次，不是正文。改写正文、或账本提交之后再主动报告，
 	// 同一代都只转告一次；主 agent 发了新的话（代次加 1）之后的完成才算新的一次。推断提醒不占完成
-	rep, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportActive,
-		CompletionID: deckstore.CompletionIDFor(x.Gen()), Text: b.Text})
+	// 完成编号留空：存储在锁里按子 agent 当前的代次给（与发话的加代次、撤回在同一把锁里，attempt 3 自查 S2）
+	rep, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportActive, Text: b.Text})
 	if err != nil {
 		storeErr(w, err)
 		return
@@ -105,6 +105,7 @@ type inferState struct {
 	graphWG   sync.WaitGroup       // 后台查账本的 goroutine：循环退出前等它结束
 	startedAt time.Time            // 第一次推断的时刻：在这之前就有的子 agent，重启后没见过它在跑也照常计时
 	seen      map[string]bool      // 子会话 key → 本进程已经看过它的状态
+	quietGen  map[string]int       // 子会话 key → 这段安静开始时的任务代次（提醒按它编号）
 }
 
 func newInferState() *inferState {
@@ -145,6 +146,9 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 	if st.seen == nil {
 		st.seen = map[string]bool{}
 	}
+	if st.quietGen == nil {
+		st.quietGen = map[string]int{}
+	}
 	for _, x := range s.store.Sessions("") {
 		if x.Role != "sub" || x.Parent == "" || x.Status != deckstore.StatusRunning && x.Status != deckstore.StatusDone || x.TmuxSession == "" {
 			continue
@@ -166,8 +170,10 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 				continue
 			}
 			from, ok := st.quietFrom[x.Key]
-			if !ok {
-				st.quietFrom[x.Key] = now
+			if !ok || st.quietGen[x.Key] != x.Gen() {
+				// 安静段从这一刻算，记下当时的代次；安静中主 agent 又发了话（代次变了），重新计时（attempt 3 自查：
+				// 提醒按新代次编号会绕过「这一代已有完成就不提醒」，把发话前那段安静错报给主 agent）
+				st.quietFrom[x.Key], st.quietGen[x.Key] = now, x.Gen()
 				continue
 			}
 			if now.Sub(from) < inferAfter {
@@ -178,7 +184,7 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 			// 这一代已经报告过（主动报告或账本提交）的，入队时在存储的锁里拒收（与后台账本、主动报告并发也不漏）
 			// 提醒有自己的编号（代次 + 这段安静开始的时刻）：不占这一代的完成
 			s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportInferred,
-				CompletionID: deckstore.HintID(x.Gen(), from),
+				CompletionID: deckstore.HintID(st.quietGen[x.Key], from),
 				Text: fmt.Sprintf("推断：子 agent「%s」停下了 %d 秒（agent-deck 状态从 running 变为 %s），没有运行 deck agent report --done。可能已做完，也可能在等输入或权限确认。"+
 					"这只是提醒、不算完成：它之后真正的完成仍会转告。请用 deck agent output %s 查看。",
 					x.Title, int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})
@@ -378,7 +384,7 @@ func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time
 			continue
 		}
 		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph,
-			CompletionID: deckstore.CompletionIDFor(x.Gen()), Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt),
+			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt), // 完成编号由存储在锁里按当前代次给（attempt 3 自查 S2）
 			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）；子 agent 没有运行 deck agent report --done。需要时用 deck agent output %s 查看。",
 				x.Graph.Node, x.Graph.Attempt, state, x.Key)})
 		if err == nil && added {

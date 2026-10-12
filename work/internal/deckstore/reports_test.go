@@ -99,10 +99,17 @@ func TestPanelsRegistry(t *testing.T) {
 func TestCompletionIDIsValidatedNotCleaned(t *testing.T) {
 	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
 	_, sb := mainAndSub(t, s)
-	for _, bad := range []string{strings.Repeat("a", 65), "a\x1b[31m", "", "a b"} {
+	for _, bad := range []string{strings.Repeat("a", 65), "a\x1b[31m", "a b"} {
 		if _, _, err := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: bad, Source: ReportActive}); err == nil {
 			t.Errorf("编号 %q 应被拒", bad)
 		}
+	}
+	// 推断提醒必须自带编号；真正的完成不给编号时由存储在锁里按当前代次给（n051 attempt 3）
+	if _, _, err := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportInferred}); err == nil {
+		t.Error("提醒没有编号应被拒")
+	}
+	if r, _, err := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportActive, Text: "做完了"}); err != nil || r.CompletionID != CompletionIDFor(1) {
+		t.Errorf("真正的完成按当前代次编号：%+v %v", r, err)
 	}
 	id := strings.Repeat("a", 64)
 	s.EnqueueReport(Report{Sub: sb.Key, CompletionID: id, Source: ReportActive})
@@ -132,6 +139,38 @@ func TestSendingReportBecomesUnconfirmedAfterRestart(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("重启转为未确认应通知 owner")
+	}
+}
+
+// n051 attempt 3 自查：提醒送旧主 agent 途中旧主 agent 停了、新主 agent 接管；提醒退回时不把新主 agent 的完成并到旧主 agent 名下，
+// 过时的提醒删掉，完成留给新主 agent。
+func TestAbsorbOnlyWithinSameMain(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	m1, sb := mainAndSub(t, s)
+	h, _, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(1, time.Now()), Source: ReportInferred, Text: "推断"})
+	if err := s.MarkReport(h.ID, ReportSending); err != nil {
+		t.Fatal(err)
+	}
+	s.SetSessionStatus(m1.Key, StatusStopped, "退出")
+	m2, err := s.Reserve(launch(Session{Project: "deck", Role: "main", Agent: "claude", Tool: "claude", Model: "m", Tier: Frontier, Title: "主2", CreatedBy: "owner"}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subs, _, err := s.AdoptOrphans("deck", m2.Key); err != nil || subs != 1 {
+		t.Fatalf("接管：%d %v", subs, err)
+	}
+	if _, added, err := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportActive, Text: "做完了"}); !added || err != nil {
+		t.Fatalf("完成入队：%v %v", added, err)
+	}
+	if err := s.MarkReport(h.ID, ReportPending); err != nil {
+		t.Fatal(err)
+	}
+	got := s.PendingReports(m2.Key)
+	if len(got) != 1 || got[0].Source != ReportActive {
+		t.Fatalf("完成留在新主 agent：%+v", got)
+	}
+	if left := s.PendingReports(m1.Key); len(left) != 0 {
+		t.Fatalf("旧主 agent 名下过时的提醒删掉：%+v", left)
 	}
 }
 

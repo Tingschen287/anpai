@@ -46,6 +46,8 @@ type ProgressFunc func(ctx context.Context, p deckstore.ProjectDef) (any, error)
 type Server struct {
 	waitMu   sync.Mutex
 	waiting  map[string]int // 正在 deck agent wait 的主 agent（推送循环跳过它们）
+	// sendLocks：给同一个子 agent 的发话一次只走一条（n051 attempt 3 自查：并发发话各自加代次、各自撤回，代次会错位）
+	sendLocks sync.Map // 子会话 key → *sync.Mutex
 	cfg      Config
 	store    *deckstore.Store
 	resolver paneResolver

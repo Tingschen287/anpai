@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
@@ -39,6 +40,7 @@ type Upstream interface {
 	ListSessions(ctx context.Context) ([]agentdeck.ListedSession, error)
 	SendMessage(ctx context.Context, p lease.Permit, sessionID, message string) error
 	SendToMain(ctx context.Context, p lease.Permit, sessionID, message string) error
+	SendIfIdle(ctx context.Context, p lease.Permit, sessionID, message string) error
 	PaneOutputPlain(ctx context.Context, sessionID string) (string, error)
 	StopSession(ctx context.Context, p lease.Permit, sessionID string) error
 }
@@ -697,34 +699,56 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "消息为空或太长")
 		return
 	}
+	// 同一个子 agent 的发话一次只走一条（attempt 3 自查：并发发话各自加代次、各自撤回，代次会错位）
+	mu, _ := s.sendLocks.LoadOrStore(x.Key, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+	// 只给停下来的子 agent 发新的话（owner 在 attempt 3 设计复审选 A'）：它还在做上一件时追加的话，与上一件的完成分不清先后，
+	// 「哪条报告属于哪件任务」就会错（attempt 3 自查 S1）。这里先按缓存的状态挡一下；真正的判断由上游在打字前一刻做（SendIfIdle）
+	if s.activity.of(x.TmuxSession) == "running" {
+		fail(w, http.StatusConflict, "%s", busySubText)
+		return
+	}
 	permit, err := s.agents.leases.Automatic(x.AgentDeckID)
 	if err != nil {
 		fail(w, http.StatusConflict, "现在不能给它发话：%v", err)
 		return
 	}
-	// 新的话：发之前就把任务代次加 1 并落盘（n051 评审 2 R2，owner 选方案 A）。上游 send 要等几秒到十几秒（Codex 更久），
-	// 子 agent 可能在 send 返回前就做完并报告；那时代次若还是旧的，这次真正的完成会被当成上一代的重复吞掉。
-	// 记不下代次就不发：发了也可能吞掉它之后的完成。
+	// 发之前把任务代次加 1 并落盘：上游判定它停着、打进新的话之后，它的报告都属于新任务。记不下代次就不发
 	gen, err := s.store.BumpTaskGen(x.Key)
 	if err != nil {
 		fail(w, http.StatusServiceUnavailable, "记不下子 agent 的任务代次，没有发：%v", err)
 		return
 	}
-	if err := s.agents.upstream.SendMessage(detached(r), permit, x.AgentDeckID, b.Text); err != nil {
-		if agentdeck.IsDeliveryUnconfirmed(err) {
-			// 话可能已打进去、只是没证实提交（Codex 总是这样）：新的一代保留
-			writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
+	err = s.agents.upstream.SendIfIdle(detached(r), permit, x.AgentDeckID, b.Text)
+	if err == nil || agentdeck.IsDeliveryUnconfirmed(err) {
+		// 发话返回：之后到的完成都属于新的一代（发的途中到的，按上一代有没有完成来归，见 deckstore EnqueueReport）
+		if eerr := s.store.EndSend(x.Key); eerr != nil {
+			s.store.Notify(x.Project, "report", "记不下发话已结束："+deckstore.Clean(eerr.Error(), 160), "deckd")
+		}
+	}
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
+	case agentdeck.IsDeliveryUnconfirmed(err):
+		// 话可能已打进去、只是没证实提交（Codex 总是这样）：新的一代保留
+		writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
+	default:
+		// 没送成（还在跑，或上游投递失败）：撤回这一代。撤回前已经收到这一代的完成就不撤——那是上一件在这一刻做完的报告，
+		// 照常转告；下次发话再开新的一代
+		if _, rerr := s.store.RevertTaskGen(x.Key, gen); rerr != nil {
+			s.store.Notify(x.Project, "report", "发话没送成后撤回子 agent 的任务代次失败："+deckstore.Clean(rerr.Error(), 160), "deckd")
+		}
+		if errors.Is(err, agentdeck.ErrTargetBusy) {
+			fail(w, http.StatusConflict, "%s", busySubText)
 			return
 		}
-		// 上游说没送成：撤回这一代；撤回前已经收到这一代的真正完成就不撤（照常转告）
-		if _, rerr := s.store.RevertTaskGen(x.Key, gen); rerr != nil {
-			s.store.Notify(x.Project, "report", "发话失败后撤回子 agent 的任务代次失败："+deckstore.Clean(rerr.Error(), 160), "deckd")
-		}
 		fail(w, http.StatusBadGateway, "发话失败：%v", err)
-		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
 }
+
+// busySubText 是子 agent 还在跑时发话被拒的说明（主 agent 看得到）。
+const busySubText = "子 agent 正在做上一件，这次没发：等它报告完成（转告会送到你这里）或停下后再发。owner 可以直接在它的窗格里说话"
 
 // executeCodexTrust：owner 批准 codex_trust 决定后记住授权（§14.3），用完即 applied。主 agent 用新的请求 id 再开一次即可。
 func (s *Server) executeCodexTrust(d deckstore.Decision) error {

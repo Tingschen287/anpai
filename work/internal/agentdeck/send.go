@@ -68,6 +68,30 @@ func (c *Client) SendToMain(ctx context.Context, p lease.Permit, sessionID, mess
 // MainDeferTimeout 是 SendToMain 每次最多等主 agent 结束这一轮的时间（上游 --defer-timeout）。
 const MainDeferTimeout = "10s"
 
+// SendIfIdle 给子 agent 发新的话，只在它停下时发（n051 attempt 3，owner 选方案 A'）：带 --defer-if-busy 和很短的
+// SubIdleCheck，对方还在跑就返回 ErrTargetBusy——上游在打字之前就放弃了，什么都没送。忙不忙由上游在打字前一刻判断，
+// 所以「这条话之后到的完成属于新任务」没有歧义。不能等久：等的时候子 agent 可能正好做完上一件并报告，报告会被算到新任务上。
+// 与 SendMessage 一样必须带许可、先核对登记再调上游（TestEveryWriteIntoASessionNeedsAPermit）。
+func (c *Client) SendIfIdle(ctx context.Context, p lease.Permit, sessionID, message string) error {
+	if sessionID == "" {
+		return fmt.Errorf("没有会话号，无法投递消息")
+	}
+	release, err := p.Begin(sessionID)
+	if err != nil {
+		return fmt.Errorf("不投递：%w", err)
+	}
+	defer release()
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("消息是空的，不投递")
+	}
+	out, err := c.execWithStdin(ctx, strings.NewReader(message),
+		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", SubIdleCheck)
+	return sendResult(sessionID, out, err, true)
+}
+
+// SubIdleCheck 是 SendIfIdle 让上游看对方忙不忙的时限（上游 --defer-timeout）。
+const SubIdleCheck = "1s"
+
 // ErrTargetBusy：--defer-if-busy 等到时限对方还在忙，上游没有投递（session_cmd.go:2825、internal/send/deferbusy.go:80）。
 var ErrTargetBusy = errors.New("对方还在回答，这次没送（稍后再试）")
 

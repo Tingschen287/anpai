@@ -57,15 +57,25 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 	var out Report
 	added := false
 	err := s.mutate(func() (func() error, []Event, error) {
-		if !completionRe.MatchString(r.CompletionID) {
-			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)
-		}
 		if r.Source != ReportActive && r.Source != ReportInferred && r.Source != ReportGraph {
 			return nil, nil, fmt.Errorf("不认识的汇报来源 %q", r.Source)
 		}
 		sub, ok := s.sessions[r.Sub]
 		if !ok || sub.Role != "sub" {
 			return nil, nil, fmt.Errorf("%s 不是已登记的子 agent", r.Sub)
+		}
+		if r.CompletionID == "" && r.Source != ReportInferred {
+			// 真正的完成不给编号：在锁里取子 agent 当前的任务代次（attempt 3 自查 S2：先取快照再入队，会和发话失败的撤回交错）。
+			// 新话正在发时到的完成：上一代还没有完成就算上一代的（子 agent 正好做完上一件），否则算新的一代（新任务做得快）。
+			// 两种情况都只送一次，不丢（owner 选 A'）
+			gen := sub.Gen()
+			if sub.SendInFlight && gen > 1 && !s.hasCompletionLocked(sub.Key, CompletionIDFor(gen-1)) {
+				gen--
+			}
+			r.CompletionID = CompletionIDFor(gen)
+		}
+		if !completionRe.MatchString(r.CompletionID) {
+			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)
 		}
 		main, ok := s.sessions[sub.Parent]
 		if !ok || main.Role != "main" || main.Project != sub.Project {
@@ -88,7 +98,7 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			return nil, nil, nil
 		}
 		for _, x := range s.reports {
-			if x.Sub != r.Sub || x.Source != ReportInferred || x.State != ReportPending {
+			if x.Sub != r.Sub || x.Source != ReportInferred || x.State != ReportPending || x.Main != main.Key {
 				continue
 			}
 			if r.Source == ReportInferred {
@@ -150,15 +160,21 @@ func (s *Store) absorbLocked(x *Report) {
 	if x.Source != ReportInferred || x.State != ReportPending {
 		return
 	}
+	stale := s.hasCompletionLocked(x.Sub, hintGen(x.CompletionID))
 	for i, y := range s.reports {
-		if y != x && y.Sub == x.Sub && y.Source != ReportInferred && y.State == ReportPending && !y.CreatedAt.Before(x.CreatedAt) {
+		if y == x || y.Sub != x.Sub || y.Source == ReportInferred || y.CreatedAt.Before(x.CreatedAt) {
+			continue
+		}
+		// 合并只在同一主 agent 内（attempt 3 自查：提醒挂在已停止的旧主 agent 上时，并过去新主 agent 就取不到了）
+		if y.State == ReportPending && y.Main == x.Main {
 			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = y.CompletionID, y.Source, y.Text, y.Ref, s.now()
 			s.reports = append(s.reports[:i], s.reports[i+1:]...)
 			return
 		}
+		stale = true // 提醒之后已经有真正的完成（不管哪一代、什么状态）
 	}
-	// 这一代的真正完成已经领走、送达或标为未确认（n051 评审 2 R3）：提醒过时了，删掉这条从没送出去的提醒
-	if s.hasCompletionLocked(x.Sub, hintGen(x.CompletionID)) {
+	// 真正的完成已经领走、送达或标为未确认（评审 2 R3；attempt 3 自查：也包括之后新一代的完成）：提醒过时了，删掉这条从没送出去的提醒
+	if stale {
 		for i, y := range s.reports {
 			if y == x {
 				s.reports = append(s.reports[:i], s.reports[i+1:]...)
