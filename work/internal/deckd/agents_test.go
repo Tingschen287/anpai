@@ -78,6 +78,7 @@ func (f *fakeUp) SendMessage(ctx context.Context, p lease.Permit, id, msg string
 	f.sends = append(f.sends, id+"|"+msg)
 	return f.sendErr
 }
+
 // SendIfIdle：subBusy 时像上游一样在打字前放弃（ErrTargetBusy，什么都没送）；sendHook 在判断忙不忙之前跑。
 func (f *fakeUp) SendIfIdle(ctx context.Context, p lease.Permit, id, msg string) error {
 	if err := p.Allows(id); err != nil {
