@@ -491,12 +491,29 @@ func (s *Store) SetSessionStatus(key, status, note string) error {
 	})
 }
 
-// BumpTaskGen 主 agent 给子 agent 发了新的话：任务代次加 1，之后的完成算新的一次。
-func (s *Store) BumpTaskGen(key string) error {
-	return s.setSession(key, func(x *Session) error {
+// BumpTaskGen 主 agent 要给子 agent 发新的话：任务代次加 1，之后的完成算新的一次。返回新的代次。
+func (s *Store) BumpTaskGen(key string) (int, error) {
+	gen := 0
+	err := s.setSession(key, func(x *Session) error {
 		x.TaskGen = x.Gen() + 1
+		gen = x.TaskGen
 		return nil
 	})
+	return gen, err
+}
+
+// RevertTaskGen 发话没送成：把代次从 gen 退回 gen-1。代次已经不是 gen（又发了新的话），或这一代已经收到真正的完成，就不退。
+// 返回是否退了。
+func (s *Store) RevertTaskGen(key string, gen int) (bool, error) {
+	reverted := false
+	err := s.setSession(key, func(x *Session) error {
+		if x.Gen() != gen || gen <= 1 || s.hasCompletionLocked(key, CompletionIDFor(gen)) {
+			return nil
+		}
+		x.TaskGen, reverted = gen-1, true
+		return nil
+	})
+	return reverted, err
 }
 
 // SetGraphAttempt 记下 Graph 通道开工后账本给的 attempt（n051）。

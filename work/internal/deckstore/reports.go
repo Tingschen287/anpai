@@ -157,6 +157,15 @@ func (s *Store) absorbLocked(x *Report) {
 			return
 		}
 	}
+	// 这一代的真正完成已经领走、送达或标为未确认（n051 评审 2 R3）：提醒过时了，删掉这条从没送出去的提醒
+	if s.hasCompletionLocked(x.Sub, hintGen(x.CompletionID)) {
+		for i, y := range s.reports {
+			if y == x {
+				s.reports = append(s.reports[:i], s.reports[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 // Report 按 id 取一条汇报（副本）。

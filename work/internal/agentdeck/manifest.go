@@ -3,6 +3,8 @@ package agentdeck
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -776,8 +778,120 @@ var NotUsed = []string{
 var BypassFlags = []string{"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
 	"--dangerously-bypass-approvals-and-sandbox", "--yolo"}
 
-// codexConfigBypass 是 codex `-c key=value` 覆盖里的绕过（小写、去引号与空格后比较）。
-var codexConfigBypass = []string{"approval_policy=never", "sandbox_mode=danger-full-access"}
+// 权限与沙箱设置按白名单查（n051 评审 2 R1，owner 选方案 A）：以前按「删掉空白引号后找禁止值」猜，
+// TOML 的转义（never）、多行字符串等合法写法都能绕过。现在凡是键名涉及权限或沙箱的赋值（codex 的 -c 覆盖、
+// agent-deck 配置里的键、--flag=value），值必须逐字等于已知安全值；deck 认不出的键、看不懂的值一律拒绝，请 owner 改成标准写法。
+
+// sensitiveKeyWords：键名里含这些词就按白名单查。
+var sensitiveKeyWords = []string{"approval", "sandbox", "dangerous", "yolo", "bypass", "permission", "profile"}
+
+// safeValues：键（整个键名或点号后的最后几段，小写）→ 放行的取值（小写，去掉成对引号后逐字比较）。
+var safeValues = []struct {
+	key    string
+	values []string
+}{
+	{"approval_policy", []string{"untrusted", "on-request", "on-failure"}},
+	{"sandbox_mode", []string{"read-only", "workspace-write"}},
+	{"sandbox_workspace_write.network_access", []string{"true", "false"}},
+	{"sandbox_workspace_write.exclude_tmpdir_env_var", []string{"true", "false"}},
+	{"sandbox_workspace_write.exclude_slash_tmp", []string{"true", "false"}},
+	{"allow_dangerous_mode", []string{"false"}},
+	{"dangerous_mode", []string{"false"}},
+	{"yolo_mode", []string{"false"}},
+	{"--ask-for-approval", []string{"untrusted", "on-request", "on-failure"}},
+	{"--sandbox", []string{"read-only", "workspace-write"}},
+	{"--permission-mode", []string{"default", "acceptedits", "plan"}},
+	{"--approval-mode", []string{"default", "auto_edit"}},
+}
+
+// skipKeys：键名带敏感词、但取值另有检查的键。agent-deck 自定义工具的 dangerous_flag 只在 dangerous_mode 为真时生效，
+// 而 dangerous_mode 只放行 false；它的取值是参数名，由下面的参数检查管。
+var skipKeys = []string{"dangerous_flag"}
+
+// assignRe 找 key = value 形式的赋值（键允许字母、数字、_ . -）。
+var assignRe = regexp.MustCompile(`([a-z0-9_.\-]+)\s*=\s*`)
+
+// checkSensitiveAssignments 按白名单查一段文字里涉及权限或沙箱的赋值。
+func checkSensitiveAssignments(f string) error {
+	low := strings.ToLower(f)
+	// TOML 的 \u、\U（以及 TOML 1.1 的 \x）转义能把键名或取值改写成任何字符；deck 不解码，一律拒绝
+	for _, esc := range []string{`\u`, `\x`} {
+		if strings.Contains(low, esc) {
+			return fmt.Errorf("拒绝含转义写法（%s…）的参数或配置：deck 不解码转义，确认不了它没有关掉权限确认；请 owner 改成不带转义的写法", esc)
+		}
+	}
+	for _, m := range assignRe.FindAllStringSubmatchIndex(low, -1) {
+		key := low[m[2]:m[3]]
+		if !containsAny(key, sensitiveKeyWords) || keyIs(key, skipKeys...) {
+			continue
+		}
+		var allowed []string
+		for _, s := range safeValues {
+			if keyIs(key, s.key) {
+				allowed = s.values
+			}
+		}
+		if allowed == nil {
+			return fmt.Errorf("拒绝 deck 认不出的权限或沙箱设置 %s（只放行已知的安全写法，请 owner 去掉或改成标准写法）", key)
+		}
+		value, ok := assignValue(low[m[1]:])
+		if !ok || !slices.Contains(allowed, value) {
+			return fmt.Errorf("拒绝权限或沙箱设置 %s = %s：只放行 %s（逐字比较，硬拒绝，owner 也批不过）", key, value, strings.Join(allowed, "、"))
+		}
+	}
+	return nil
+}
+
+// assignValue 取等号后的值：成对引号里的内容，或到空白、逗号、括号、# 为止的裸值。含反斜杠或引号、引号不成对、为空都返回 false。
+func assignValue(rest string) (string, bool) {
+	if rest == "" {
+		return "", false
+	}
+	var v string
+	if strings.HasPrefix(rest, `\"`) || strings.HasPrefix(rest, `\'`) {
+		// 字符串里再套一层的引号（command = "codex -c \"approval_policy=on-request\""）：只认作引号，不解码别的转义
+		end := strings.Index(rest[2:], rest[:2])
+		if end < 0 {
+			return rest, false
+		}
+		v = rest[2 : 2+end]
+	} else if q := rest[0]; q == '"' || q == '\'' {
+		end := strings.IndexByte(rest[1:], q)
+		if end < 0 {
+			return rest, false
+		}
+		v = rest[1 : 1+end]
+	} else {
+		end := strings.IndexFunc(rest, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune(",]}#", r) })
+		if end < 0 {
+			end = len(rest)
+		}
+		v = rest[:end]
+	}
+	if v == "" || strings.ContainsAny(v, `\"'`) {
+		return v, false
+	}
+	return v, true
+}
+
+// keyIs：key 就是 names 之一，或以「.名字」结尾（[profiles.x] 下的、点号写法的同名键）。
+func keyIs(key string, names ...string) bool {
+	for _, n := range names {
+		if key == n || strings.HasSuffix(key, "."+n) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, x := range subs {
+		if strings.Contains(s, x) {
+			return true
+		}
+	}
+	return false
+}
 
 // bypassValues 是「参数 + 取值」形式的绕过：参数名 → 被拒的取值（小写比较）。
 var bypassValues = map[string]string{
@@ -793,17 +907,9 @@ var bypassValues = map[string]string{
 // 按空白切词，认 `--flag` 与 `--flag=value` 两种写法。命中就硬拒绝。
 func CheckNoBypass(fields ...string) error {
 	for _, f := range fields {
-		// codex 配置覆盖的完整赋值：去掉空白与引号后整段比对（n051 评审 1 B1：-c 'approval_policy = "never"' 按空白切词会漏掉）
-		compact := strings.ToLower(strings.Map(func(r rune) rune {
-			if unicode.IsSpace(r) || r == '"' || r == '\'' || r == '\\' {
-				return -1
-			}
-			return r
-		}, f))
-		for _, bad := range codexConfigBypass {
-			if strings.Contains(compact, bad) {
-				return fmt.Errorf("拒绝绕过权限的配置覆盖 %s（硬拒绝，owner 也批不过）", bad)
-			}
+		// 涉及权限或沙箱的赋值按白名单查（评审 1 B1、评审 2 R1）：-c 'approval_policy = "never"'、TOML 转义、--flag=value 都在这里
+		if err := checkSensitiveAssignments(f); err != nil {
+			return err
 		}
 		words := strings.Fields(f)
 		for i, w := range words {
@@ -814,20 +920,6 @@ func CheckNoBypass(fields ...string) error {
 					return fmt.Errorf("拒绝绕过权限的参数 %s（硬拒绝，owner 也批不过）", w)
 				}
 			}
-			if name == "-c" || name == "--config" {
-				// codex 的配置覆盖：-c approval_policy=never、-c sandbox_mode=danger-full-access 与 -a never、-s danger-full-access 等价
-				v := value
-				if !hasValue && i+1 < len(words) {
-					v = strings.ToLower(words[i+1])
-				}
-				v = strings.NewReplacer(`"`, "", `'`, "", " ", "").Replace(v)
-				for _, bad := range codexConfigBypass {
-					if v == bad {
-						return fmt.Errorf("拒绝绕过权限的参数 %s %s（硬拒绝，owner 也批不过）", w, v)
-					}
-				}
-				continue
-			}
 			bad, ok := bypassValues[name]
 			if !ok {
 				continue
@@ -835,7 +927,7 @@ func CheckNoBypass(fields ...string) error {
 			if !hasValue && i+1 < len(words) {
 				value, hasValue = strings.ToLower(words[i+1]), true
 			}
-			if hasValue && value == bad {
+			if hasValue && strings.Trim(value, `"'`) == bad {
 				return fmt.Errorf("拒绝绕过权限的参数 %s %s（硬拒绝，owner 也批不过）", w, value)
 			}
 		}

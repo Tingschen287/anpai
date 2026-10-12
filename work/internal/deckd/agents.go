@@ -702,25 +702,28 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "现在不能给它发话：%v", err)
 		return
 	}
+	// 新的话：发之前就把任务代次加 1 并落盘（n051 评审 2 R2，owner 选方案 A）。上游 send 要等几秒到十几秒（Codex 更久），
+	// 子 agent 可能在 send 返回前就做完并报告；那时代次若还是旧的，这次真正的完成会被当成上一代的重复吞掉。
+	// 记不下代次就不发：发了也可能吞掉它之后的完成。
+	gen, err := s.store.BumpTaskGen(x.Key)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "记不下子 agent 的任务代次，没有发：%v", err)
+		return
+	}
 	if err := s.agents.upstream.SendMessage(detached(r), permit, x.AgentDeckID, b.Text); err != nil {
 		if agentdeck.IsDeliveryUnconfirmed(err) {
-			// 话已打进去、只是没证实提交（Codex 总是这样）：同样开新一代，否则它之后的完成都会被当成重复吞掉（attempt 2 自查）
-			s.bumpGen(x)
+			// 话可能已打进去、只是没证实提交（Codex 总是这样）：新的一代保留
 			writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
 			return
+		}
+		// 上游说没送成：撤回这一代；撤回前已经收到这一代的真正完成就不撤（照常转告）
+		if _, rerr := s.store.RevertTaskGen(x.Key, gen); rerr != nil {
+			s.store.Notify(x.Project, "report", "发话失败后撤回子 agent 的任务代次失败："+deckstore.Clean(rerr.Error(), 160), "deckd")
 		}
 		fail(w, http.StatusBadGateway, "发话失败：%v", err)
 		return
 	}
-	s.bumpGen(x)
 	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
-}
-
-// bumpGen：给子 agent 发了新的话，任务代次加 1，之后的完成算新的一次（n051 评审 1 B4）。
-func (s *Server) bumpGen(x deckstore.Session) {
-	if err := s.store.BumpTaskGen(x.Key); err != nil {
-		s.store.Notify(x.Project, "report", "记不下子 agent 的任务代次："+deckstore.Clean(err.Error(), 160), "deckd")
-	}
 }
 
 // executeCodexTrust：owner 批准 codex_trust 决定后记住授权（§14.3），用完即 applied。主 agent 用新的请求 id 再开一次即可。
