@@ -228,9 +228,6 @@ const (
 type GraphLink struct {
 	Node    string `json:"node"`
 	Attempt int    `json:"attempt"`
-	// Gen 是绑定这一轮时子 agent 的任务代次：账本提交信号查得晚（每 30 秒一次），可能在主 agent 发了新的话之后才到，
-	// 按「从这一代起第一个还没有完成的代次」记，不记到新任务上（n051 attempt 3 自查）。0 按 1 算。
-	Gen int `json:"gen,omitempty"`
 }
 
 // Session 是注册表里的一条。
@@ -536,7 +533,7 @@ func (s *Store) RevertTaskGen(key string, gen int) (bool, error) {
 // SetGraphAttempt 记下 Graph 通道开工后账本给的 attempt（n051）。
 func (s *Store) SetGraphAttempt(key, node string, attempt int) error {
 	return s.setSession(key, func(x *Session) error {
-		x.Graph = &GraphLink{Node: node, Attempt: attempt, Gen: x.Gen()}
+		x.Graph = &GraphLink{Node: node, Attempt: attempt}
 		return nil
 	})
 }

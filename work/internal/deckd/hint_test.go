@@ -135,7 +135,7 @@ func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	}
 }
 
-// 同一次完成的重复主动报告（账本提交已送过）：不再转告，但子 agent 照样标 done、释放名额。
+// 同一次完成的重复主动报告（第一次已送过）：不再转告，但子 agent 照样标 done、释放名额。
 func TestDuplicateActiveReportStillMarksDone(t *testing.T) {
 	w, _ := graphWorld(t)
 	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gd1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
@@ -145,13 +145,6 @@ func TestDuplicateActiveReportStillMarksDone(t *testing.T) {
 	var out struct{ Session deckstore.Session }
 	json.Unmarshal([]byte(b), &out)
 	key := out.Session.Key
-	w.srv.agents.graphState = func(context.Context, deckstore.ProjectDef, string) (projectctl.State, error) {
-		return projectctl.StateSubmitted, nil
-	}
-	w.srv.graphSubmits(context.Background(), newState(), time.Now())
-	w.srv.deliverReports(context.Background(), newState())
-	w.store.SetSessionStatus(key, deckstore.StatusRunning, "owner 又让它跑")
-	before := w.store.Slots("alpha")
 	prev := w.srv.callerFn
 	w.srv.callerFn = func(r *http.Request) Caller {
 		if r.Header.Get("X-Test-As") == "graphsub" {
@@ -159,6 +152,10 @@ func TestDuplicateActiveReportStillMarksDone(t *testing.T) {
 		}
 		return prev(r)
 	}
+	w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"做完了"}`)
+	w.srv.deliverReports(context.Background(), newState())
+	w.store.SetSessionStatus(key, deckstore.StatusRunning, "owner 又让它跑")
+	before := w.store.Slots("alpha")
 	if code, b := w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"做完了"}`); code != 200 || !strings.Contains(b, `"duplicate":true`) {
 		t.Fatalf("同一次完成：重复：%d %s", code, b)
 	}

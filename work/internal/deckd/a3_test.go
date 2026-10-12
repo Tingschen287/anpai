@@ -211,8 +211,8 @@ func TestStaleHintDroppedAfterNewerGenerationCompletion(t *testing.T) {
 	}
 }
 
-// attempt 3 第二轮自查（blocker）：账本提交信号查得晚（30 秒一次），在主 agent 发了第 2 件之后才到；记回第 1 件，
-// 第 2 件真正的完成照常转告。
+// attempt 3 第二轮自查（blocker）：账本提交信号查得晚（30 秒一次），在主 agent 发了第 2 件之后才到。
+// attempt 4 起它只是账本提醒、不占完成（owner 选 B2-A）：提醒照常送，第 2 件真正的完成照常转告。
 func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
 	w, _ := graphWorld(t)
 	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "lg1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
@@ -231,8 +231,8 @@ func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
 	}
 	w.srv.graphSubmits(context.Background(), newState(), time.Now())
 	reps := w.store.PendingReports(w.main.Key)
-	if len(reps) != 1 || reps[0].CompletionID != deckstore.CompletionIDFor(1) {
-		t.Fatalf("迟到的账本信号记回第 1 件：%+v", reps)
+	if len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || reps[0].CompletionID != "ledger:n099_x:3" {
+		t.Fatalf("迟到的账本信号按 节点#attempt 作账本提醒：%+v", reps)
 	}
 	w.srv.deliverReports(context.Background(), newState())
 	prev := w.srv.callerFn

@@ -49,23 +49,5 @@ func TestAllowlistSelfCheckFixes(t *testing.T) {
 	if _, ok := cliArgs([]string{"/home/u/.local/bin/claude", "daemon", "run", "--origin", "transient"}, claude); ok {
 		t.Error("Claude Code 自己的后台进程不是这次启动的会话")
 	}
-	for _, g := range [][]string{
-		{"--allowedTools", "Bash(aws s3 ls --profile=dev:*)"},
-		{"--append-system-prompt", "Use profile=dev for AWS"},
-		{"-c", `shell_environment_policy.set.XDG_STATE_HOME="/x"`},
-	} {
-		if err := CheckExtraArgs([][]string{g}); err != nil {
-			t.Errorf("自由文本里的词不误拒 %q：%v", g, err)
-		}
-	}
-	for _, g := range [][]string{
-		{"-c", "approval_policy=never"},
-		{"--permission-mode", "bypassPermissions"},
-		{"--append-system-prompt", "x \\u006e y"},
-		{"--yolo"},
-	} {
-		if CheckExtraArgs([][]string{g}) == nil {
-			t.Errorf("该拒绝 %q", g)
-		}
-	}
+	// 额外参数的声明见 a4_test.go（attempt 4 起按白名单）
 }

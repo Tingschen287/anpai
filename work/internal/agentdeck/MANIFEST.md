@@ -419,7 +419,7 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
      - 认出 CLI 进程（程序名，或解释器 node/bash 等后面的脚本名，等于工具名或 deck 设置里的可执行文件名），它的参数只能是
        上游按启动请求会加的已知参数（claude：`--session-id`、`--resume`、`--add-dir`、`--model`、`--effort`；codex：`--model`、
        `--config model_reasoning_effort=…`、`resume`/`fork <id>`；gemini：`--resume`、`--model`），加上 owner 在 deck 设置
-       `extra_args` 里逐字声明的参数组（声明本身也查：明确的绕过参数声明不进来）；其余一律拒绝；
+       `extra_args` 里逐字声明的参数组；声明本身也走白名单（attempt 4 设计复审 B1-A，`declaredAllow`：claude 只认 `--allowedTools`、`--disallowedTools`、`--append-system-prompt`，codex 只认键为 `shell_environment_policy.*` 或 `sandbox_workspace_write.network_access` 的 `-c`，其他工具不允许声明）；其余一律拒绝；
      - 其他进程（`bash -c`、`env`、MCP 服务等）只查明确的绕过参数；
      - 一个 CLI 进程都没找到也算核对不了。不通过就停掉会话、不送任务、通知 owner。
 - 不检查的：CLI 自己的设置文件（`~/.claude/settings.json` 的 `defaultMode`、`CODEX_HOME` 里的 `config.toml`）——归 owner 定的

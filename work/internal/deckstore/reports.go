@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,8 +48,6 @@ type Report struct {
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
 	// Ref 是账本提交的 节点#attempt：同一 attempt 只转告一次，主 agent 发了新的话也不重报（attempt 2 设计评审 A）
 	Ref string `json:"ref,omitempty"`
-	// AtGen：账本提交信号发起查询时子 agent 的任务代次（只用于入队归属，不落盘）。查询要两三秒，期间主 agent 可能发了下一件（n051 评审 3 B2）
-	AtGen int `json:"-"`
 }
 
 // ClaimWait 是 deck agent wait 的领取标记。
@@ -66,7 +65,8 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		if !ok || sub.Role != "sub" {
 			return nil, nil, fmt.Errorf("%s 不是已登记的子 agent", r.Sub)
 		}
-		if r.CompletionID == "" && r.Source != ReportInferred {
+		switch {
+		case r.Source == ReportActive && r.CompletionID == "":
 			// 真正的完成不给编号：在锁里取子 agent 当前的任务代次（attempt 3 自查 S2：先取快照再入队，会和发话失败的撤回交错）。
 			// 新话正在发时到的完成：上一代还没有完成就算上一代的（子 agent 正好做完上一件），否则算新的一代（新任务做得快）。
 			// 两种情况都只送一次，不丢（owner 选 A'）
@@ -74,22 +74,13 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			if sub.SendInFlight && gen > 1 && !s.hasCompletionLocked(sub.Key, CompletionIDFor(gen-1)) {
 				gen--
 			}
-			if r.Source == ReportGraph && sub.Graph != nil {
-				// 账本提交信号查得晚：它报的是发起查询时（AtGen）或更早的任务，不会是查询途中才发出的下一件（评审 3 B2）。
-				// 从绑定这一轮的代次起到 AtGen，记到第一个还没有完成的代次；都完成了就记到 AtGen，作重复处理
-				upper := sub.Gen()
-				if r.AtGen > 0 && r.AtGen < upper {
-					upper = r.AtGen
-				}
-				gen = upper
-				for g := max(sub.Graph.Gen, 1); g < upper; g++ {
-					if !s.hasCompletionLocked(sub.Key, CompletionIDFor(g)) {
-						gen = g
-						break
-					}
-				}
-			}
 			r.CompletionID = CompletionIDFor(gen)
+		case r.Source == ReportGraph:
+			// 账本提醒（owner 在 attempt 4 设计复审选 B2-A）：不占完成，按 节点#attempt 编号、只送一次
+			if r.Ref == "" {
+				return nil, nil, fmt.Errorf("账本提醒没有 节点#attempt")
+			}
+			r.CompletionID = "ledger:" + strings.ReplaceAll(r.Ref, "#", ":")
 		}
 		if !completionRe.MatchString(r.CompletionID) {
 			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)
@@ -99,31 +90,29 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			return nil, nil, fmt.Errorf("子 agent %s 没有登记主 agent", r.Sub)
 		}
 		for _, x := range s.reports {
-			if x.Sub == r.Sub && x.Source != ReportInferred && (x.CompletionID == r.CompletionID || r.Ref != "" && x.Ref == r.Ref) {
-				// 同一次完成：推断先入队、还没送，主动报告到了就换成主动报告的正文与标注（只送一次，送更准的那条）
-				if x.State == ReportPending && x.Source != ReportActive && r.Source == ReportActive {
-					x.Source, x.Text, x.UpdatedAt = r.Source, Clean(r.Text, 2000), s.now()
-					out = *x
-					return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
-				}
+			// 同一次真正的完成（主动报告、同一代）或同一条账本提醒（同一 节点#attempt）只收一次
+			if x.Sub == r.Sub && x.Source == r.Source && r.Source != ReportInferred && x.CompletionID == r.CompletionID {
 				out = *x
 				return nil, nil, nil
 			}
 		}
-		if r.Source == ReportInferred && s.hasCompletionLocked(r.Sub, hintGen(r.CompletionID)) {
-			// 这一代已经有真正的完成（检查与入队在同一把锁里，attempt 2 自查）：不提醒
+		if r.Source == ReportInferred && s.staleHintLocked(sub.Key, r.CompletionID) {
+			// 这一代已经有真正的完成，或这段安静开始之后已经到过主动报告或账本提醒（检查与入队在同一把锁里）：不提醒
 			return nil, nil, nil
 		}
 		for _, x := range s.reports {
-			if x.Sub != r.Sub || x.Source != ReportInferred || x.State != ReportPending || x.Main != main.Key {
+			if x.Sub != r.Sub || !isReminder(x.Source) || x.State != ReportPending || x.Main != main.Key {
 				continue
 			}
-			if r.Source == ReportInferred {
+			switch {
+			case r.Source == ReportInferred:
 				// 同一子 agent 同时只留一条等送的提醒
 				out = *x
 				return nil, nil, nil
+			case r.Source == ReportGraph && x.Source == ReportGraph:
+				continue // 不同轮的账本提醒各送各的
 			}
-			// 真正的完成到了、提醒还没送：换成真正的完成（只送一次，送更准的那条）
+			// 提醒还没送：换成更准的那条（账本提醒换掉推断提醒；主动报告换掉任何提醒），只送一次
 			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = r.CompletionID, r.Source, Clean(r.Text, 2000), r.Ref, s.now()
 			out, added = *x, true
 			return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
@@ -138,6 +127,31 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 	return out, added, err
 }
 
+// isReminder：推断提醒与账本提醒都只是提醒，不占完成（attempt 2 裁定 A、attempt 4 裁定 B2-A）。
+func isReminder(source string) bool { return source == ReportInferred || source == ReportGraph }
+
+// staleHintLocked：推断提醒 hint:代次:安静开始的毫秒 已经过时——这一代有了主动报告，或安静开始之后到过主动报告或账本提醒。
+func (s *Store) staleHintLocked(sub, hintID string) bool {
+	if s.hasCompletionLocked(sub, hintGen(hintID)) {
+		return true
+	}
+	p := strings.SplitN(hintID, ":", 3)
+	if len(p) != 3 {
+		return false
+	}
+	ms, err := strconv.ParseInt(p[2], 10, 64)
+	if err != nil {
+		return false
+	}
+	from := time.UnixMilli(ms)
+	for _, x := range s.reports {
+		if x.Sub == sub && x.Source != ReportInferred && !x.CreatedAt.Before(from) {
+			return true
+		}
+	}
+	return false
+}
+
 // HasCompletion：这个子 agent 的这次完成（完成编号）已经收过（主动报告或账本提交；推断提醒不算，旧版本按代次编号的推断行也不算）。
 func (s *Store) HasCompletion(sub, completionID string) bool {
 	s.mu.Lock()
@@ -150,7 +164,7 @@ func (s *Store) hasCompletionLocked(sub, completionID string) bool {
 		return false
 	}
 	for _, x := range s.reports {
-		if x.Sub == sub && x.Source != ReportInferred && x.CompletionID == completionID {
+		if x.Sub == sub && x.Source == ReportActive && x.CompletionID == completionID {
 			return true
 		}
 	}
@@ -174,13 +188,13 @@ func hintGen(id string) string {
 // absorbLocked：提醒从 sending 退回 pending（主 agent 正忙、或 wait 的回应没写出去）时，同一子 agent 在它之后已经到了真正的完成，
 // 就把那条完成并进这条提醒的位置、删掉那条：只送一次，送真正的完成（attempt 2 自查：主 agent 忙时提醒多半处在 sending，原地替换常常落空）。
 func (s *Store) absorbLocked(x *Report) {
-	if x.Source != ReportInferred || x.State != ReportPending {
+	if !isReminder(x.Source) || x.State != ReportPending {
 		return
 	}
 	// 这一代在提醒之前就有完成的，提醒入队时已被拒；所以只看提醒之后到的真正完成
 	stale := false
 	for i, y := range s.reports {
-		if y == x || y.Sub != x.Sub || y.Source == ReportInferred || y.CreatedAt.Before(x.CreatedAt) {
+		if y == x || y.Sub != x.Sub || y.Source != ReportActive || y.CreatedAt.Before(x.CreatedAt) {
 			continue
 		}
 		// 合并只在同一主 agent 内（attempt 3 自查：提醒挂在已停止的旧主 agent 上时，并过去新主 agent 就取不到了）

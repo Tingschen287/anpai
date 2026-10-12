@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -133,83 +132,61 @@ func matchExtra(args []string, extra [][]string) int {
 	return 0
 }
 
-// CheckExtraArgs 核对 owner 声明的额外参数本身：明确的绕过参数、涉及权限或沙箱的非安全写法，owner 也声明不进去。
-func CheckExtraArgs(extra [][]string) error {
+// declaredAllow：owner 能在 deck 设置 extra_args 里声明的参数（n051 attempt 4 设计复审，owner 选 B1-A：声明也走白名单）。
+// 以前按「已知危险参数」查声明（评审 3 B1 之后按参数语义查），CLI 的隐藏参数与新参数（claude --inherit-permission-mode、
+// codex --approve-for-me、claude --agents/--plugin-dir）照样声明得进来。现在每个工具只认这里列的几种，其余一律拒绝；
+// 要放行新的参数，改这张表（附出处与理由）。
+//   - claude：工具许可的细化与附加系统提示，不改权限模式、不加载设置或插件；
+//   - codex：-c 只认给命令设环境变量（shell_environment_policy.*）与工作区沙箱的网络开关（owner 2026-10-12 为隔离测试批准）；
+//   - gemini 与其他工具：不允许声明。
+var declaredAllow = map[string]map[string]bool{
+	"claude": {"--allowedTools": true, "--allowed-tools": true, "--disallowedTools": true, "--disallowed-tools": true, "--append-system-prompt": true},
+	"codex":  {"-c": true, "--config": true},
+}
+
+// CheckExtraArgs 核对 owner 为 tool 声明的额外参数：每组必须是「白名单里的一个参数 + 一个取值」（或 参数=取值），
+// 取值不能是参数、不能含转义；codex 的 -c 只认白名单里的键。其余一律拒绝（硬拒绝，owner 也声明不进来）。
+func CheckExtraArgs(tool string, extra [][]string) error {
 	for _, g := range extra {
-		if len(g) == 0 {
-			return fmt.Errorf("额外参数组是空的")
-		}
-		if err := checkDeclaredGroup(g); err != nil {
-			return fmt.Errorf("额外参数 %q：%w（硬拒绝，owner 也声明不进来）", g, err)
+		if err := checkDeclaredGroup(tool, g); err != nil {
+			return fmt.Errorf("额外参数 %q：%w（deck 只放行白名单里的额外参数，见 agentdeck.declaredAllow）", g, err)
 		}
 	}
 	return nil
 }
 
-// declaredFlags：声明的额外参数里涉及权限、沙箱、设置来源的参数名（去掉前导 -、小写、去掉 - 与 _ 之后比较，
-// 这样 --approvalMode、--approval-mode、--approval_mode 都认得）→ 放行的取值（nil 表示这个参数一律不收）。
-// 按参数语义查，而不是按「已知的绕过取值」猜（n051 评审 3 B1：-anever、--permission-mode auto、--settings、-y 等声明后两道检查都放行）。
-var declaredFlags = map[string][]string{
-	"permissionmode": {"default", "acceptedits", "plan"},
-	"askforapproval": {"untrusted", "on-request", "on-failure"},
-	"a":              {"untrusted", "on-request", "on-failure"},
-	"sandbox":        {"read-only", "workspace-write"},
-	"s":              {"read-only", "workspace-write"},
-	"approvalmode":   {"default", "auto_edit"},
-	"settings":       nil, // Claude 从文件或 JSON 读设置，里面可以有 defaultMode
-	"profile":        nil, // Codex 的 profile 里可以有 approval_policy、sandbox_mode
-	"p":              nil,
-	"yolo":           nil,
-	"y":              nil,
-}
-
-// checkDeclaredGroup 按参数语义核对 owner 声明的一组额外参数（n051 评审 3 B1）。
-func checkDeclaredGroup(g []string) error {
-	// 明确的绕过参数（含跨元素的参数名与取值）
-	if err := checkBypassFlags(append(append([]string{}, g...), strings.Join(g, " "))...); err != nil {
-		return err
+func checkDeclaredGroup(tool string, g []string) error {
+	var flag, value string
+	switch len(g) {
+	case 1:
+		var ok bool
+		if flag, value, ok = strings.Cut(g[0], "="); !ok {
+			return fmt.Errorf("要写成 参数 取值 两个元素，或 参数=取值")
+		}
+	case 2:
+		flag, value = g[0], g[1]
+	default:
+		return fmt.Errorf("每组只能是一个参数加一个取值")
 	}
-	for _, a := range g {
-		if low := strings.ToLower(a); strings.Contains(low, `\u`) || strings.Contains(low, `\x`) {
-			return fmt.Errorf("含转义写法，deck 不解码，请改成不带转义的写法")
-		}
+	if !declaredAllow[tool][flag] {
+		return fmt.Errorf("%s 不在 %s 可声明的参数里", flag, tool)
 	}
-	for i := 0; i < len(g); i++ {
-		a := g[i]
-		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
-			continue // 取值或自由文本：由前面的参数决定怎么查
-		}
-		name, value, inline := strings.Cut(a, "=")
-		if !strings.HasPrefix(name, "--") && len(name) > 2 {
-			return fmt.Errorf("短参数连写 %s：请把参数名与取值分开写，deck 才能核对", a)
-		}
-		key := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(strings.TrimLeft(name, "-")))
-		if strings.Contains(key, "dangerous") || strings.Contains(key, "bypass") || strings.Contains(key, "yolo") {
-			return fmt.Errorf("参数 %s 会跳过权限确认", name)
-		}
-		if !inline && i+1 < len(g) && !strings.HasPrefix(g[i+1], "-") {
-			value, inline = g[i+1], true
-			i++
-		}
-		if key == "c" || key == "config" {
-			// Codex 的配置覆盖：完整赋值不论有没有空白都按白名单查（评审 3 B1：-c 'approval_policy = "never"' 以前被当成自由文本跳过）
-			if !inline || value == "" {
-				return fmt.Errorf("参数 %s 没有取值", name)
-			}
-			if err := checkSensitiveAssignments(value); err != nil {
-				return err
-			}
-			continue
-		}
-		allowed, sensitive := declaredFlags[key]
-		if !sensitive {
-			continue
-		}
-		if allowed == nil {
-			return fmt.Errorf("参数 %s 能改权限或沙箱的来源，deck 核对不了，不能声明", name)
-		}
-		if !inline || !slices.Contains(allowed, strings.ToLower(strings.Trim(value, `"'`))) {
-			return fmt.Errorf("参数 %s %s：只放行 %s", name, value, strings.Join(allowed, "、"))
+	if value == "" || strings.HasPrefix(value, "-") {
+		return fmt.Errorf("参数 %s 的取值不能为空、不能是参数", flag)
+	}
+	if low := strings.ToLower(value); strings.Contains(low, `\u`) || strings.Contains(low, `\x`) || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("含转义写法，deck 不解码，请改成不带转义的写法")
+	}
+	if tool == "codex" {
+		key, v, ok := strings.Cut(value, "=")
+		key = strings.TrimSpace(key)
+		switch {
+		case !ok:
+			return fmt.Errorf("-c 的取值要写成 键=值")
+		case strings.HasPrefix(key, "shell_environment_policy.") && !strings.ContainsAny(key, " \t\"'[]{}"):
+		case key == "sandbox_workspace_write.network_access" && (strings.TrimSpace(v) == "true" || strings.TrimSpace(v) == "false"):
+		default:
+			return fmt.Errorf("-c 只认 shell_environment_policy.* 与 sandbox_workspace_write.network_access=true|false，不认 %s", key)
 		}
 	}
 	return nil

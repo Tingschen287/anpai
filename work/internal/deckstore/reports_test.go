@@ -32,7 +32,7 @@ func TestReportsDedupeAndState(t *testing.T) {
 	if err != nil || !added || r1.Main != m.Key || r1.Text != "侧栏写完了 " {
 		t.Fatalf("应收下并清洗：%+v %v %v", r1, added, err)
 	}
-	r2, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "c1", Source: ReportInferred, Text: "再报一次"})
+	r2, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "c1", Source: ReportActive, Text: "再报一次"})
 	if added || r2.ID != r1.ID {
 		t.Fatalf("同一次完成不该重复：%+v", r2)
 	}
@@ -174,7 +174,8 @@ func TestAbsorbOnlyWithinSameMain(t *testing.T) {
 	}
 }
 
-// 推断提醒不占完成：有自己的编号；同时只留一条等送的；真正的完成（含账本提交）到时把它换掉。账本提交另按 Ref 去重。
+// 推断提醒与账本提醒都不占完成（attempt 2 裁定 A、attempt 4 裁定 B2-A）：各有自己的编号；同时只留一条等送的推断提醒；
+// 账本提醒换掉还没送的推断提醒、按 节点#attempt 只收一次；真正的完成只认主动报告。
 func TestReportsHintAndGraphRef(t *testing.T) {
 	d := testDirs(t)
 	s := withProject(t, d, DefaultEnvelope("deck"))
@@ -186,24 +187,39 @@ func TestReportsHintAndGraphRef(t *testing.T) {
 	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "hint:1:200", Source: ReportInferred, Text: "推断二"}); added {
 		t.Fatal("同时只留一条等送的提醒")
 	}
+	g, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Ref: "n1#3", Text: "账本"})
+	if !added || g.ID != h1.ID || g.Source != ReportGraph || g.CompletionID != "ledger:n1:3" {
+		t.Fatalf("账本提醒换掉还没送的推断提醒：%+v %v", g, added)
+	}
 	if s.HasCompletion(sb.Key, CompletionIDFor(1)) {
-		t.Fatal("提醒不占完成")
+		t.Fatal("账本提醒不占完成")
 	}
-	g, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: CompletionIDFor(1), Source: ReportGraph, Ref: "n1#3", Text: "账本"})
-	if !added || g.ID != h1.ID || g.Source != ReportGraph || g.Ref != "n1#3" {
-		t.Fatalf("账本提交换掉还没送的提醒：%+v %v", g, added)
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Ref: "n1#3", Text: "账本"}); added {
+		t.Fatal("同一轮提交（Ref 相同）只收一次")
 	}
-	if got := s.PendingReports(m.Key); len(got) != 1 || !s.HasCompletion(sb.Key, CompletionIDFor(1)) {
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Text: "账本"}); added {
+		t.Fatal("账本提醒必须带 节点#attempt")
+	}
+	// 主动报告换掉还没送的账本提醒（只送一次，送真正的完成）
+	a1, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportActive, Text: "做完了"})
+	if !added || a1.ID != h1.ID || a1.Source != ReportActive || !s.HasCompletion(sb.Key, CompletionIDFor(1)) {
+		t.Fatalf("主动报告换掉还没送的提醒：%+v %v", a1, added)
+	}
+	if got := s.PendingReports(m.Key); len(got) != 1 {
 		t.Fatalf("只一条：%+v", got)
 	}
-	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: CompletionIDFor(2), Source: ReportGraph, Ref: "n1#3", Text: "账本"}); added {
-		t.Fatal("同一轮提交（Ref 相同）换了代次也不重收")
-	}
-	// 这一代已有真正的完成：提醒在同一把锁里被拒（检查与入队之间不留空档）
-	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(1, time.Now()), Source: ReportInferred, Text: "迟到的推断"}); added {
+	// 这一代已有真正的完成：推断提醒在同一把锁里被拒
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(1, time.Now().Add(-time.Hour)), Source: ReportInferred, Text: "迟到的推断"}); added {
 		t.Fatal("这一代已有完成：不收提醒")
 	}
-	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(2, time.Now()), Source: ReportInferred, Text: "新一代的推断"}); !added {
-		t.Fatal("新一代还没完成：收提醒")
+	// 安静开始之后到过账本提醒：推断提醒也不收（账本已经说明它交了）
+	s2 := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	_, sb2 := mainAndSub(t, s2)
+	quietFrom := time.Now().Add(-time.Minute)
+	lg, _, _ := s2.EnqueueReport(Report{Sub: sb2.Key, Source: ReportGraph, Ref: "n1#1", Text: "账本"})
+	s2.MarkReport(lg.ID, ReportSending) // 账本提醒已送达（不再是等送的那一条）
+	s2.MarkReport(lg.ID, ReportDelivered)
+	if _, added, _ := s2.EnqueueReport(Report{Sub: sb2.Key, CompletionID: HintID(1, quietFrom), Source: ReportInferred, Text: "推断"}); added {
+		t.Fatal("安静之后到过账本提醒：不再推断提醒")
 	}
 }

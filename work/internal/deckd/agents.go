@@ -200,7 +200,7 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 	if err := agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model, b.Title); err != nil {
 		return plan, err
 	}
-	if err := agentdeck.CheckExtraArgs(a.ExtraArgs); err != nil {
+	if err := agentdeck.CheckExtraArgs(a.Tool, a.ExtraArgs); err != nil {
 		return plan, err
 	}
 	if err := s.upstreamConfigNoBypass(a.Tool); err != nil {
@@ -568,8 +568,8 @@ func MainBrief(p deckstore.ProjectDef) string {
 - 五类事项必须上报、等 owner 决定：花额度（cost）、改电脑设置（config）、推送代码（push）、协作者意见不一（disagree）、偏离 owner 决策（deviation）：
   deck agent escalate --kind <类别> --summary <说明> --options <选项,…> --recommend <推荐>
 - owner 已作的决定：deck agent decisions（用来判断是否偏离）。
-- 不使用任何跳过权限确认的参数。子 agent 做完会自动转告你，标明「主动报告」或「账本提交」；
-  「推断提醒」只说明它停下了（可能做完，也可能在等输入或权限确认），不算完成，请用 deck agent output 查看。
+- 不使用任何跳过权限确认的参数。子 agent 做完会自动转告你，标明「主动报告」；
+  「推断提醒」（它停下了：可能做完，也可能在等输入或权限确认）与「账本提醒」（账本显示它的节点已提交）都只是提醒、不算完成，请用 deck agent output 查看。
 - 开完子 agent 就结束这一轮回复、停下来等：汇报只在你空闲时送进来。不要用 sleep 或循环等待（你一直在忙，汇报就送不进来）。
   确实需要在一个命令里等，就运行 deck agent wait --timeout 2m（可以重复运行）：有汇报就打印出来并自动确认收到（之后不会再转告一次），没有就到时返回。
 
@@ -610,7 +610,7 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a := res.Agent
-	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckExtraArgs(a.ExtraArgs), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
+	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckExtraArgs(a.Tool, a.ExtraArgs), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
 		agentdeck.CheckTakesTaskText(a.Tool, a.Agent), deckstore.CheckPath(p.Path)} {
 		if check != nil {
 			fail(w, http.StatusBadRequest, "%v", check)

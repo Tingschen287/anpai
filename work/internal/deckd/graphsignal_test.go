@@ -53,10 +53,10 @@ func TestGraphSubmitSignalReportsOnce(t *testing.T) {
 		t.Fatal("普通通道的子 agent 不受影响")
 	}
 	w.srv.deliverReports(context.Background(), st)
-	if len(w.up.mainSends) != 1 || !strings.Contains(w.up.mainSends[0], "账本提交") {
-		t.Fatalf("转告标明账本提交：%v", w.up.mainSends)
+	if len(w.up.mainSends) != 1 || !strings.Contains(w.up.mainSends[0], "账本提醒") || !strings.Contains(w.up.mainSends[0], "不算完成") {
+		t.Fatalf("转告标明账本提醒、不算完成：%v", w.up.mainSends)
 	}
-	// 同一次完成随后主动报告：不再转告
+	// 随后的主动报告才是真正的完成：照常转告（attempt 4 设计复审，owner 选 B2-A）
 	prev := w.srv.callerFn
 	w.srv.callerFn = func(r *http.Request) Caller {
 		if r.Header.Get("X-Test-As") == "graphsub" {
@@ -65,9 +65,10 @@ func TestGraphSubmitSignalReportsOnce(t *testing.T) {
 		return prev(r)
 	}
 	w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"节点活做完了"}`)
+	w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"节点活做完了"}`) // 重报：同一次完成只送一次
 	w.srv.deliverReports(context.Background(), st)
-	if len(w.up.mainSends) != 1 {
-		t.Fatalf("同一次完成只送一次：%v", w.up.mainSends)
+	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "主动报告") {
+		t.Fatalf("主动报告照常送、只送一次：%v", w.up.mainSends)
 	}
 }
 

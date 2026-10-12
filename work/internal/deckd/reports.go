@@ -247,7 +247,7 @@ func (s *Server) reportText(rep deckstore.Report) string {
 	if rep.Source == deckstore.ReportInferred {
 		label = "推断提醒"
 	} else if rep.Source == deckstore.ReportGraph {
-		label = "账本提交"
+		label = "账本提醒"
 	}
 	return fmt.Sprintf("［Agent Deck 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
 }
@@ -383,10 +383,10 @@ func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time
 		default:
 			continue
 		}
-		// x 是发起查询前取的快照：x.Gen() 就是发起查询时的代次（评审 3 B2）
-		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph, AtGen: x.Gen(),
-			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt), // 完成编号由存储在锁里给（attempt 3 自查 S2）
-			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）；子 agent 没有运行 deck agent report --done。需要时用 deck agent output %s 查看。",
+		// 账本提醒（owner 在 attempt 4 设计复审选 B2-A）：不占完成，按 节点#attempt 只送一次
+		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph,
+			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt),
+			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）。这只是提醒、不算完成：子 agent 运行 deck agent report --done 的主动报告才算完成，到了仍会转告。需要时用 deck agent output %s 查看。",
 				x.Graph.Node, x.Graph.Attempt, state, x.Key)})
 		if err == nil && added {
 			s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "账本显示已提交")
