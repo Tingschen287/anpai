@@ -160,7 +160,8 @@ func (s *Store) absorbLocked(x *Report) {
 	if x.Source != ReportInferred || x.State != ReportPending {
 		return
 	}
-	stale := s.hasCompletionLocked(x.Sub, hintGen(x.CompletionID))
+	// 这一代在提醒之前就有完成的，提醒入队时已被拒；所以只看提醒之后到的真正完成
+	stale := false
 	for i, y := range s.reports {
 		if y == x || y.Sub != x.Sub || y.Source == ReportInferred || y.CreatedAt.Before(x.CreatedAt) {
 			continue
