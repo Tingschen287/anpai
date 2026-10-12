@@ -58,6 +58,8 @@ func main() {
 		panel(dirs, os.Args[2:])
 	case "agent":
 		agentCmd(dirs, os.Args[2:])
+	case "reports":
+		reportsCmd(dirs, os.Args[2:])
 	case "project":
 		projectCmd(dirs, os.Args[2:])
 	case "whoami":

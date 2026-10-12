@@ -138,6 +138,12 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			gs = projectctlGraphStart(cfg.Projectctl)
 		}
 		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		if cfg.Projectctl != "" {
+			script := cfg.Projectctl
+			srv.agents.graphState = func(ctx context.Context, p deckstore.ProjectDef, node string) (projectctl.State, error) {
+				return projectctl.NewClient(p.GraphRoot, script).BriefState(ctx, node)
+			}
+		}
 		// brief 里写 deck 的绝对路径：agent 的 shell 未必有 deck 所在的 PATH（Codex 用登录 shell）
 		if exe, err := os.Executable(); err == nil && !strings.ContainsAny(exe, " \t'\"$`\\") {
 			DeckCommand = exe

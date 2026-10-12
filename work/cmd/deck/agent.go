@@ -272,6 +272,23 @@ func agentEscalate(ctx context.Context, c *deckclient.Client, args []string) (an
 	return map[string]any{"pending": *kind, "decision": d, "next": "等 owner 在右侧面板决定；用 deck agent decisions 查看结果"}, nil
 }
 
+// reportsCmd：owner 把排队等着转告主 agent 的汇报立刻送出（deck reports deliver-now [--project id]；布局里按 F8）。
+func reportsCmd(dirs deckstore.Dirs, args []string) {
+	if len(args) < 1 || args[0] != "deliver-now" {
+		fmt.Fprintln(os.Stderr, "用法：deck reports deliver-now [--project <id>]")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("reports deliver-now", flag.ExitOnError)
+	project := fs.String("project", "", "只送这个项目的（默认全部）")
+	fs.Parse(args[1:])
+	var out any
+	c := deckclient.New(deckd.SocketPath(dirs)).WithTimeout(deckclient.LongTimeout)
+	if err := c.Do(context.Background(), "POST", "/v1/reports/deliver-now", map[string]string{"project": *project}, &out); err != nil {
+		fail("%v", err)
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
+}
+
 // projectCmd：owner 新建项目（deck project add）。读出整份设置、加一个项目、整份写回（deckd 校验）。
 func projectCmd(dirs deckstore.Dirs, args []string) {
 	if len(args) < 1 || args[0] != "add" {

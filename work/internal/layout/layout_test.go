@@ -149,6 +149,7 @@ func TestBindingsConf(t *testing.T) {
 		"bind -n F2 send-keys -t %7 F2",
 		"bind -n C-q send-keys -t %7 C-q",
 		"bind -n F10 select-pane -t %1",
+		"bind -n F8 new-window -d -n deliver", // §14.4：一键立刻转告排队的汇报
 		`run-shell -b ''\''/opt/my deck/deck'\'' '\''layout'\'' '\''toggle'\'' '\''left'\''`,
 	} {
 		if !strings.Contains(conf, want) {

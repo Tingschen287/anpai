@@ -706,6 +706,16 @@ func (m *Machine) handbackLocked(session, why string) error {
 // 主 agent 正显示在中间、owner 在 OwnerIdle 内打过字：返回 ErrOwnerTyping，调用方排队。
 // 正显示在中间：送前先关输入并确认，送完按 brief 状态放开。不在中间：直接送。
 func (m *Machine) DeliverToMain(id string, deliver func() error) error {
+	return m.deliverToMain(id, deliver, false)
+}
+
+// DeliverToMainNow 是 owner 按键要求「立刻送」（§14.4 第 2 条，n051 评审 1 B6）：不看 30 秒打字门，
+// 其余照旧——送前先关输入并确认，送完按 brief 状态放开。
+func (m *Machine) DeliverToMainNow(id string, deliver func() error) error {
+	return m.deliverToMain(id, deliver, true)
+}
+
+func (m *Machine) deliverToMain(id string, deliver func() error, now bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.writable(); err != nil {
@@ -723,7 +733,7 @@ func (m *Machine) DeliverToMain(id string, deliver func() error) error {
 	if err != nil {
 		return ErrInputNotClosed
 	}
-	if !ro {
+	if !ro && !now {
 		last, err := m.center.LastInput()
 		if err != nil {
 			return fmt.Errorf("读不到你最后的输入时间，先不送：%w", err)

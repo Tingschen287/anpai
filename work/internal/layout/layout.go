@@ -308,6 +308,7 @@ var Keys = []struct{ Key, What string }{
 	{"F5", "显示/隐藏左栏"},
 	{"F6", "显示/隐藏右栏"},
 	{"F7", "显示/隐藏下栏"},
+	{"F8", "把排队等着转告主 agent 的汇报立刻送出"},
 	{"F9", "agent 设置"},
 	{"F10", "回到中间窗格（键盘焦点）"},
 }
@@ -328,6 +329,8 @@ func BindingsConf(s Spec, b Built) string {
 	fmt.Fprintf(&w, "bind -n F5 %s\n", toggle("left"))
 	fmt.Fprintf(&w, "bind -n F6 %s\n", toggle("right"))
 	fmt.Fprintf(&w, "bind -n F7 %s\n", toggle("bottom"))
+	// F8：立刻转告排队的汇报（§14.4）。在布局 server 的后台窗口里跑，deckd 才认得出是 owner
+	fmt.Fprintf(&w, "bind -n F8 new-window -d -n deliver %s\n", Quote(s.deckCmd("reports", "deliver-now")+"; sleep 1"))
 	fmt.Fprintf(&w, "bind -n F9 new-window -n settings %s\n", Quote(s.deckCmd(append([]string{"settings"}, s.sockets()...)...)))
 	fmt.Fprintf(&w, "bind -n F10 select-pane -t %s\n", b.Center)
 	// 外层终端改尺寸后，tmux 按比例重分各栏；复原约定尺寸

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
@@ -95,6 +96,7 @@ type inferState struct {
 	wasBusy   map[string]bool      // 子会话 key → 曾经在跑
 	quietFrom map[string]time.Time // 子会话 key → 从 running 转为 idle/waiting 的时刻
 	notified  map[string]int       // 主会话 key → 已通知过「等着转告」的条数（避免刷屏）
+	lastGraph time.Time            // 上一次查账本提交信号的时刻
 }
 
 // runReports 是汇报的推断与送达循环（deckd 运行期间常驻）。
@@ -108,6 +110,7 @@ func (s *Server) runReports(ctx context.Context) {
 			return
 		case <-t.C:
 			s.inferCompletions(st, time.Now())
+			s.graphSubmits(ctx, st, time.Now())
 			s.expireClaims(time.Now())
 			s.deliverReports(ctx, st)
 		}
@@ -157,7 +160,14 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 	if s.agents == nil || s.stopped() != nil {
 		return
 	}
-	for _, main := range s.store.Sessions("") {
+	s.deliverPending(ctx, st, "", false)
+}
+
+// deliverPending 把等送的汇报送给主 agent；project 为空表示全部项目；now 为真表示 owner 按键要求立刻送（跳过打字门）。
+// 返回送达的条数。
+func (s *Server) deliverPending(ctx context.Context, st *inferState, project string, now bool) int {
+	sent := 0
+	for _, main := range s.store.Sessions(project) {
 		if main.Role != "main" || main.AgentDeckID == "" || main.Status != deckstore.StatusRunning {
 			continue
 		}
@@ -167,13 +177,13 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 		}
 		pending := s.store.PendingReports(main.Key)
 		for _, rep := range pending {
-			err := s.deliverOne(ctx, main, rep)
+			err := s.deliverOne(ctx, main, rep, now)
 			if errors.Is(err, viewstate.ErrOwnerTyping) {
 				// owner 正在主 agent 那里打字：先排队，通知一次（条数变了再通知）
 				st.mu.Lock()
 				if st.notified[main.Key] != len(pending) {
 					st.notified[main.Key] = len(pending)
-					s.store.Notify(main.Project, "report", fmt.Sprintf("%d 条汇报等着转告主 agent（你停止输入 30 秒后自动送）", len(pending)), "deckd")
+					s.store.Notify(main.Project, "report", fmt.Sprintf("%d 条汇报等着转告主 agent（你停止输入 30 秒后自动送，或按 F8 立刻送）", len(pending)), "deckd")
 				}
 				st.mu.Unlock()
 				break
@@ -181,6 +191,7 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 			if err != nil {
 				break // 主 agent 正在回答或暂时送不了：下一轮再试，后面的也等着（保持先后）
 			}
+			sent++ // 送出（送达，或送达未确认、已通知 owner）
 		}
 		if len(s.store.PendingReports(main.Key)) == 0 {
 			st.mu.Lock()
@@ -188,6 +199,7 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 			st.mu.Unlock()
 		}
 	}
+	return sent
 }
 
 // deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
@@ -280,6 +292,79 @@ func (s *Server) waitingFor(main string) bool {
 	return s.waiting[main] > 0
 }
 
+// graphEvery 是查 Graph 节点提交信号的间隔（一次 projectctl brief 要两三秒，不必每 3 秒查）。
+var graphEvery = 30 * time.Second
+
+// graphSubmits：走 Graph 通道、还在跑的子 agent，账本显示它的节点已提交（submit 之后的 submitted、accepted、rework），
+// 就按「账本提交」入队（§14.4 的第三条信号，n051 评审 1 B6）。与主动报告、推断共用任务代次：同一次完成只送一次。
+func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time) {
+	if s.agents == nil || s.agents.graphState == nil {
+		return
+	}
+	st.mu.Lock()
+	due := now.Sub(st.lastGraph) >= graphEvery
+	if due {
+		st.lastGraph = now
+	}
+	st.mu.Unlock()
+	if !due {
+		return
+	}
+	set := s.store.Settings()
+	for _, x := range s.store.Sessions("") {
+		if x.Role != "sub" || x.Status != deckstore.StatusRunning || x.Graph == nil || x.Graph.Attempt < 1 {
+			continue
+		}
+		p, ok := set.Project(x.Project)
+		if !ok || p.GraphRoot == "" {
+			continue
+		}
+		state, err := s.agents.graphState(ctx, p, x.Graph.Node)
+		if err != nil {
+			continue
+		}
+		switch state {
+		case projectctl.StateSubmitted, projectctl.StateAccepted, projectctl.StateRework:
+		default:
+			continue
+		}
+		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph,
+			CompletionID: deckstore.CompletionIDFor(x.Gen()),
+			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）；子 agent 没有运行 deck agent report --done。需要时用 deck agent output %s 查看。",
+				x.Graph.Node, x.Graph.Attempt, state, x.Key)})
+		if err == nil && added {
+			s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "账本显示已提交")
+		}
+	}
+}
+
+// postReportsDeliverNow：owner 按键要求把排队的汇报立刻送出（POST /v1/reports/deliver-now {"project":…}，§14.4 第 2 条）。
+func (s *Server) postReportsDeliverNow(w http.ResponseWriter, r *http.Request) {
+	c := s.caller(r)
+	if !need(w, c, true, RoleOwner) {
+		return
+	}
+	if s.agents == nil {
+		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck")
+		return
+	}
+	var b struct {
+		Project string `json:"project"`
+	}
+	if err := readBody(r, &b); err != nil {
+		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		return
+	}
+	sent := s.deliverPending(detached(r), &inferState{wasBusy: map[string]bool{}, quietFrom: map[string]time.Time{}, notified: map[string]int{}}, b.Project, true)
+	left := 0
+	for _, x := range s.store.Sessions(b.Project) {
+		if x.Role == "main" {
+			left += len(s.store.PendingReports(x.Key))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sent": sent, "pending": left})
+}
+
 // postReportsAck：主 agent 确认收到 deck agent wait 领走的汇报（POST /v1/reports/ack {"ids":[…]}）。
 func (s *Server) postReportsAck(w http.ResponseWriter, r *http.Request) {
 	c := s.caller(r)
@@ -320,7 +405,7 @@ func (s *Server) expireClaims(now time.Time) {
 // waitPoll 是 deck agent wait 查一次的间隔（测试可改）。
 var waitPoll = time.Second
 
-func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report) error {
+func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report, now bool) error {
 	sub, _ := s.store.Session(rep.Sub)
 	text := s.reportText(rep)
 	send := func() error {
@@ -348,6 +433,9 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 	}
 	if s.view == nil {
 		return send()
+	}
+	if now {
+		return s.view.DeliverToMainNow(main.AgentDeckID, send)
 	}
 	return s.view.DeliverToMain(main.AgentDeckID, send)
 }
