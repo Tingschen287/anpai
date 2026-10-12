@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
@@ -43,6 +44,8 @@ type ProgressFunc func(ctx context.Context, p deckstore.ProjectDef) (any, error)
 
 // Server 是 deckd 的 HTTP 层。
 type Server struct {
+	waitMu   sync.Mutex
+	waiting  map[string]int // 正在 deck agent wait 的主 agent（推送循环跳过它们）
 	cfg      Config
 	store    *deckstore.Store
 	resolver paneResolver

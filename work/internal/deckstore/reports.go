@@ -90,6 +90,49 @@ func (s *Store) PendingReports(main string) []Report {
 	return out
 }
 
+// AdoptOrphans 让新主 agent 接管同项目里已结束（stopped）的主 agent 留下的子 agent 与待送汇报（n051 增量自查）：
+// 否则旧主 agent 退出后，它开的子 agent 的汇报既推不到新主 agent、新主 agent 也取不到，悄悄丢了。
+// 先写汇报再写注册表；两次写之间失败时，已改的待送汇报归新主 agent，子 agent 之后的汇报仍挂旧主 agent（owner 从通知栏看得到）。
+func (s *Store) AdoptOrphans(project, newMain string) (subs, reports int, err error) {
+	err = s.mutate(func() (func() error, []Event, error) {
+		nm, ok := s.sessions[newMain]
+		if !ok || nm.Role != "main" || nm.Project != project {
+			return nil, nil, fmt.Errorf("%s 不是项目 %s 的主 agent", newMain, project)
+		}
+		gone := map[string]bool{}
+		for _, x := range s.sessions {
+			if x.Role == "main" && x.Project == project && x.Key != newMain && x.Status == StatusStopped {
+				gone[x.Key] = true
+			}
+		}
+		if len(gone) == 0 {
+			return nil, nil, nil
+		}
+		for _, x := range s.sessions {
+			if x.Role == "sub" && x.Project == project && gone[x.Parent] {
+				x.Parent = newMain
+				subs++
+			}
+		}
+		for _, r := range s.reports {
+			if r.Project == project && gone[r.Main] && r.State == ReportPending {
+				r.Main, r.UpdatedAt = newMain, s.now()
+				reports++
+			}
+		}
+		if subs == 0 && reports == 0 {
+			return nil, nil, nil
+		}
+		return func() error {
+			if err := s.saveReports(); err != nil {
+				return err
+			}
+			return s.saveRegistry()
+		}, []Event{{Kind: "session", Project: project, ID: newMain}}, nil
+	})
+	return subs, reports, err
+}
+
 // TakeReports 由主 agent 自己取走它还没送的汇报（deck agent wait，n051）：在锁内把 pending 直接标为 delivered 并返回。
 // 推送循环正在送（sending）的不取；被取走的，推送循环随后标 sending 会因状态不符而放弃，同一条只送一次。
 func (s *Store) TakeReports(main string) ([]Report, error) {

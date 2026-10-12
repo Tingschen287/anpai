@@ -27,7 +27,7 @@ import (
 //	deck agent list | output <id> | send <id> --text <内容>
 //	deck agent escalate --kind <cost|config|push|disagree|deviation> --summary <说明> [--options a,b] [--recommend x] [--scope k=v,…]
 //	deck agent decisions
-//	deck agent wait [--timeout 10m]                 （主 agent 自己等子 agent 的汇报；拿到即算送达）
+//	deck agent wait [--timeout 2m]                  （主 agent 自己等子 agent 的汇报；拿到即算送达）
 //	deck agent report [--done] --text <内容>
 //	deck agent start-main --project <项目>        （owner）
 //
@@ -65,7 +65,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 		err = c.Get(ctx, "/v1/decisions", &out)
 	case "wait":
 		fs := flag.NewFlagSet("wait", flag.ExitOnError)
-		timeout := fs.Duration("timeout", 5*time.Minute, "最多等多久（上限 10 分钟）")
+		timeout := fs.Duration("timeout", 2*time.Minute, "最多等多久（上限 10 分钟；agent 的命令工具多半 2 分钟就超时，建议 2m 并重复运行）")
 		fs.Parse(rest)
 		if *timeout > 10*time.Minute {
 			*timeout = 10 * time.Minute

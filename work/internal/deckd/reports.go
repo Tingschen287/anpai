@@ -154,6 +154,10 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 		if main.Role != "main" || main.AgentDeckID == "" || main.Status != deckstore.StatusRunning {
 			continue
 		}
+		if s.waitingFor(main.Key) {
+			// 主 agent 正在 deck agent wait（n051 增量自查）：它这时算忙，推送会把汇报占在 sending 里一轮又一轮，wait 就取不到；让 wait 取
+			continue
+		}
 		pending := s.store.PendingReports(main.Key)
 		for _, rep := range pending {
 			err := s.deliverOne(ctx, main, rep)
@@ -202,7 +206,7 @@ func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
 	if !need(w, c, false, RoleMain) {
 		return
 	}
-	d := 5 * time.Minute
+	d := 2 * time.Minute
 	if v := r.URL.Query().Get("timeout"); v != "" {
 		sec, err := strconv.Atoi(v)
 		if err != nil || sec < 0 {
@@ -215,6 +219,8 @@ func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
 		d = maxWait
 	}
 	deadline := time.Now().Add(d)
+	s.markWaiting(c.Session, 1)
+	defer s.markWaiting(c.Session, -1)
 	for {
 		got, err := s.store.TakeReports(c.Session)
 		if err != nil {
@@ -239,6 +245,24 @@ func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
 		case <-time.After(waitPoll):
 		}
 	}
+}
+
+func (s *Server) markWaiting(main string, d int) {
+	s.waitMu.Lock()
+	defer s.waitMu.Unlock()
+	if s.waiting == nil {
+		s.waiting = map[string]int{}
+	}
+	s.waiting[main] += d
+	if s.waiting[main] <= 0 {
+		delete(s.waiting, main)
+	}
+}
+
+func (s *Server) waitingFor(main string) bool {
+	s.waitMu.Lock()
+	defer s.waitMu.Unlock()
+	return s.waiting[main] > 0
 }
 
 // waitPoll 是 deck agent wait 查一次的间隔（测试可改）。

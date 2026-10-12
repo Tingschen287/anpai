@@ -106,6 +106,14 @@ func checkConfigText(tool, text string) error {
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("读配置失败：%w", err)
 	}
+	// 整个文件（去注释）连成一段再查一次：多行数组把参数名与取值分在两行时，逐行查不到
+	var all []string
+	for _, l := range strings.Split(text, "\n") {
+		all = append(all, stripComment(l))
+	}
+	if err := CheckNoBypass(strings.NewReplacer(`"`, " ", `'`, " ", ",", " ", "[", " ", "]", " ").Replace(strings.Join(all, " "))); err != nil {
+		return fmt.Errorf("跨行：%w", err)
+	}
 	switch {
 	case tool == "claude":
 		if claude["dangerous_mode"] != "false" {

@@ -68,7 +68,8 @@ func cmdlineNoBypass(proc string, pid int) error {
 		return nil
 	}
 	args := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
-	if err := CheckNoBypass(args...); err != nil {
+	// 逐个元素查（bash -c 的整条命令在一个元素里），再整体连起来查一次（--permission-mode 与 bypassPermissions 分在两个元素里）
+	if err := CheckNoBypass(append(args, strings.Join(args, " "))...); err != nil {
 		return fmt.Errorf("的命令行带着绕过参数：%w", err)
 	}
 	return nil

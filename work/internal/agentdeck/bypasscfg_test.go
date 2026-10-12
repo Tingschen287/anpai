@@ -39,6 +39,7 @@ func TestUpstreamConfigBypass(t *testing.T) {
 		{"自定义工具 dangerous_mode", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = true\n", false},
 		{"自定义工具 dangerous_mode = false", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = false\n", true},
 		{"MCP 的 npx -y 不算", "claude", safe + "[mcps.fs]\ncommand = \"npx\"\nargs = [\"-y\", \"@x/fs\"]\n", true},
+		{"多行数组把参数名与取值分开", "claude", safe + "extra_args = [\n  \"--permission-mode\",\n  \"bypassPermissions\",\n]\n", false},
 	}
 	for _, c := range cases {
 		err := checkConfigText(c.tool, c.text)
@@ -91,6 +92,8 @@ func TestSessionProcessesBypass(t *testing.T) {
 	run("new-session", "-d", "-s", "bad", "bash", "-c", "sleep 30; : --dangerously-skip-permissions")
 	run("new-session", "-d", "-s", "child", "bash", "-c", "bash -c 'sleep 30; : --permission-mode bypassPermissions'; sleep 30")
 	run("new-session", "-d", "-s", "good", "bash", "-c", "sleep 30")
+	// 参数名与取值分在两个 argv 元素里（bash -c 脚本之后的位置参数）
+	run("new-session", "-d", "-s", "split", "bash", "-c", "sleep 30; :", "x", "--permission-mode", "bypassPermissions")
 	time.Sleep(300 * time.Millisecond)
 	ctx := context.Background()
 	if err := CheckSessionNoBypass(ctx, sock, "bad"); err == nil {
@@ -98,6 +101,9 @@ func TestSessionProcessesBypass(t *testing.T) {
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "child"); err == nil {
 		t.Fatal("子进程带绕过参数应报错")
+	}
+	if err := CheckSessionNoBypass(ctx, sock, "split"); err == nil {
+		t.Fatal("参数名与取值分在两个 argv 元素里也应报错")
 	}
 	if err := CheckSessionNoBypass(ctx, sock, "good"); err != nil {
 		t.Fatalf("干净的会话应通过：%v", err)

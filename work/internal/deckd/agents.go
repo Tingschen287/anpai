@@ -383,6 +383,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	} else {
 		permit, err = s.agents.leases.Manual(id)
 	}
+	if x.Role == "main" {
+		// 接管已结束主 agent 留下的子 agent 与待送汇报（旧主 agent 退出后由 owner 起的新主 agent）
+		if subs, reps, err := s.store.AdoptOrphans(x.Project, key); err != nil {
+			s.store.Notify(x.Project, "spawn", "新主 agent 接管旧主 agent 的子 agent 失败："+deckstore.Clean(err.Error(), 160), "deckd")
+		} else if subs > 0 || reps > 0 {
+			s.store.Notify(x.Project, "spawn", fmt.Sprintf("新主 agent 接管了旧主 agent 留下的 %d 个子 agent、%d 条待送汇报", subs, reps), "deckd")
+		}
+	}
 	delivered := false
 	note := ""
 	if err != nil {
@@ -478,17 +486,18 @@ func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain 
 // n051 Codex 端到端实测：Codex 用登录 shell 跑命令，PATH 按 owner 的 profile 重设，只写 deck 会 command not found。
 var DeckCommand = "deck"
 
-// withDeckCommand 把 brief 里的「deck agent …」换成 DeckCommand。
+// withDeckCommand 把 brief 模板里的「deck agent …」换成 DeckCommand（只用于模板，不碰任务正文：正文按原文算过 sha256）。
+// DeckCommand 里的 % 要转义，模板随后还要过 Sprintf。
 func withDeckCommand(brief string) string {
 	if DeckCommand == "deck" {
 		return brief
 	}
-	return strings.ReplaceAll(brief, "deck agent ", DeckCommand+" agent ")
+	return strings.ReplaceAll(brief, "deck agent ", strings.ReplaceAll(DeckCommand, "%", "%%")+" agent ")
 }
 
 // subBrief 是送给子 agent 的第一条消息：任务正文，加上收尾时必须上报的约定（§14.4）。
 func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
-	return withDeckCommand(fmt.Sprintf(`你是项目「%s」的子 agent（%s），由主 agent 通过 Agent Deck 派出。
+	return fmt.Sprintf(withDeckCommand(`你是项目「%s」的子 agent（%s），由主 agent 通过 Agent Deck 派出。
 
 任务：
 %s
@@ -497,13 +506,13 @@ func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
 - 只做这一件事；需要 owner 决定的事（花额度、改电脑设置、推送代码、和别人意见不一、偏离 owner 的决定）先停下，在汇报里写明，由主 agent 上报。
 - 不要使用跳过权限确认的参数。
 - 做完（或做不下去）时运行：deck agent report --done --text "<结论、改了什么、证据在哪、还有什么没做>"
-`, p.Name, x.Title, task))
+`), p.Name, x.Title, task)
 }
 
 // MainBrief 是送给主 agent 的第一条消息：项目、工具用法与规矩（§5）。
 func MainBrief(p deckstore.ProjectDef) string {
 	env := p.Envelope
-	return withDeckCommand(fmt.Sprintf(`你是项目「%s」（%s，目录 %s）的主 agent，通过 Agent Deck 工作。
+	return fmt.Sprintf(withDeckCommand(`你是项目「%s」（%s，目录 %s）的主 agent，通过 Agent Deck 工作。
 
 规矩：
 - 只和 owner 对接。方案先与 owner 确认，再开子 agent。
@@ -514,10 +523,10 @@ func MainBrief(p deckstore.ProjectDef) string {
 - owner 已作的决定：deck agent decisions（用来判断是否偏离）。
 - 不使用任何跳过权限确认的参数。子 agent 做完会自动转告你，标明「主动报告」或「推断」。
 - 开完子 agent 就结束这一轮回复、停下来等：汇报只在你空闲时送进来。不要用 sleep 或循环等待（你一直在忙，汇报就送不进来）。
-  确实需要在一个命令里等，就运行 deck agent wait --timeout 10m：有汇报就打印出来（算已送达，不会再转告一次），没有就到时返回。
+  确实需要在一个命令里等，就运行 deck agent wait --timeout 2m（可以重复运行）：有汇报就打印出来（算已送达，不会再转告一次），没有就到时返回。
 
 预算包络 %s v%d：同时最多 %d 个子 agent，frontier 子 agent 最多 %d 个；超出 deck 会生成决定等 owner 批准。
-`, p.Name, p.ID, p.Path, env.ID, env.Version, env.MaxSubagents, env.MaxFrontier))
+`), p.Name, p.ID, p.Path, env.ID, env.Version, env.MaxSubagents, env.MaxFrontier)
 }
 
 // postMain：owner 起项目的主 agent（POST /v1/projects/{id}/main）。按项目设置的主 agent 与档位，走同一套准入。
