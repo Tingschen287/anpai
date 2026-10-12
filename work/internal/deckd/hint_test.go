@@ -3,6 +3,7 @@ package deckd
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -131,6 +132,45 @@ func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	w.srv.deliverReports(context.Background(), st)
 	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "第 4 轮") {
 		t.Fatalf("新的一轮提交照常转告：%v", w.up.mainSends)
+	}
+}
+
+// 同一次完成的重复主动报告（账本提交已送过）：不再转告，但子 agent 照样标 done、释放名额。
+func TestDuplicateActiveReportStillMarksDone(t *testing.T) {
+	w, _ := graphWorld(t)
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gd1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	if code != 201 {
+		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
+	}
+	var out struct{ Session deckstore.Session }
+	json.Unmarshal([]byte(b), &out)
+	key := out.Session.Key
+	w.srv.agents.graphState = func(context.Context, deckstore.ProjectDef, string) (projectctl.State, error) {
+		return projectctl.StateSubmitted, nil
+	}
+	w.srv.graphSubmits(context.Background(), newState(), time.Now())
+	w.srv.deliverReports(context.Background(), newState())
+	w.store.SetSessionStatus(key, deckstore.StatusRunning, "owner 又让它跑")
+	before := w.store.Slots("alpha")
+	prev := w.srv.callerFn
+	w.srv.callerFn = func(r *http.Request) Caller {
+		if r.Header.Get("X-Test-As") == "graphsub" {
+			return Caller{Role: RoleSub, Project: "alpha", Session: key}
+		}
+		return prev(r)
+	}
+	if code, b := w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"做完了"}`); code != 200 || !strings.Contains(b, `"duplicate":true`) {
+		t.Fatalf("同一次完成：重复：%d %s", code, b)
+	}
+	w.srv.deliverReports(context.Background(), newState())
+	if len(w.up.mainSends) != 1 {
+		t.Fatalf("重复的不再转告：%v", w.up.mainSends)
+	}
+	if x, _ := w.store.Session(key); x.Status != deckstore.StatusDone {
+		t.Fatalf("重复的主动报告也标 done：%s", x.Status)
+	}
+	if u := w.store.Slots("alpha"); u.Subagents != before.Subagents-1 {
+		t.Fatalf("应释放名额：%+v → %+v", before, u)
 	}
 }
 
