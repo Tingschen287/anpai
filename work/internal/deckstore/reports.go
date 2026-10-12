@@ -23,7 +23,7 @@ import (
 const (
 	ReportActive   = "active"   // 子 agent 自己运行 deck agent report --done
 	ReportInferred = "inferred" // 推断提醒：状态停下（idle/waiting）并保持一段时间；可能做完，也可能在等输入或权限确认，不算完成
-	ReportGraph    = "graph"    // 账本出现该节点的 submit
+	ReportGraph    = "graph"    // 账本提醒：账本出现该节点的 submit；只是提醒、不算完成，按 节点#attempt 只送一次（B2-A）
 )
 
 // 汇报状态。
@@ -211,10 +211,11 @@ func (s *Store) absorbLocked(x *Report) {
 	if !isReminder(x.Source) || x.State != ReportPending {
 		return
 	}
-	// 这一代在提醒之前就有完成的，提醒入队时已被拒；所以只看提醒之后到的真正完成
+	// 这一代在提醒之前就有完成的，提醒入队时已被拒；所以只看提醒之后到的真正完成。先后按到达时刻比（n054 自查）：
+	// 主动报告换进更早的旧提醒行时，CreatedAt 是旧行的，按它比会漏掉「完成在这条账本提醒之后到」，完成送达后又送一条账本提醒
 	stale := false
 	for i, y := range s.reports {
-		if y == x || y.Sub != x.Sub || y.Source != ReportActive || y.CreatedAt.Before(x.CreatedAt) {
+		if y == x || y.Sub != x.Sub || y.Source != ReportActive || y.arrived().Before(x.arrived()) {
 			continue
 		}
 		// 合并只在同一主 agent 内（attempt 3 自查：提醒挂在已停止的旧主 agent 上时，并过去新主 agent 就取不到了）

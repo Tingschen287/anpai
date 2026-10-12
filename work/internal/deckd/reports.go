@@ -240,7 +240,6 @@ func (s *Server) deliverPending(ctx context.Context, st *inferState, project str
 	return sent
 }
 
-// deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
 // reportText 是转告给主 agent 的文字（推送与 deck agent wait 共用），标明主动报告、推断提醒或账本提醒。
 func (s *Server) reportText(rep deckstore.Report) string {
 	sub, _ := s.store.Session(rep.Sub)
@@ -466,6 +465,7 @@ func (s *Server) expireClaims(now time.Time) {
 // waitPoll 是 deck agent wait 查一次的间隔（测试可改）。
 var waitPoll = time.Second
 
+// deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
 func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report, now bool) error {
 	sub, _ := s.store.Session(rep.Sub)
 	text := s.reportText(rep)

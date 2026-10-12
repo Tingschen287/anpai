@@ -13,7 +13,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
-// n051 评审 1 B6：§14.4 的账本提交信号与 owner 一键立即送达。
+// n051 评审 1 B6：§14.4 的账本信号（attempt 4 起为账本提醒，B2-A）与 owner 一键立即送达。
 
 func TestGraphSubmitSignalReportsOnce(t *testing.T) {
 	w, _ := graphWorld(t)
@@ -44,7 +44,7 @@ func TestGraphSubmitSignalReportsOnce(t *testing.T) {
 	w.srv.graphSubmits(context.Background(), st, t0.Add(graphEvery+time.Second))
 	reps := w.store.PendingReports(w.main.Key)
 	if len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || !strings.Contains(reps[0].Text, "第 3 轮已提交") {
-		t.Fatalf("账本提交应入队一条：%+v", reps)
+		t.Fatalf("账本提醒应入队一条：%+v", reps)
 	}
 	if x, _ := w.store.Session(out.Session.Key); x.Status != deckstore.StatusDone {
 		t.Fatalf("账本显示已提交：子 agent 标为 done：%s", x.Status)

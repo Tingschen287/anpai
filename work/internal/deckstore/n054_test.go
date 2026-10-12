@@ -105,3 +105,49 @@ func TestLegacyReportWithoutArrivalFallsBackToCreated(t *testing.T) {
 		t.Fatal("对照：账本提醒之后才开始的安静照常提醒")
 	}
 }
+
+// n054 自查：absorbLocked 按到达时刻比先后。推断提醒在发送中时账本提醒另起一行；推断提醒退回 pending 后被主动报告换掉
+// （行的 CreatedAt 仍是旧推断提醒的）并送达；账本提醒再退回 pending 时，完成是在它之后到的，它已过时，应删掉而不是在完成之后再送。
+func TestAbsorbComparesArrivalTimes(t *testing.T) {
+	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	m, sb := mainAndSub(t, s)
+	clk := time.Now().Add(-time.Hour)
+	s.now = func() time.Time { return clk }
+	h, _, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(1, clk.Add(-2*time.Minute)), Source: ReportInferred, Text: "推断"})
+	s.MarkReport(h.ID, ReportSending)
+	clk = clk.Add(time.Second)
+	l, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Ref: "n1#1", Text: "账本"})
+	if !added || l.ID == h.ID {
+		t.Fatalf("推断提醒在发送中：账本提醒另起一行：%+v %v", l, added)
+	}
+	clk = clk.Add(time.Second)
+	s.MarkReport(h.ID, ReportPending)
+	clk = clk.Add(time.Second)
+	a, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportActive, Text: "做完了"})
+	if !added || a.ID != h.ID {
+		t.Fatalf("主动报告应换掉第一条等送的提醒：%+v %v", a, added)
+	}
+	s.MarkReport(h.ID, ReportSending)
+	s.MarkReport(h.ID, ReportDelivered)
+	clk = clk.Add(time.Second)
+	s.MarkReport(l.ID, ReportSending)
+	s.MarkReport(l.ID, ReportPending)
+	if got := s.PendingReports(m.Key); len(got) != 0 {
+		t.Fatalf("完成在账本提醒之后到并已送达：账本提醒过时，不该再送：%+v", got)
+	}
+	// 对照：完成先到、账本提醒后到，账本提醒退回 pending 时照常留着
+	s2 := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	m2, sb2 := mainAndSub(t, s2)
+	clk = time.Now().Add(-time.Hour)
+	s2.now = func() time.Time { return clk }
+	a2, _, _ := s2.EnqueueReport(Report{Sub: sb2.Key, Source: ReportActive, Text: "做完了"})
+	s2.MarkReport(a2.ID, ReportSending)
+	s2.MarkReport(a2.ID, ReportDelivered)
+	clk = clk.Add(time.Second)
+	l2, _, _ := s2.EnqueueReport(Report{Sub: sb2.Key, Source: ReportGraph, Ref: "n1#1", Text: "账本"})
+	s2.MarkReport(l2.ID, ReportSending)
+	s2.MarkReport(l2.ID, ReportPending)
+	if got := s2.PendingReports(m2.Key); len(got) != 1 || got[0].ID != l2.ID {
+		t.Fatalf("对照：账本提醒在完成之后到，照常等送：%+v", got)
+	}
+}

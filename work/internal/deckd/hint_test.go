@@ -16,7 +16,7 @@ import (
 )
 
 // n051 attempt 2 设计评审（owner 选 A）：推断降级为「提醒」，不占完成。
-// agent-deck 里做完一轮的会话没人看过就一直是 waiting，所以 waiting 也要提醒；真正的完成只认主动报告与账本提交。
+// agent-deck 里做完一轮的会话没人看过就一直是 waiting，所以 waiting 也要提醒；真正的完成只认主动报告（推断提醒与账本提醒都不算，attempt 2 裁定 A、attempt 4 裁定 B2-A）。
 
 // quiet 让子 agent 先在跑、再停在 v 超过 inferAfter。
 func quiet(w *agentWorld, st *inferState, tmux, v string, t0 time.Time) {
@@ -100,7 +100,7 @@ func TestOneOutstandingHintThenReplaced(t *testing.T) {
 	}
 }
 
-// 账本提交按 节点#attempt 去重：主 agent 之后发了新的话、子 agent 又被看成在跑，同一轮提交也不重报；新的一轮才报。
+// 账本提醒按 节点#attempt 去重：主 agent 之后发了新的话、子 agent 又被看成在跑，同一轮提交也不重报；新的一轮才报。
 func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	w, _ := graphWorld(t)
 	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "ga1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
@@ -118,7 +118,7 @@ func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	w.srv.graphSubmits(context.Background(), st, t0)
 	w.srv.deliverReports(context.Background(), st)
 	if len(w.up.mainSends) != 1 {
-		t.Fatalf("账本提交送一次：%v", w.up.mainSends)
+		t.Fatalf("账本提醒送一次：%v", w.up.mainSends)
 	}
 	w.store.BumpTaskGen(key)
 	w.store.SetSessionStatus(key, deckstore.StatusRunning, "又在跑")
@@ -223,7 +223,7 @@ func TestReleasedHintAbsorbsCompletion(t *testing.T) {
 	}
 }
 
-// 自查：旧版本按代次编号（gen:N）留在盘上的推断行不占完成：已送的不吞主动报告；等送的被账本提交换掉。
+// 自查：旧版本按代次编号（gen:N）留在盘上的推断行不占完成：已送的不吞主动报告；等送的被账本提醒换掉。
 func TestOldInferredRowsDoNotHoldCompletion(t *testing.T) {
 	t.Run("已送的旧推断", func(t *testing.T) {
 		w := newAgentWorld(t)
@@ -251,7 +251,7 @@ func TestOldInferredRowsDoNotHoldCompletion(t *testing.T) {
 		w.srv.graphSubmits(context.Background(), newState(), time.Now())
 		reps := w.store.PendingReports(w.main.Key)
 		if x, _ := w.store.Session(out.Session.Key); len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || x.Status != deckstore.StatusDone {
-			t.Fatalf("账本提交换掉旧推断、子 agent 标 done：%+v %s", reps, x.Status)
+			t.Fatalf("账本提醒换掉旧推断、子 agent 标 done：%+v %s", reps, x.Status)
 		}
 	})
 }

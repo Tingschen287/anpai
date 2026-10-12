@@ -211,7 +211,7 @@ func TestStaleHintDroppedAfterNewerGenerationCompletion(t *testing.T) {
 	}
 }
 
-// attempt 3 第二轮自查（blocker）：账本提交信号查得晚（30 秒一次），在主 agent 发了第 2 件之后才到。
+// attempt 3 第二轮自查（blocker）：账本信号查得晚（30 秒一次），在主 agent 发了第 2 件之后才到。
 // attempt 4 起它只是账本提醒、不占完成（owner 选 B2-A）：提醒照常送，第 2 件真正的完成照常转告。
 func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
 	w, _ := graphWorld(t)
