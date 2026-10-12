@@ -30,13 +30,18 @@ type LaunchArgs struct {
 
 // knownArgs：工具 → 上游会加的参数 → 后面跟几个值。
 var knownArgs = map[string]map[string]int{
-	"claude": {"--session-id": 1, "--resume": 1, "--add-dir": 1, "--model": 1, "--effort": 1},
+	// --chrome、--teammate-mode、--channels：上游按 [claude] use_chrome、use_teammate_mode 与频道设置加，与权限无关（attempt 3 自查：误拒）
+	"claude": {"--session-id": 1, "--resume": 1, "--add-dir": 1, "--model": 1, "--effort": 1, "--chrome": 0, "--teammate-mode": 1, "--channels": 1},
 	"codex":  {"--model": 1, "--config": 1, "resume": 1, "fork": 1},
 	"gemini": {"--resume": 1, "--model": 1},
 }
 
 // knownValueOK 是个别已知参数对取值的限制。
 func knownValueOK(tool, flag, value string) bool {
+	if strings.HasPrefix(value, "-") {
+		// 值的位置上放一个参数（--resume --dangerously-skip-permissions）：CLI 会把它当参数读（attempt 3 自查）
+		return false
+	}
 	if tool == "codex" && flag == "--config" {
 		// 上游只用 --config 传推理强度；其余配置覆盖都可能改权限或沙箱
 		k, v, ok := strings.Cut(value, "=")
@@ -64,6 +69,10 @@ func cliArgs(argv []string, want LaunchArgs) ([]string, bool) {
 		}
 	}
 	if name == want.Tool || want.Binary != "" && name == filepath.Base(want.Binary) {
+		if want.Tool == "claude" && len(rest) > 0 && rest[0] == "daemon" {
+			// Claude Code 自己的后台进程（claude daemon run --origin transient …，会话里的 claude 起它），不是这次启动的会话（attempt 3 自查）
+			return nil, false
+		}
 		return rest, true
 	}
 	return nil, false
@@ -129,11 +138,21 @@ func CheckExtraArgs(extra [][]string) error {
 		if len(g) == 0 {
 			return fmt.Errorf("额外参数组是空的")
 		}
-		if err := CheckNoBypass(g...); err != nil {
+		// 明确的绕过参数（含跨元素的参数名与取值）一律不收；涉及权限或沙箱的 键=值 只查整个元素就是赋值的写法
+		// （-c approval_policy=never），不扫自由文本里的词（--allowedTools "Bash(aws --profile=dev:*)"，attempt 3 自查：误拒）
+		if err := checkBypassFlags(append(g, strings.Join(g, " "))...); err != nil {
 			return fmt.Errorf("额外参数 %q：%w", g, err)
 		}
-		if err := CheckNoBypass(strings.Join(g, " ")); err != nil {
-			return fmt.Errorf("额外参数 %q：%w", g, err)
+		for _, a := range g {
+			if strings.ContainsAny(a, " \t") {
+				if strings.Contains(strings.ToLower(a), `\u`) || strings.Contains(strings.ToLower(a), `\x`) {
+					return fmt.Errorf("额外参数 %q：含转义写法，deck 不解码，请改成不带转义的写法", g)
+				}
+				continue
+			}
+			if err := checkSensitiveAssignments(a); err != nil {
+				return fmt.Errorf("额外参数 %q：%w", g, err)
+			}
 		}
 	}
 	return nil

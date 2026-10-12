@@ -2,12 +2,15 @@ package deckd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
 
 // n051 attempt 3（owner 选方案 A'）：只给停下来的子 agent 发新的话；代次在存储锁里取；发话途中到的完成按上一代有没有完成来归。
@@ -205,5 +208,45 @@ func TestStaleHintDroppedAfterNewerGenerationCompletion(t *testing.T) {
 	w.srv.deliverReports(context.Background(), st)
 	if len(w.up.mainSends) != 0 || len(w.store.PendingReports(w.main.Key)) != 0 {
 		t.Fatalf("更新的完成已收到：过时提醒不再送：%v", w.up.mainSends)
+	}
+}
+
+// attempt 3 第二轮自查（blocker）：账本提交信号查得晚（30 秒一次），在主 agent 发了第 2 件之后才到；记回第 1 件，
+// 第 2 件真正的完成照常转告。
+func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
+	w, _ := graphWorld(t)
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "lg1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	if code != 201 {
+		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
+	}
+	var out struct{ Session deckstore.Session }
+	json.Unmarshal([]byte(b), &out)
+	key := out.Session.Key
+	// 子 agent 在账本里提交了第 1 件，没运行 report；账本信号还没查到，主 agent 就发了第 2 件
+	if code, b := w.do("main", "POST", "/v1/agents/"+key+"/send", `{"text":"再做第二件"}`); code != 200 {
+		t.Fatalf("发话：%d %s", code, b)
+	}
+	w.srv.agents.graphState = func(context.Context, deckstore.ProjectDef, string) (projectctl.State, error) {
+		return projectctl.StateSubmitted, nil
+	}
+	w.srv.graphSubmits(context.Background(), newState(), time.Now())
+	reps := w.store.PendingReports(w.main.Key)
+	if len(reps) != 1 || reps[0].CompletionID != deckstore.CompletionIDFor(1) {
+		t.Fatalf("迟到的账本信号记回第 1 件：%+v", reps)
+	}
+	w.srv.deliverReports(context.Background(), newState())
+	prev := w.srv.callerFn
+	w.srv.callerFn = func(r *http.Request) Caller {
+		if r.Header.Get("X-Test-As") == "graphsub" {
+			return Caller{Role: RoleSub, Project: "alpha", Session: key}
+		}
+		return prev(r)
+	}
+	if _, b := w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"第二件做完"}`); strings.Contains(b, `"duplicate":true`) {
+		t.Fatalf("第 2 件的完成不该被当成重复：%s", b)
+	}
+	w.srv.deliverReports(context.Background(), newState())
+	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "第二件做完") {
+		t.Fatalf("两件各送一次：%v", w.up.mainSends)
 	}
 }

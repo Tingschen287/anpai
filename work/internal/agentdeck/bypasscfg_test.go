@@ -101,7 +101,7 @@ func TestSessionProcessesBypass(t *testing.T) {
 	// 与上游一样经 bash -c 起（n051 attempt 3：R1 方案 A，按参数白名单核对 CLI 进程）
 	start := func(name, cmd string) { run("new-session", "-d", "-s", name, "bash", "-c", cmd) }
 	start("good", "export AWS_PROFILE=default && "+cl+" --session-id u-1 --model 'claude-haiku-5-5'") // 与权限无关的赋值不误拒
-	start("goodmcp", cl+" --session-id u-1 --model m & bash -c 'sleep 30; :' npx -y some-mcp; wait")     // MCP 服务常见的 npx -y 不误拒
+	start("goodmcp", cl+" --session-id u-1 --model m & bash -c 'sleep 30; :' npx -y some-mcp; wait")  // MCP 服务常见的 npx -y 不误拒
 	start("dangerous", cl+" --session-id u-1 --dangerously-skip-permissions")
 	start("automode", cl+" --session-id u-1 --permission-mode auto")       // 空格写法（attempt 3 自查）
 	start("settings", cl+" --session-id u-1 --settings /tmp/yolo.json")    // CLI 设置文件（attempt 3 自查）

@@ -85,9 +85,17 @@ func (c *Client) SendIfIdle(ctx context.Context, p lease.Permit, sessionID, mess
 		return fmt.Errorf("消息是空的，不投递")
 	}
 	out, err := c.execWithStdin(ctx, strings.NewReader(message),
-		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", SubIdleCheck)
+		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", SubIdleCheck, "--timeout", SubReadyTimeout)
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || strings.Contains(err.Error(), "signal: killed")) {
+		// 上游没在时限内返回、被结束：可能已经打进去了（attempt 3 自查），按送达未确认，调用方不撤回代次
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: "上游没在时限内返回（" + err.Error() + "），话可能已经打进去"}
+	}
 	return sendResult(sessionID, out, err, true)
 }
+
+// SubReadyTimeout 是上游等子 agent 就绪的上限（上游 --timeout，默认 10 分钟）：要短于 deckd 调上游的 60 秒，
+// 否则上游可能在打字之后才被结束，deck 分不清送没送到。
+const SubReadyTimeout = "30s"
 
 // SubIdleCheck 是 SendIfIdle 让上游看对方忙不忙的时限（上游 --defer-timeout）。
 const SubIdleCheck = "1s"

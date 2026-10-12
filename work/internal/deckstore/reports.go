@@ -72,6 +72,15 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			if sub.SendInFlight && gen > 1 && !s.hasCompletionLocked(sub.Key, CompletionIDFor(gen-1)) {
 				gen--
 			}
+			if r.Source == ReportGraph && sub.Graph != nil {
+				// 账本提交信号查得晚：从绑定这一轮的代次起，记到第一个还没有完成的代次（都完成了就按当前代次，作重复处理）
+				for g := max(sub.Graph.Gen, 1); g < sub.Gen(); g++ {
+					if !s.hasCompletionLocked(sub.Key, CompletionIDFor(g)) {
+						gen = g
+						break
+					}
+				}
+			}
 			r.CompletionID = CompletionIDFor(gen)
 		}
 		if !completionRe.MatchString(r.CompletionID) {
