@@ -122,9 +122,8 @@ func Open(dirs Dirs) (*Store, error) {
 	}
 	// 送到一半（sending）时停了的汇报转为未确认、不重发；告诉 owner，不悄悄留着（n051 评审 1 B5）
 	for _, r := range recovered {
-		if _, err := s.Notify(r.Project, "report", fmt.Sprintf("deckd 重启时有一条汇报正在转告（子 agent %s），送没送到不确定，不会重发；请在主 agent 那里核对：%s", r.Sub, Clean(r.Text, 160)), "deckd"); err != nil {
-			return nil, err
-		}
+		// 通知写不进去也照常启动（汇报已标为未确认、留在注册表里，右侧面板与 deck agent list 看得到）
+		s.Notify(r.Project, "report", fmt.Sprintf("deckd 重启时有一条汇报正在转告（子 agent %s），送没送到不确定，不会重发；请在主 agent 那里核对：%s", r.Sub, Clean(r.Text, 160)), "deckd")
 	}
 	return s, nil
 }

@@ -80,7 +80,8 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		storeErr(w, err)
 		return
 	}
-	if added || rep.Source == deckstore.ReportActive && rep.Text == deckstore.Clean(b.Text, 2000) && rep.State == deckstore.ReportPending {
+	// 子 agent 自己说做完了：不管是不是同一次完成的重复，都标 done、释放名额（attempt 2 自查：撞上已送的推断时以前会一直占着）
+	if x.Status == deckstore.StatusRunning {
 		s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "子 agent 报告已完成")
 	}
 	if !added && rep.Text != deckstore.Clean(b.Text, 2000) {
@@ -92,16 +93,22 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 
 // reportLoop 的推断状态：每个子 agent 上一次看到的状态，以及从哪一刻起不在跑。
 type inferState struct {
-	mu        sync.Mutex
-	wasBusy   map[string]bool      // 子会话 key → 曾经在跑
-	quietFrom map[string]time.Time // 子会话 key → 从 running 转为 idle/waiting 的时刻
-	notified  map[string]int       // 主会话 key → 已通知过「等着转告」的条数（避免刷屏）
-	lastGraph time.Time            // 上一次查账本提交信号的时刻
+	mu          sync.Mutex
+	wasBusy     map[string]bool      // 子会话 key → 曾经在跑
+	quietFrom   map[string]time.Time // 子会话 key → 从 running 转为 idle/waiting 的时刻
+	notified    map[string]int       // 主会话 key → 已通知过「等着转告」的条数（避免刷屏）
+	lastGraph   time.Time            // 上一次查账本提交信号的时刻
+	graphBusy   bool                 // 正在后台查账本（一次 projectctl brief 要两三秒，不挡推送）
+	inferredGen map[string]int       // 子会话 key → 按推断入队时的任务代次
+}
+
+func newInferState() *inferState {
+	return &inferState{wasBusy: map[string]bool{}, quietFrom: map[string]time.Time{}, notified: map[string]int{}, inferredGen: map[string]int{}}
 }
 
 // runReports 是汇报的推断与送达循环（deckd 运行期间常驻）。
 func (s *Server) runReports(ctx context.Context) {
-	st := &inferState{wasBusy: map[string]bool{}, quietFrom: map[string]time.Time{}, notified: map[string]int{}}
+	st := newInferState()
 	t := time.NewTicker(reportEvery)
 	defer t.Stop()
 	for {
@@ -110,20 +117,25 @@ func (s *Server) runReports(ctx context.Context) {
 			return
 		case <-t.C:
 			s.inferCompletions(st, time.Now())
-			s.graphSubmits(ctx, st, time.Now())
+			s.graphSubmitsAsync(ctx, st, time.Now())
 			s.expireClaims(time.Now())
 			s.deliverReports(ctx, st)
 		}
 	}
 }
 
-// inferCompletions：子 agent 从 running 转为 idle/waiting 并保持 inferAfter，按「推断」入队。
+// inferCompletions：子 agent 从 running 转为 idle 并保持 inferAfter，按「推断」入队。
+// waiting 不算（权限提示也是 waiting，owner 一时没批就会误报，n051 attempt 2 自查）。
+// 推断过的子 agent 之后又干起活来，就开新的一代：它随后真正的完成（主动报告或账本提交）算新的一次，不被推断吞掉。
 func (s *Server) inferCompletions(st *inferState, now time.Time) {
 	if s.activity == nil {
 		return
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if st.inferredGen == nil {
+		st.inferredGen = map[string]int{}
+	}
 	for _, x := range s.store.Sessions("") {
 		if x.Role != "sub" || x.Parent == "" || x.Status != deckstore.StatusRunning || x.TmuxSession == "" {
 			continue
@@ -132,7 +144,11 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 		case "running":
 			st.wasBusy[x.Key] = true
 			delete(st.quietFrom, x.Key)
-		case "idle", "waiting":
+			if g, ok := st.inferredGen[x.Key]; ok && g == x.Gen() {
+				s.store.BumpTaskGen(x.Key)
+				delete(st.inferredGen, x.Key)
+			}
+		case "idle":
 			if !st.wasBusy[x.Key] {
 				continue
 			}
@@ -151,6 +167,7 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 					x.Title, int(inferAfter.Seconds()), x.Key)})
 			st.wasBusy[x.Key] = false
 			delete(st.quietFrom, x.Key)
+			st.inferredGen[x.Key] = x.Gen()
 		}
 	}
 }
@@ -295,6 +312,21 @@ func (s *Server) waitingFor(main string) bool {
 // graphEvery 是查 Graph 节点提交信号的间隔（一次 projectctl brief 要两三秒，不必每 3 秒查）。
 var graphEvery = 30 * time.Second
 
+// graphSubmitsAsync 在后台查账本（上一次还没查完就跳过）。
+func (s *Server) graphSubmitsAsync(ctx context.Context, st *inferState, now time.Time) {
+	st.mu.Lock()
+	if st.graphBusy {
+		st.mu.Unlock()
+		return
+	}
+	st.graphBusy = true
+	st.mu.Unlock()
+	go func() {
+		defer func() { st.mu.Lock(); st.graphBusy = false; st.mu.Unlock() }()
+		s.graphSubmits(ctx, st, now)
+	}()
+}
+
 // graphSubmits：走 Graph 通道、还在跑的子 agent，账本显示它的节点已提交（submit 之后的 submitted、accepted、rework），
 // 就按「账本提交」入队（§14.4 的第三条信号，n051 评审 1 B6）。与主动报告、推断共用任务代次：同一次完成只送一次。
 func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time) {
@@ -355,7 +387,7 @@ func (s *Server) postReportsDeliverNow(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
 		return
 	}
-	sent := s.deliverPending(detached(r), &inferState{wasBusy: map[string]bool{}, quietFrom: map[string]time.Time{}, notified: map[string]int{}}, b.Project, true)
+	sent := s.deliverPending(detached(r), newInferState(), b.Project, true)
 	left := 0
 	for _, x := range s.store.Sessions(b.Project) {
 		if x.Role == "main" {
@@ -416,6 +448,10 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 		// sending 先落盘：送出去但结果没落盘时，重启会把它标成未确认，不重发
 		if err := s.store.MarkReport(rep.ID, deckstore.ReportSending); err != nil {
 			return err
+		}
+		// 标 sending 之前的一刻可能被主动报告换了正文（推断 → 主动），按最新的送
+		if cur, ok := s.store.Report(rep.ID); ok {
+			text = s.reportText(cur)
 		}
 		err = s.agents.upstream.SendToMain(ctx, permit, main.AgentDeckID, text)
 		switch {

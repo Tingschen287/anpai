@@ -290,8 +290,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	// 批准绑定本次请求（SpawnScope），主 agent 带同一请求与决定 id 再来一次即放行。主 agent 由 owner 自己起，不在此列。
 	quotaGate := x.Role == "sub" && x.Tier == deckstore.Frontier && s.quotaUnsure(ctx, x.Tool)
 	if quotaGate && exception == "" {
+		// 同一个批准随后也会被预留当作超额例外用掉：包络也超了就在同一条决定里写明，owner 一次看清两个原因
+		summary := fmt.Sprintf("额度未知或已用尽时启动 frontier：请求开 %s（%s · %s）「%s」", plan.agent.Name, x.Tier, x.Model, x.Title)
+		if u := s.store.Slots(x.Project); u.Subagents >= p.Envelope.MaxSubagents || u.Frontier >= p.Envelope.MaxFrontier {
+			summary = fmt.Sprintf("额度未知或已用尽，且超出预算包络（已用 %d/%d 个子 agent、%d/%d 个 frontier）：请求开 %s（%s · %s）「%s」",
+				u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.Title)
+		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			Summary: fmt.Sprintf("额度未知或已用尽时启动 frontier：请求开 %s（%s · %s）「%s」", plan.agent.Name, x.Tier, x.Model, x.Title),
+			Summary: summary,
 			Scope:   deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
 			fail(w, http.StatusConflict, "额度未知时启动 frontier 要 owner 批准，生成 cost 决定失败：%v", derr)
@@ -697,17 +703,23 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.agents.upstream.SendMessage(detached(r), permit, x.AgentDeckID, b.Text); err != nil {
 		if agentdeck.IsDeliveryUnconfirmed(err) {
+			// 话已打进去、只是没证实提交（Codex 总是这样）：同样开新一代，否则它之后的完成都会被当成重复吞掉（attempt 2 自查）
+			s.bumpGen(x)
 			writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
 			return
 		}
 		fail(w, http.StatusBadGateway, "发话失败：%v", err)
 		return
 	}
-	// 新的话：任务代次加 1，之后的完成算新的一次（n051 评审 1 B4）
+	s.bumpGen(x)
+	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
+}
+
+// bumpGen：给子 agent 发了新的话，任务代次加 1，之后的完成算新的一次（n051 评审 1 B4）。
+func (s *Server) bumpGen(x deckstore.Session) {
 	if err := s.store.BumpTaskGen(x.Key); err != nil {
 		s.store.Notify(x.Project, "report", "记不下子 agent 的任务代次："+deckstore.Clean(err.Error(), 160), "deckd")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
 }
 
 // executeCodexTrust：owner 批准 codex_trust 决定后记住授权（§14.3），用完即 applied。主 agent 用新的请求 id 再开一次即可。

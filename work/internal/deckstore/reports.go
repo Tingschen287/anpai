@@ -69,7 +69,7 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		for _, x := range s.reports {
 			if x.Sub == r.Sub && x.CompletionID == r.CompletionID {
 				// 同一次完成：推断先入队、还没送，主动报告到了就换成主动报告的正文与标注（只送一次，送更准的那条）
-				if x.State == ReportPending && x.Source == ReportInferred && r.Source == ReportActive {
+				if x.State == ReportPending && x.Source != ReportActive && r.Source == ReportActive {
 					x.Source, x.Text, x.UpdatedAt = r.Source, Clean(r.Text, 2000), s.now()
 					out = *x
 					return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
@@ -86,6 +86,18 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 	})
 	return out, added, err
+}
+
+// Report 按 id 取一条汇报（副本）。
+func (s *Store) Report(id string) (Report, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, x := range s.reports {
+		if x.ID == id {
+			return *x, true
+		}
+	}
+	return Report{}, false
 }
 
 // Reports 返回某项目的全部汇报（副本，按时间）。
