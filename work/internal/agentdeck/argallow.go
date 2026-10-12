@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -138,21 +139,77 @@ func CheckExtraArgs(extra [][]string) error {
 		if len(g) == 0 {
 			return fmt.Errorf("额外参数组是空的")
 		}
-		// 明确的绕过参数（含跨元素的参数名与取值）一律不收；涉及权限或沙箱的 键=值 只查整个元素就是赋值的写法
-		// （-c approval_policy=never），不扫自由文本里的词（--allowedTools "Bash(aws --profile=dev:*)"，attempt 3 自查：误拒）
-		if err := checkBypassFlags(append(g, strings.Join(g, " "))...); err != nil {
-			return fmt.Errorf("额外参数 %q：%w", g, err)
+		if err := checkDeclaredGroup(g); err != nil {
+			return fmt.Errorf("额外参数 %q：%w（硬拒绝，owner 也声明不进来）", g, err)
 		}
-		for _, a := range g {
-			if strings.ContainsAny(a, " \t") {
-				if strings.Contains(strings.ToLower(a), `\u`) || strings.Contains(strings.ToLower(a), `\x`) {
-					return fmt.Errorf("额外参数 %q：含转义写法，deck 不解码，请改成不带转义的写法", g)
-				}
-				continue
+	}
+	return nil
+}
+
+// declaredFlags：声明的额外参数里涉及权限、沙箱、设置来源的参数名（去掉前导 -、小写、去掉 - 与 _ 之后比较，
+// 这样 --approvalMode、--approval-mode、--approval_mode 都认得）→ 放行的取值（nil 表示这个参数一律不收）。
+// 按参数语义查，而不是按「已知的绕过取值」猜（n051 评审 3 B1：-anever、--permission-mode auto、--settings、-y 等声明后两道检查都放行）。
+var declaredFlags = map[string][]string{
+	"permissionmode": {"default", "acceptedits", "plan"},
+	"askforapproval": {"untrusted", "on-request", "on-failure"},
+	"a":              {"untrusted", "on-request", "on-failure"},
+	"sandbox":        {"read-only", "workspace-write"},
+	"s":              {"read-only", "workspace-write"},
+	"approvalmode":   {"default", "auto_edit"},
+	"settings":       nil, // Claude 从文件或 JSON 读设置，里面可以有 defaultMode
+	"profile":        nil, // Codex 的 profile 里可以有 approval_policy、sandbox_mode
+	"p":              nil,
+	"yolo":           nil,
+	"y":              nil,
+}
+
+// checkDeclaredGroup 按参数语义核对 owner 声明的一组额外参数（n051 评审 3 B1）。
+func checkDeclaredGroup(g []string) error {
+	// 明确的绕过参数（含跨元素的参数名与取值）
+	if err := checkBypassFlags(append(append([]string{}, g...), strings.Join(g, " "))...); err != nil {
+		return err
+	}
+	for _, a := range g {
+		if low := strings.ToLower(a); strings.Contains(low, `\u`) || strings.Contains(low, `\x`) {
+			return fmt.Errorf("含转义写法，deck 不解码，请改成不带转义的写法")
+		}
+	}
+	for i := 0; i < len(g); i++ {
+		a := g[i]
+		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
+			continue // 取值或自由文本：由前面的参数决定怎么查
+		}
+		name, value, inline := strings.Cut(a, "=")
+		if !strings.HasPrefix(name, "--") && len(name) > 2 {
+			return fmt.Errorf("短参数连写 %s：请把参数名与取值分开写，deck 才能核对", a)
+		}
+		key := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(strings.TrimLeft(name, "-")))
+		if strings.Contains(key, "dangerous") || strings.Contains(key, "bypass") || strings.Contains(key, "yolo") {
+			return fmt.Errorf("参数 %s 会跳过权限确认", name)
+		}
+		if !inline && i+1 < len(g) && !strings.HasPrefix(g[i+1], "-") {
+			value, inline = g[i+1], true
+			i++
+		}
+		if key == "c" || key == "config" {
+			// Codex 的配置覆盖：完整赋值不论有没有空白都按白名单查（评审 3 B1：-c 'approval_policy = "never"' 以前被当成自由文本跳过）
+			if !inline || value == "" {
+				return fmt.Errorf("参数 %s 没有取值", name)
 			}
-			if err := checkSensitiveAssignments(a); err != nil {
-				return fmt.Errorf("额外参数 %q：%w", g, err)
+			if err := checkSensitiveAssignments(value); err != nil {
+				return err
 			}
+			continue
+		}
+		allowed, sensitive := declaredFlags[key]
+		if !sensitive {
+			continue
+		}
+		if allowed == nil {
+			return fmt.Errorf("参数 %s 能改权限或沙箱的来源，deck 核对不了，不能声明", name)
+		}
+		if !inline || !slices.Contains(allowed, strings.ToLower(strings.Trim(value, `"'`))) {
+			return fmt.Errorf("参数 %s %s：只放行 %s", name, value, strings.Join(allowed, "、"))
 		}
 	}
 	return nil

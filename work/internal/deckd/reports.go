@@ -383,8 +383,9 @@ func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time
 		default:
 			continue
 		}
-		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph,
-			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt), // 完成编号由存储在锁里按当前代次给（attempt 3 自查 S2）
+		// x 是发起查询前取的快照：x.Gen() 就是发起查询时的代次（评审 3 B2）
+		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph, AtGen: x.Gen(),
+			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt), // 完成编号由存储在锁里给（attempt 3 自查 S2）
 			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）；子 agent 没有运行 deck agent report --done。需要时用 deck agent output %s 查看。",
 				x.Graph.Node, x.Graph.Attempt, state, x.Key)})
 		if err == nil && added {

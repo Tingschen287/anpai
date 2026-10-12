@@ -47,6 +47,8 @@ type Report struct {
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
 	// Ref 是账本提交的 节点#attempt：同一 attempt 只转告一次，主 agent 发了新的话也不重报（attempt 2 设计评审 A）
 	Ref string `json:"ref,omitempty"`
+	// AtGen：账本提交信号发起查询时子 agent 的任务代次（只用于入队归属，不落盘）。查询要两三秒，期间主 agent 可能发了下一件（n051 评审 3 B2）
+	AtGen int `json:"-"`
 }
 
 // ClaimWait 是 deck agent wait 的领取标记。
@@ -73,8 +75,14 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 				gen--
 			}
 			if r.Source == ReportGraph && sub.Graph != nil {
-				// 账本提交信号查得晚：从绑定这一轮的代次起，记到第一个还没有完成的代次（都完成了就按当前代次，作重复处理）
-				for g := max(sub.Graph.Gen, 1); g < sub.Gen(); g++ {
+				// 账本提交信号查得晚：它报的是发起查询时（AtGen）或更早的任务，不会是查询途中才发出的下一件（评审 3 B2）。
+				// 从绑定这一轮的代次起到 AtGen，记到第一个还没有完成的代次；都完成了就记到 AtGen，作重复处理
+				upper := sub.Gen()
+				if r.AtGen > 0 && r.AtGen < upper {
+					upper = r.AtGen
+				}
+				gen = upper
+				for g := max(sub.Graph.Gen, 1); g < upper; g++ {
 					if !s.hasCompletionLocked(sub.Key, CompletionIDFor(g)) {
 						gen = g
 						break
