@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
 // n051 评审 1 B4：「同一次完成只送一次」按子 agent 的任务代次，而不是汇报正文。
@@ -54,15 +56,20 @@ func TestInferredThenActiveSameCompletion(t *testing.T) {
 			t.Fatalf("只送一次，送主动报告的那条：%v", w.up.mainSends)
 		}
 	})
-	t.Run("推断已送过", func(t *testing.T) {
+	// 推断只是提醒、不占完成（owner 在 attempt 2 设计评审选 A，裁定改写了评审 1 B4 的这一条）：提醒已送，真正的完成照常转告，标注不同
+	t.Run("推断提醒已送过", func(t *testing.T) {
 		w := newAgentWorld(t)
 		sub := spawnedSub(t, w)
 		infer(w, sub.TmuxSession)
 		w.srv.deliverReports(context.Background(), newState())
 		w.do("sub", "POST", "/v1/reports", `{"done":true,"text":"迟到的主动报告"}`)
 		w.srv.deliverReports(context.Background(), newState())
-		if len(w.up.mainSends) != 1 || !strings.Contains(w.up.mainSends[0], "推断") {
-			t.Fatalf("同一次完成已按推断送过，不再送：%v", w.up.mainSends)
+		if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[0], "推断提醒") ||
+			!strings.Contains(w.up.mainSends[1], "主动报告") || !strings.Contains(w.up.mainSends[1], "迟到的主动报告") {
+			t.Fatalf("提醒之后真正的完成照常转告：%v", w.up.mainSends)
+		}
+		if x, _ := w.store.Session(sub.Key); x.Status != deckstore.StatusDone {
+			t.Fatalf("主动报告后标 done：%s", x.Status)
 		}
 	})
 }

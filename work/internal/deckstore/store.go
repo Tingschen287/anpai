@@ -251,7 +251,7 @@ type Session struct {
 	TaskSHA256 string `json:"task_sha256"` // 任务正文的 sha256
 	ArgsSHA256 string `json:"args_sha256"` // 启动参数的 sha256
 	// TaskGen 是子 agent 的任务代次（n051 评审 1 B4）：第一条 brief 是第 1 代，主 agent 每成功给它发一次话加 1。
-	// 「同一次完成只送一次」按代次去重：主动报告、推断、账本提交在同一代里只转告一次。0 按 1 算。
+	// 「同一次完成只送一次」按代次去重：主动报告与账本提交在同一代里只转告一次（推断只是提醒，不占完成）。0 按 1 算。
 	TaskGen int `json:"task_gen,omitempty"`
 }
 

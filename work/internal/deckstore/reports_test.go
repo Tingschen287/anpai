@@ -133,3 +133,30 @@ func TestSendingReportBecomesUnconfirmedAfterRestart(t *testing.T) {
 		t.Fatal("重启转为未确认应通知 owner")
 	}
 }
+
+// 推断提醒不占完成：有自己的编号；同时只留一条等送的；真正的完成（含账本提交）到时把它换掉。账本提交另按 Ref 去重。
+func TestReportsHintAndGraphRef(t *testing.T) {
+	d := testDirs(t)
+	s := withProject(t, d, DefaultEnvelope("deck"))
+	m, sb := mainAndSub(t, s)
+	h1, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "hint:1:100", Source: ReportInferred, Text: "推断一"})
+	if !added {
+		t.Fatal("提醒应收下")
+	}
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: "hint:1:200", Source: ReportInferred, Text: "推断二"}); added {
+		t.Fatal("同时只留一条等送的提醒")
+	}
+	if s.HasCompletion(sb.Key, CompletionIDFor(1)) {
+		t.Fatal("提醒不占完成")
+	}
+	g, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: CompletionIDFor(1), Source: ReportGraph, Ref: "n1#3", Text: "账本"})
+	if !added || g.ID != h1.ID || g.Source != ReportGraph || g.Ref != "n1#3" {
+		t.Fatalf("账本提交换掉还没送的提醒：%+v %v", g, added)
+	}
+	if got := s.PendingReports(m.Key); len(got) != 1 || !s.HasCompletion(sb.Key, CompletionIDFor(1)) {
+		t.Fatalf("只一条：%+v", got)
+	}
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: CompletionIDFor(2), Source: ReportGraph, Ref: "n1#3", Text: "账本"}); added {
+		t.Fatal("同一轮提交（Ref 相同）换了代次也不重收")
+	}
+}

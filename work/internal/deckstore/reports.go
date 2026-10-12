@@ -9,13 +9,15 @@ import (
 
 // 子 agent 完成后给主 agent 的汇报队列（owner 在 n048 验收时要求，架构稿 §14.4）。
 //
-// 同一个子 agent 的同一次完成只收一次（按 子会话 + 完成编号 去重）。送不送、什么时候送由 viewstate 的送达门决定；
+// 同一个子 agent 的同一次完成只收一次（按 子会话 + 完成编号 去重；账本提交另按 节点 + attempt 去重）。
+// 推断只是「提醒」（owner 在 n051 attempt 2 设计评审选 A）：它有自己的编号、不占完成；同一子 agent 同时只留一条等送的提醒，
+// 真正的完成（主动报告或账本提交）到时提醒还没送，就把这条提醒换成真正的完成，只送一次。送不送、什么时候送由 viewstate 的送达门决定；
 // 这里只记状态：pending（等送）→ delivered（已送达）或 unconfirmed（送达未确认，不自动重发）。
 
 // 汇报来源。
 const (
 	ReportActive   = "active"   // 子 agent 自己运行 deck agent report --done
-	ReportInferred = "inferred" // 状态转为空闲并保持一段时间，推断为完成
+	ReportInferred = "inferred" // 推断提醒：状态停下（idle/waiting）并保持一段时间；可能做完，也可能在等输入或权限确认，不算完成
 	ReportGraph    = "graph"    // 账本出现该节点的 submit
 )
 
@@ -42,6 +44,8 @@ type Report struct {
 	// Claim 不空表示被 deck agent wait 领走、等主 agent 确认收到（n051 评审 1 B5）；推送中的 sending 没有它
 	Claim     string    `json:"claim,omitempty"`
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
+	// Ref 是账本提交的 节点#attempt：同一 attempt 只转告一次，主 agent 发了新的话也不重报（attempt 2 设计评审 A）
+	Ref string `json:"ref,omitempty"`
 }
 
 // ClaimWait 是 deck agent wait 的领取标记。
@@ -67,7 +71,7 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			return nil, nil, fmt.Errorf("子 agent %s 没有登记主 agent", r.Sub)
 		}
 		for _, x := range s.reports {
-			if x.Sub == r.Sub && x.CompletionID == r.CompletionID {
+			if x.Sub == r.Sub && (x.CompletionID == r.CompletionID || r.Ref != "" && x.Ref == r.Ref) {
 				// 同一次完成：推断先入队、还没送，主动报告到了就换成主动报告的正文与标注（只送一次，送更准的那条）
 				if x.State == ReportPending && x.Source != ReportActive && r.Source == ReportActive {
 					x.Source, x.Text, x.UpdatedAt = r.Source, Clean(r.Text, 2000), s.now()
@@ -78,14 +82,40 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 				return nil, nil, nil
 			}
 		}
+		for _, x := range s.reports {
+			if x.Sub != r.Sub || x.Source != ReportInferred || x.State != ReportPending {
+				continue
+			}
+			if r.Source == ReportInferred {
+				// 同一子 agent 同时只留一条等送的提醒
+				out = *x
+				return nil, nil, nil
+			}
+			// 真正的完成到了、提醒还没送：换成真正的完成（只送一次，送更准的那条）
+			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = r.CompletionID, r.Source, Clean(r.Text, 2000), r.Ref, s.now()
+			out, added = *x, true
+			return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
+		}
 		now := s.now()
 		x := &Report{ID: newID("rep"), Project: sub.Project, Main: main.Key, Sub: sub.Key, CompletionID: r.CompletionID,
-			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now}
+			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now, Ref: r.Ref}
 		s.reports = append(s.reports, x)
 		out, added = *x, true
 		return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 	})
 	return out, added, err
+}
+
+// HasCompletion：这个子 agent 的这次完成（完成编号）已经收过（主动报告或账本提交）。
+func (s *Store) HasCompletion(sub, completionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, x := range s.reports {
+		if x.Sub == sub && x.CompletionID == completionID {
+			return true
+		}
+	}
+	return false
 }
 
 // Report 按 id 取一条汇报（副本）。
