@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
@@ -26,6 +27,7 @@ import (
 //	deck agent list | output <id> | send <id> --text <内容>
 //	deck agent escalate --kind <cost|config|push|disagree|deviation> --summary <说明> [--options a,b] [--recommend x] [--scope k=v,…]
 //	deck agent decisions
+//	deck agent wait [--timeout 10m]                 （主 agent 自己等子 agent 的汇报；拿到即算送达）
 //	deck agent report [--done] --text <内容>
 //	deck agent start-main --project <项目>        （owner）
 //
@@ -61,6 +63,14 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 		out, err = agentEscalate(ctx, c, rest)
 	case "decisions":
 		err = c.Get(ctx, "/v1/decisions", &out)
+	case "wait":
+		fs := flag.NewFlagSet("wait", flag.ExitOnError)
+		timeout := fs.Duration("timeout", 5*time.Minute, "最多等多久（上限 10 分钟）")
+		fs.Parse(rest)
+		if *timeout > 10*time.Minute {
+			*timeout = 10 * time.Minute
+		}
+		err = c.WithTimeout(*timeout+30*time.Second).Get(ctx, fmt.Sprintf("/v1/reports/wait?timeout=%d", int(timeout.Seconds())), &out)
 	case "report":
 		fs := flag.NewFlagSet("report", flag.ExitOnError)
 		done := fs.Bool("done", false, "做完了（转告主 agent）")
@@ -92,7 +102,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 }
 
 func agentUsage() {
-	fmt.Fprintln(os.Stderr, "用法：deck agent whoami|spawn|list|output|send|escalate|decisions|report|start-main …（deck agent <子命令> -h 看参数）")
+	fmt.Fprintln(os.Stderr, "用法：deck agent whoami|spawn|list|output|send|escalate|decisions|wait|report|start-main …（deck agent <子命令> -h 看参数）")
 	os.Exit(2)
 }
 

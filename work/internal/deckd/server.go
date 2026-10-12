@@ -94,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agents/{id}/send", s.postAgentSend)
 	mux.HandleFunc("POST /v1/projects/{id}/main", s.postMain)
 	mux.HandleFunc("POST /v1/reports", s.postReport)
+	mux.HandleFunc("GET /v1/reports/wait", s.getReportsWait)
 	return mux
 }
 

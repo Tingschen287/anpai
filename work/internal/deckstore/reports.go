@@ -90,6 +90,31 @@ func (s *Store) PendingReports(main string) []Report {
 	return out
 }
 
+// TakeReports 由主 agent 自己取走它还没送的汇报（deck agent wait，n051）：在锁内把 pending 直接标为 delivered 并返回。
+// 推送循环正在送（sending）的不取；被取走的，推送循环随后标 sending 会因状态不符而放弃，同一条只送一次。
+func (s *Store) TakeReports(main string) ([]Report, error) {
+	var out []Report
+	err := s.mutate(func() (func() error, []Event, error) {
+		var evs []Event
+		for _, x := range s.reports {
+			if x.Main == main && x.State == ReportPending {
+				x.State, x.UpdatedAt = ReportDelivered, s.now()
+				out = append(out, *x)
+				evs = append(evs, Event{Kind: "report", Project: x.Project, ID: x.ID})
+			}
+		}
+		if len(out) == 0 {
+			return nil, nil, nil
+		}
+		return s.saveReports, evs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
 var completionRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
 // MarkReport 推进汇报状态：pending → sending → delivered / unconfirmed（或确认没送时回到 pending）。sending 要在真正调发送之前落盘，

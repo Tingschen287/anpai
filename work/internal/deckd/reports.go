@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -179,7 +180,8 @@ func (s *Server) deliverReports(ctx context.Context, st *inferState) {
 }
 
 // deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
-func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report) error {
+// reportText 是转告给主 agent 的文字（推送与 deck agent wait 共用），标明主动报告、推断或账本提交。
+func (s *Server) reportText(rep deckstore.Report) string {
 	sub, _ := s.store.Session(rep.Sub)
 	label := "主动报告"
 	if rep.Source == deckstore.ReportInferred {
@@ -187,7 +189,64 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 	} else if rep.Source == deckstore.ReportGraph {
 		label = "账本提交"
 	}
-	text := fmt.Sprintf("［Agent Deck 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
+	return fmt.Sprintf("［Agent Deck 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
+}
+
+// maxWait 是 deck agent wait 一次最多等多久。
+const maxWait = 10 * time.Minute
+
+// getReportsWait：主 agent 自己等汇报（GET /v1/reports/wait?timeout=秒）。n051 Codex 端到端实测：Codex 开完子 agent 不结束这一轮，
+// 用 sleep 反复等，一直忙，推送循环（只在主 agent 空闲时送）就送不进去。拿到的汇报算送达，推送循环不再送。
+func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
+	c := s.caller(r)
+	if !need(w, c, false, RoleMain) {
+		return
+	}
+	d := 5 * time.Minute
+	if v := r.URL.Query().Get("timeout"); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil || sec < 0 {
+			fail(w, http.StatusBadRequest, "timeout 要写秒数")
+			return
+		}
+		d = time.Duration(sec) * time.Second
+	}
+	if d > maxWait {
+		d = maxWait
+	}
+	deadline := time.Now().Add(d)
+	for {
+		got, err := s.store.TakeReports(c.Session)
+		if err != nil {
+			storeErr(w, err)
+			return
+		}
+		if len(got) > 0 {
+			out := make([]map[string]string, 0, len(got))
+			for _, rep := range got {
+				out = append(out, map[string]string{"id": rep.ID, "sub": rep.Sub, "source": rep.Source, "text": s.reportText(rep)})
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+			return
+		}
+		if !time.Now().Before(deadline) {
+			writeJSON(w, http.StatusOK, map[string]any{"reports": []any{}, "timeout": true})
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(waitPoll):
+		}
+	}
+}
+
+// waitPoll 是 deck agent wait 查一次的间隔（测试可改）。
+var waitPoll = time.Second
+
+func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report) error {
+	sub, _ := s.store.Session(rep.Sub)
+	text := s.reportText(rep)
 	send := func() error {
 		permit, err := s.agents.leases.Manual(main.AgentDeckID)
 		if err != nil {
