@@ -911,6 +911,14 @@ func CheckNoBypass(fields ...string) error {
 		if err := checkSensitiveAssignments(f); err != nil {
 			return err
 		}
+	}
+	return checkBypassFlags(fields...)
+}
+
+// checkBypassFlags 只查明确的绕过参数（BypassFlags 与 bypassValues）。启动后核对 CLI 之外的进程（bash -c、MCP 服务等）用它：
+// 那些进程的命令行里常有 AWS_PROFILE=… 一类与权限无关的赋值，不按关键词白名单查（attempt 3 自查：误拒）；CLI 进程本身按参数白名单查。
+func checkBypassFlags(fields ...string) error {
+	for _, f := range fields {
 		words := strings.Fields(f)
 		for i, w := range words {
 			lw := strings.ToLower(w)

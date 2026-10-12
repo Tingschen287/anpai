@@ -35,7 +35,9 @@ func TestUpstreamConfigBypass(t *testing.T) {
 		{"codex 命令带绕过参数", "codex", "[codex]\ncommand = \"codex --dangerously-bypass-approvals-and-sandbox\"\n", false},
 		{"codex 的 -c 覆盖", "codex", "[codex]\ncommand = \"codex -c approval_policy=never\"\n", false},
 		{"codex 的 --config= 覆盖", "codex", "[codex]\ncommand = \"codex --config=sandbox_mode=danger-full-access\"\n", false},
-		{"codex 的其他 -c 覆盖不算", "codex", "[codex]\ncommand = \"codex -c model_reasoning_effort=high\"\n", true},
+		// n051 attempt 3（R1-A）：command 只能是裸命令或路径，带任何参数都拒绝（参数由 owner 在 deck 设置里逐字声明）
+		{"codex 的其他 -c 覆盖也拒绝", "codex", "[codex]\ncommand = \"codex -c model_reasoning_effort=high\"\n", false},
+		{"裸命令路径", "codex", "[codex]\ncommand = \"/opt/bin/codex\"\n", true},
 		{"带空格的 codex -c 覆盖", "codex", "[codex]\nextra_args = [\"-c\", \"approval_policy = \\\"never\\\"\"]\n", false},
 		{"自定义工具 dangerous_mode", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = true\n", false},
 		{"自定义工具 dangerous_mode = false", "claude", safe + "[tools.kimi]\ncommand = \"kimi\"\ndangerous_mode = false\n", true},
@@ -90,39 +92,54 @@ func TestSessionProcessesBypass(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { exec.Command("tmux", "-S", sock, "kill-server").Run() })
-	run("new-session", "-d", "-s", "bad", "bash", "-c", "sleep 30; : --dangerously-skip-permissions")
-	run("new-session", "-d", "-s", "child", "bash", "-c", "bash -c 'sleep 30; : --permission-mode bypassPermissions'; sleep 30")
-	run("new-session", "-d", "-s", "good", "bash", "-c", "sleep 30")
-	// 参数名与取值分在两个 argv 元素里（bash -c 脚本之后的位置参数）
-	run("new-session", "-d", "-s", "split", "bash", "-c", "sleep 30; :", "x", "--permission-mode", "bypassPermissions")
-	run("new-session", "-d", "-s", "spaced", "bash", "-c", "sleep 30; :", "x", "-c", `approval_policy = "never"`)
+	// 假的 CLI：名叫 claude、codex 的 bash 脚本，只是睡着（进程的命令行就是上游会起的样子）
+	bin := t.TempDir()
+	for _, n := range []string{"claude", "codex"} {
+		os.WriteFile(filepath.Join(bin, n), []byte("#!/bin/bash\nsleep 30\n"), 0o755)
+	}
+	cl, cx := filepath.Join(bin, "claude"), filepath.Join(bin, "codex")
+	// 与上游一样经 bash -c 起（n051 attempt 3：R1 方案 A，按参数白名单核对 CLI 进程）
+	start := func(name, cmd string) { run("new-session", "-d", "-s", name, "bash", "-c", cmd) }
+	start("good", "export AWS_PROFILE=default && "+cl+" --session-id u-1 --model 'claude-haiku-5-5'") // 与权限无关的赋值不误拒
+	start("goodmcp", cl+" --session-id u-1 --model m & bash -c 'sleep 30; :' npx -y some-mcp; wait")     // MCP 服务常见的 npx -y 不误拒
+	start("dangerous", cl+" --session-id u-1 --dangerously-skip-permissions")
+	start("automode", cl+" --session-id u-1 --permission-mode auto")       // 空格写法（attempt 3 自查）
+	start("settings", cl+" --session-id u-1 --settings /tmp/yolo.json")    // CLI 设置文件（attempt 3 自查）
+	start("attached", cx+" -anever -sdanger-full-access --model gpt")      // 短参数连写（attempt 3 自查）
+	start("profile", cx+" --profile yolo --model gpt")                     // --profile 空格写法（attempt 3 自查）
+	start("escaped", cx+" -c 'approval_policy=\"\\u006eever\"' --model g") // TOML 转义（评审 2 R1）
+	start("extra", cx+" -c sandbox_workspace_write.network_access=true --model g")
+	start("codexok", cx+" --model gpt --config model_reasoning_effort=high resume abc")
+	start("nocli", "sleep 30")
+	start("sidecar", cl+" --session-id u-1 & bash -c 'sleep 30; :' x --dangerously-skip-permissions; wait") // CLI 之外的进程只查明确的绕过参数
 	time.Sleep(300 * time.Millisecond)
 	ctx := context.Background()
-	if err := CheckSessionNoBypass(ctx, sock, "bad"); err == nil {
-		t.Fatal("窗格进程带绕过参数应报错")
-	}
-	if err := CheckSessionNoBypass(ctx, sock, "child"); err == nil {
-		t.Fatal("子进程带绕过参数应报错")
-	}
-	if err := CheckSessionNoBypass(ctx, sock, "spaced"); err == nil {
-		t.Fatal("带空格的 codex -c 完整赋值也应报错（评审 1 B1）")
-	}
-	if err := CheckSessionNoBypass(ctx, sock, "split"); err == nil {
-		t.Fatal("参数名与取值分在两个 argv 元素里也应报错")
-	}
-	if err := CheckSessionNoBypass(ctx, sock, "good"); err != nil {
-		t.Fatalf("干净的会话应通过：%v", err)
+	defer func(d time.Duration) { CLIWait = d }(CLIWait)
+	CLIWait = 500 * time.Millisecond
+	claude := LaunchArgs{Tool: "claude", Binary: "claude"}
+	codex := LaunchArgs{Tool: "codex", Binary: "codex"}
+	for _, c := range []struct {
+		s    string
+		want LaunchArgs
+		ok   bool
+	}{
+		{"good", claude, true}, {"goodmcp", claude, true}, {"codexok", codex, true},
+		{"dangerous", claude, false}, {"automode", claude, false}, {"settings", claude, false},
+		{"attached", codex, false}, {"profile", codex, false}, {"escaped", codex, false},
+		{"extra", codex, false}, // 没声明
+		{"extra", LaunchArgs{Tool: "codex", Extra: [][]string{{"-c", "sandbox_workspace_write.network_access=true"}}}, true},
+		{"nocli", claude, false},   // 找不到 CLI 进程：核对不了
+		{"sidecar", claude, false}, // CLI 干净，旁边的进程带绕过参数
+		{"none", claude, false}, {"", claude, false},
+	} {
+		if err := CheckSessionArgs(ctx, sock, c.s, c.want); (err == nil) != c.ok {
+			t.Errorf("%s（%s）：通过=%v，期望 %v（%v）", c.s, c.want.Tool, err == nil, c.ok, err)
+		}
 	}
 	if ok, err := TmuxSessionAlive(ctx, sock, "good"); !ok || err != nil {
 		t.Fatalf("在的会话应报在：%v %v", ok, err)
 	}
 	if ok, err := TmuxSessionAlive(ctx, sock, "none"); ok || err != nil {
 		t.Fatalf("不在的会话应报不在：%v %v", ok, err)
-	}
-	if err := CheckSessionNoBypass(ctx, sock, "none"); err == nil {
-		t.Fatal("没有这个会话：核对不了，应报错")
-	}
-	if err := CheckSessionNoBypass(ctx, sock, ""); err == nil {
-		t.Fatal("不知道 tmux 会话：核对不了，应报错")
 	}
 }

@@ -47,6 +47,9 @@ type AgentDef struct {
 	// Agent：不是 agent-deck 内置工具的自定义 agent（例如 grok、kimi）要显式声明 agent: true，
 	// 才确认它会把任务说明当任务读，而不是当命令执行（agentdeck.CheckTakesTaskText，n051）。
 	Agent bool `yaml:"agent,omitempty" json:"agent,omitempty"`
+	// ExtraArgs：owner 逐字声明、允许出现在这个 CLI 进程参数里的额外参数组（n051 attempt 3，owner 选 R1-A：启动后按参数白名单核对，
+	// 白名单 = 上游按启动请求会加的参数 + 这里声明的）。例如 [["--allowedTools", "Read,Write"]]。明确的绕过参数声明不进来（agentdeck.CheckExtraArgs）。
+	ExtraArgs [][]string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
 }
 
 // Envelope 是预算包络（架构稿 §5、O5）。

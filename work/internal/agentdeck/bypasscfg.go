@@ -53,10 +53,14 @@ func CheckUpstreamConfigNoBypass(tool string) error {
 	return nil
 }
 
-// checkConfigText 是 CheckUpstreamConfigNoBypass 的纯文本部分（便于测试）。
-//   - 整个文件（去掉注释）出现任何绕过参数都拒绝：[claude] extra_args、command、[tools.*]、[groups.*.claude] 等都可能带上它们；
+// checkConfigText 是 CheckUpstreamConfigNoBypass 的纯文本部分（便于测试）。启动前尽早拒绝；真正的保证在启动后按参数白名单核对
+// （CheckSessionArgs：配置写错时上游回落默认值，也只有那一道看得到）。n051 attempt 3（owner 选 R1-A）起只看所启动工具相关的几节，
+// 不再扫整个文件（attempt 3 自查：关键词扫描误拒 MCP 的 AWS_PROFILE 等常见配置）：
+//   - 所启动工具的 command（[tool]、[groups.*.tool]、[conductors.*.tool]、[tools.tool]）只能是裸命令或路径，extra_args 为空：
+//     上游把 command 里的多余词原样接在命令行上；
+//   - [shell] exit_to_shell 不能开（上游把 exec 去掉、后面接一个交互 shell）；
 //   - claude 类工具：[claude] 下必须显式写 dangerous_mode = false，且 allow_dangerous_mode、auto_mode 不能为 true；
-//   - codex、gemini：[codex]/[gemini] 下 yolo_mode 不能为 true；
+//   - codex、gemini：[codex]/[gemini] 下 yolo_mode 不能为 true；[tools.*] 的 dangerous_mode 不能为 true；
 //   - 用 claude.x = … 点号写法或 claude = {…} 内联表写这些开关的，读不懂，按确认不了拒绝。
 func checkConfigText(tool, text string) error {
 	section := ""
@@ -68,9 +72,6 @@ func checkConfigText(tool, text string) error {
 		line := strings.TrimSpace(stripComment(sc.Text()))
 		if line == "" {
 			continue
-		}
-		if err := CheckNoBypass(strings.NewReplacer(`"`, " ", `'`, " ", ",", " ", "[", " ", "]", " ").Replace(line)); err != nil {
-			return fmt.Errorf("第 %d 行：%w", n, err)
 		}
 		if strings.HasPrefix(line, "[") {
 			section = strings.Trim(strings.TrimSpace(strings.Trim(line, "[]")), " ")
@@ -84,6 +85,14 @@ func checkConfigText(tool, text string) error {
 		full := key
 		if section != "" {
 			full = section + "." + key
+		}
+		if toolSection(section, tool) {
+			if err := checkToolKey(key, strings.TrimSpace(strings.SplitN(line, "=", 2)[1])); err != nil {
+				return fmt.Errorf("第 %d 行 [%s] %w", n, section, err)
+			}
+		}
+		if section == "shell" && key == "exit_to_shell" && value != "false" {
+			return fmt.Errorf("第 %d 行：[shell] exit_to_shell 会让上游在 CLI 外面再套一个交互 shell，deck 核对不了，请 owner 去掉或改为 false", n)
 		}
 		switch {
 		case full == "claude" || strings.HasPrefix(full, "claude.") && section != "claude":
@@ -106,14 +115,6 @@ func checkConfigText(tool, text string) error {
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("读配置失败：%w", err)
 	}
-	// 整个文件（去注释）连成一段再查一次：多行数组把参数名与取值分在两行时，逐行查不到
-	var all []string
-	for _, l := range strings.Split(text, "\n") {
-		all = append(all, stripComment(l))
-	}
-	if err := CheckNoBypass(strings.NewReplacer(`"`, " ", `'`, " ", ",", " ", "[", " ", "]", " ").Replace(strings.Join(all, " "))); err != nil {
-		return fmt.Errorf("跨行：%w", err)
-	}
 	switch {
 	case tool == "claude":
 		if claude["dangerous_mode"] != "false" {
@@ -129,6 +130,36 @@ func checkConfigText(tool, text string) error {
 		if yolo[tool] == "true" {
 			return fmt.Errorf("[%s] yolo_mode = true 会让会话跳过权限确认，请 owner 改为 false 后再开", tool)
 		}
+	}
+	return nil
+}
+
+// toolSection：这一节会影响 tool 的启动命令（[tool]、[groups."…".tool]、[conductors.x.tool]、[profiles.x.tool]、[tools.tool]）。
+func toolSection(section, tool string) bool {
+	s := strings.ReplaceAll(section, `"`, "")
+	return s == tool || s == "tools."+tool || strings.HasSuffix(s, "."+tool) &&
+		(strings.HasPrefix(s, "groups.") || strings.HasPrefix(s, "conductors.") || strings.HasPrefix(s, "profiles."))
+}
+
+// checkToolKey：所启动工具那一节里，command 只能是裸命令或路径、extra_args 只能是空数组、wrapper 不能写（上游会再套一层 bash -c）。
+func checkToolKey(key, raw string) error {
+	switch key {
+	case "command":
+		v := strings.TrimSpace(raw)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		} else {
+			return fmt.Errorf("command = %s：deck 只放行一个带引号的命令名或路径", raw)
+		}
+		if v == "" || strings.ContainsAny(v, " \t\\\"'$`;&|<>(){}") {
+			return fmt.Errorf("command = %s：只能是裸命令名或路径（上游把多出来的词原样接在命令行上），参数请写进 deck 设置的 extra_args 由 owner 逐字声明", raw)
+		}
+	case "extra_args":
+		if strings.ReplaceAll(raw, " ", "") != "[]" {
+			return fmt.Errorf("extra_args = %s：必须为空，额外参数请写进 deck 设置由 owner 逐字声明", raw)
+		}
+	case "wrapper":
+		return fmt.Errorf("wrapper = %s：上游会在 CLI 外面再套一层 shell，deck 核对不了，请 owner 去掉", raw)
 	}
 	return nil
 }

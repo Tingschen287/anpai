@@ -408,13 +408,25 @@ headless 服务对菜单快照做了内存缓存，缓存只在 `notifyMenuChang
 - **v1.15.0 的 `[claude] dangerous_mode` 不写时默认为 true**（`internal/session/userconfig.go` `GetDangerousMode`；
   它自己的配置模板注释写着默认 false，与代码不符）。`launch` 没有按会话关掉它的参数，配置的 profile 覆盖也只有 `config_dir`。
   结果是每个 Claude 会话都以 `--dangerously-skip-permissions` 起来。n051 真模型端到端实测在包装脚本的参数记录里看到它。
-- Work Deck 的对策（`bypasscfg.go`、`procbypass.go`）：
-  1. 启动前读上游实际会用的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck`，否则 `~/.agent-deck`）：
+- Work Deck 的对策（`bypasscfg.go`、`argallow.go`；n051 attempt 3 起按参数**白名单**，owner 在设计复审选 R1-A——
+  按黑名单猜危险参数挡不住连写、空格、驼峰、别名、`--settings`、`--profile` 等写法，评审与自查三次都出在这一类）：
+  1. 启动前读上游实际会用的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck`，否则 `~/.agent-deck`），只看所启动工具相关的几节：
      claude 必须显式 `dangerous_mode = false`，`allow_dangerous_mode`、`auto_mode` 不能为 true；codex、gemini 的 `yolo_mode` 不能为 true；
-     整个文件（去掉注释）出现任何绕过参数都拒绝；点号写法与内联表读不懂，按确认不了拒绝。改配置的是 owner，deck 不替 owner 改。
-  2. 启动后按 tmux 会话里窗格进程及其全部子孙的 `/proc/<pid>/cmdline` 再核一次；带绕过参数或核对不了就停掉会话、不送任务、通知 owner。
+     `[tool]`、`[groups.*.tool]`、`[conductors.*.tool]`、`[tools.tool]` 的 `command` 只能是带引号的裸命令或路径，`extra_args` 为空，
+     不写 `wrapper`；`[shell] exit_to_shell` 不开；点号写法与内联表读不懂，按确认不了拒绝。改配置的是 owner，deck 不替 owner 改。
+     这一道只是尽早拒绝：配置写错（TOML 解析失败）时上游回落默认值（`dangerous_mode` 为 true），只有第 2 道看得到。
+  2. 启动后取 tmux 会话里窗格进程及其全部子孙的 `/proc/<pid>/cmdline`（最多等 `CLIWait` 让 CLI 进程出现）：
+     - 认出 CLI 进程（程序名，或解释器 node/bash 等后面的脚本名，等于工具名或 deck 设置里的可执行文件名），它的参数只能是
+       上游按启动请求会加的已知参数（claude：`--session-id`、`--resume`、`--add-dir`、`--model`、`--effort`；codex：`--model`、
+       `--config model_reasoning_effort=…`、`resume`/`fork <id>`；gemini：`--resume`、`--model`），加上 owner 在 deck 设置
+       `extra_args` 里逐字声明的参数组（声明本身也查：明确的绕过参数声明不进来）；其余一律拒绝；
+     - 其他进程（`bash -c`、`env`、MCP 服务等）只查明确的绕过参数；
+     - 一个 CLI 进程都没找到也算核对不了。不通过就停掉会话、不送任务、通知 owner。
+- 不检查的：CLI 自己的设置文件（`~/.claude/settings.json` 的 `defaultMode`、`CODEX_HOME` 里的 `config.toml`）——归 owner 定的
+  「CLI 自身默认模式」；把 CLI 改名藏起来的做法（deck 认不出进程时按核对不了拒绝，但改名后另起的同名之外的进程看不到）。
 - 升级上游时重查：`GetDangerousMode` 的默认值、`ClaudeOptions` 加参数的分支（`tooloptions.go`、`instance.go` `buildClaudeExtraFlags`）、
-  有没有新的配置来源（profile、group、conductor 覆盖）能打开绕过。
+  codex/gemini 的命令拼接（`buildCodexCommand`、`buildGeminiCommand`）有没有新参数——新参数不在白名单里会被拒，要按源码补进 `knownArgs`；
+  有没有新的配置来源（profile、group、conductor 覆盖）能改命令。
 
 ## 8. 上游变更时怎么核对
 

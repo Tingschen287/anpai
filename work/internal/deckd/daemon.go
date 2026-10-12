@@ -153,8 +153,8 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			Alive: func(ctx context.Context, tmux string) (bool, error) {
 				return agentdeck.TmuxSessionAlive(ctx, agentSock, tmux)
 			},
-			Processes: func(ctx context.Context, tmux string) error {
-				return agentdeck.CheckSessionNoBypass(ctx, agentSock, tmux)
+			Processes: func(ctx context.Context, tmux string, want agentdeck.LaunchArgs) error {
+				return agentdeck.CheckSessionArgs(ctx, agentSock, tmux, want)
 			}})
 		// 汇报循环（含后台查账本）结束之后再释放写入者锁：Run 返回前取消并等它（attempt 2 自查）
 		rctx, rcancel := context.WithCancel(ctx)

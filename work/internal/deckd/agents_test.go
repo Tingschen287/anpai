@@ -121,7 +121,8 @@ type agentWorld struct {
 	// 上游侧绕过检查的假结果：按工具给配置检查的错误；启动后命令行核对的错误
 	cfgBypass  map[string]error
 	procBypass error
-	gone       map[string]bool // 测试：这些 tmux 会话已经不在
+	procWant   []agentdeck.LaunchArgs // 启动后核对收到的白名单依据
+	gone       map[string]bool        // 测试：这些 tmux 会话已经不在
 }
 
 func newAgentWorld(t *testing.T) *agentWorld {
@@ -145,8 +146,11 @@ func newAgentWorld(t *testing.T) *agentWorld {
 	}, nil)
 	// 上游侧绕过检查换成可控的假检查（不读本机真实的 agent-deck 配置）
 	f.srv.WithBypassChecks(BypassChecks{
-		Config:    func(tool string) error { return w.cfgBypass[tool] },
-		Processes: func(_ context.Context, tmux string) error { return w.procBypass },
+		Config: func(tool string) error { return w.cfgBypass[tool] },
+		Processes: func(_ context.Context, tmux string, want agentdeck.LaunchArgs) error {
+			w.procWant = append(w.procWant, want)
+			return w.procBypass
+		},
 		Alive: func(_ context.Context, tmux string) (bool, error) {
 			if w.gone[tmux] {
 				return false, nil

@@ -47,10 +47,10 @@ type Upstream interface {
 
 // BypassChecks 是上游侧的绕过检查（n051 真模型端到端实测：agent-deck v1.15 默认给 Claude 加 --dangerously-skip-permissions）。
 // Config 在启动前看上游配置（agentdeck.CheckUpstreamConfigNoBypass）；Processes 在启动后看 tmux 会话里实际在跑的命令行
-// （agentdeck.CheckSessionNoBypass）。没接上就不开（确认不了）。
+// （agentdeck.CheckSessionArgs：CLI 进程的参数按白名单查，n051 attempt 3 R1-A）。没接上就不开（确认不了）。
 type BypassChecks struct {
 	Config    func(tool string) error
-	Processes func(ctx context.Context, tmuxSession string) error
+	Processes func(ctx context.Context, tmuxSession string, want agentdeck.LaunchArgs) error
 	// Alive 看 tmux 会话还在不在（agentdeck.TmuxSessionAlive）。起主 agent 时用它认出已经退出的旧主 agent；没接上就不认。
 	Alive func(ctx context.Context, tmuxSession string) (bool, error)
 }
@@ -198,6 +198,9 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 	}
 	a := res.Agent
 	if err := agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model, b.Title); err != nil {
+		return plan, err
+	}
+	if err := agentdeck.CheckExtraArgs(a.ExtraArgs); err != nil {
 		return plan, err
 	}
 	if err := s.upstreamConfigNoBypass(a.Tool); err != nil {
@@ -374,7 +377,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		tmux, _ = agentdeck.TmuxSessionOf(list, id)
 	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
-	if err := s.processesNoBypass(ctx, tmux); err != nil {
+	if err := s.processesNoBypass(ctx, tmux, plan.agent); err != nil {
 		s.stopLaunched(ctx, key, id, x, "启动后核对："+err.Error(), false, "起来后带着跳过权限的参数（或核对不了）")
 		fail(w, http.StatusBadGateway, "会话 %s 起来后带着跳过权限的参数（或核对不了），已停掉、不送任务：%v", id, err)
 		return
@@ -479,11 +482,11 @@ func (s *Server) mainGone(ctx context.Context, y deckstore.Session) bool {
 	return err == nil && !alive
 }
 
-func (s *Server) processesNoBypass(ctx context.Context, tmux string) error {
+func (s *Server) processesNoBypass(ctx context.Context, tmux string, a deckstore.AgentDef) error {
 	if s.agents.bypass.Processes == nil {
 		return fmt.Errorf("deckd 没接上启动后的命令行核对")
 	}
-	return s.agents.bypass.Processes(ctx, tmux)
+	return s.agents.bypass.Processes(ctx, tmux, agentdeck.LaunchArgs{Tool: a.Tool, Binary: a.Binary, Extra: a.ExtraArgs})
 }
 
 // stopLaunched 停掉刚起、但不能交任务的会话（带绕过参数、Graph 开不成一轮等）：先把写入权登记给工作台，用自动许可停。
@@ -607,7 +610,7 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a := res.Agent
-	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
+	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckExtraArgs(a.ExtraArgs), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
 		agentdeck.CheckTakesTaskText(a.Tool, a.Agent), deckstore.CheckPath(p.Path)} {
 		if check != nil {
 			fail(w, http.StatusBadRequest, "%v", check)
