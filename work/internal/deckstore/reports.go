@@ -1,6 +1,8 @@
 package deckstore
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"sort"
@@ -80,7 +82,9 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			if r.Ref == "" {
 				return nil, nil, fmt.Errorf("账本提醒没有 节点#attempt")
 			}
-			r.CompletionID = "ledger:" + strings.ReplaceAll(r.Ref, "#", ":")
+			// 编号用 节点#attempt 的摘要：节点 id 长时也不超过编号上限（attempt 4 自查）
+			sum := sha256.Sum256([]byte(r.Ref))
+			r.CompletionID = "ledger:" + hex.EncodeToString(sum[:8])
 		}
 		if !completionRe.MatchString(r.CompletionID) {
 			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)

@@ -383,6 +383,10 @@ func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time
 		default:
 			continue
 		}
+		if cur, ok := s.store.Session(x.Key); !ok || cur.Status != deckstore.StatusRunning {
+			// 查询途中子 agent 已经主动报告（标了 done）：真正的完成已经转告，不再送账本提醒（attempt 4 自查：提醒会让主 agent 以为还要等）
+			continue
+		}
 		// 账本提醒（owner 在 attempt 4 设计复审选 B2-A）：不占完成，按 节点#attempt 只送一次
 		_, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportGraph,
 			Ref: fmt.Sprintf("%s#%d", x.Graph.Node, x.Graph.Attempt),

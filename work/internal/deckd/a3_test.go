@@ -231,7 +231,7 @@ func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
 	}
 	w.srv.graphSubmits(context.Background(), newState(), time.Now())
 	reps := w.store.PendingReports(w.main.Key)
-	if len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || reps[0].CompletionID != "ledger:n099_x:3" {
+	if len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || reps[0].Ref != "n099_x#3" {
 		t.Fatalf("迟到的账本信号按 节点#attempt 作账本提醒：%+v", reps)
 	}
 	w.srv.deliverReports(context.Background(), newState())

@@ -13,7 +13,8 @@ import (
 )
 
 // n051 评审 3 B2：账本查询在途时，子 agent 主动报告了第 1 件、主 agent 又发了第 2 件；查询返回第 1 件的提交。
-// attempt 4 起账本信号只是提醒（owner 选 B2-A）：账本提醒照常送一次；两件真正的完成各送一次，第 2 件不被吞。
+// attempt 4 起账本信号只是提醒（owner 选 B2-A）；查询途中子 agent 已主动报告（标 done），就不再送账本提醒（attempt 4 自查）。
+// 两件真正的完成各送一次，第 2 件不被吞。
 func TestGraphSignalDuringQueryAfterActiveReport(t *testing.T) {
 	w, _ := graphWorld(t)
 	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gq1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
@@ -41,14 +42,14 @@ func TestGraphSignalDuringQueryAfterActiveReport(t *testing.T) {
 	}
 	w.srv.graphSubmits(context.Background(), newState(), time.Now())
 	w.srv.deliverReports(context.Background(), newState())
-	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "账本提醒") {
-		t.Fatalf("第 1 件的主动报告与账本提醒各一次：%v", w.up.mainSends)
+	if len(w.up.mainSends) != 1 || strings.Contains(w.up.mainSends[0], "账本提醒") {
+		t.Fatalf("第 1 件已主动报告：不再送账本提醒：%v", w.up.mainSends)
 	}
 	if _, b := w.do("graphsub", "POST", "/v1/reports", `{"done":true,"text":"第二件做完"}`); strings.Contains(b, `"duplicate":true`) {
 		t.Fatalf("第 2 件的完成不该被当成重复：%s", b)
 	}
 	w.srv.deliverReports(context.Background(), newState())
-	if len(w.up.mainSends) != 3 || !strings.Contains(w.up.mainSends[2], "第二件做完") {
+	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "第二件做完") {
 		t.Fatalf("第 2 件真正的完成照常送：%v", w.up.mainSends)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -141,8 +142,24 @@ func matchExtra(args []string, extra [][]string) int {
 //   - gemini 与其他工具：不允许声明。
 var declaredAllow = map[string]map[string]bool{
 	"claude": {"--allowedTools": true, "--allowed-tools": true, "--disallowedTools": true, "--disallowed-tools": true, "--append-system-prompt": true},
-	"codex":  {"-c": true, "--config": true},
+	"codex":  {"-c": true}, // 只认短写法：--config 在启动参数里已是上游加推理强度用的已知参数（attempt 4 自查：两道检查不一致）
 }
+
+// envKeyOK：codex 可声明的 shell_environment_policy 只限 set.<变量名>，且不能是改程序加载或查找方式、或改 Codex 自己设置来源的变量
+// （attempt 4 自查：LD_PRELOAD、PATH、HOME、CODEX_HOME、inherit=all 等以前都声明得进来）。
+func envKeyOK(key string) bool {
+	name, ok := strings.CutPrefix(key, "shell_environment_policy.set.")
+	if !ok || !envNameRe.MatchString(name) || strings.HasPrefix(name, "LD_") {
+		return false
+	}
+	switch name {
+	case "PATH", "HOME", "CODEX_HOME", "SHELL", "BASH_ENV", "ENV", "ZDOTDIR", "PYTHONPATH", "NODE_OPTIONS":
+		return false
+	}
+	return true
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 // CheckExtraArgs 核对 owner 为 tool 声明的额外参数：每组必须是「白名单里的一个参数 + 一个取值」（或 参数=取值），
 // 取值不能是参数、不能含转义；codex 的 -c 只认白名单里的键。其余一律拒绝（硬拒绝，owner 也声明不进来）。
@@ -183,10 +200,10 @@ func checkDeclaredGroup(tool string, g []string) error {
 		switch {
 		case !ok:
 			return fmt.Errorf("-c 的取值要写成 键=值")
-		case strings.HasPrefix(key, "shell_environment_policy.") && !strings.ContainsAny(key, " \t\"'[]{}"):
+		case envKeyOK(key):
 		case key == "sandbox_workspace_write.network_access" && (strings.TrimSpace(v) == "true" || strings.TrimSpace(v) == "false"):
 		default:
-			return fmt.Errorf("-c 只认 shell_environment_policy.* 与 sandbox_workspace_write.network_access=true|false，不认 %s", key)
+			return fmt.Errorf("-c 只认 shell_environment_policy.set.<变量名>（LD_*、PATH、HOME、CODEX_HOME 等除外）与 sandbox_workspace_write.network_access=true|false，不认 %s", key)
 		}
 	}
 	return nil

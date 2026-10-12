@@ -30,6 +30,14 @@ func TestDeclaredExtraArgsWhitelist(t *testing.T) {
 		{"codex", []string{"-c", "sandbox_workspace_write.writable_roots=[\"/\"]"}},
 		{"codex", []string{"-c", "sandbox_workspace_write.network_access=yes"}},
 		{"codex", []string{"-c", "shell_environment_policy.set.X=\"\\u0041\""}},
+		// attempt 4 第二轮自查：--config 长写法、改程序加载与设置来源的环境变量
+		{"codex", []string{"--config", "sandbox_workspace_write.network_access=true"}},
+		{"codex", []string{"-c", "shell_environment_policy.set.LD_PRELOAD=/tmp/x.so"}},
+		{"codex", []string{"-c", "shell_environment_policy.set.PATH=/tmp"}},
+		{"codex", []string{"-c", "shell_environment_policy.set.CODEX_HOME=/tmp"}},
+		{"codex", []string{"-c", "shell_environment_policy.set.HOME=/tmp"}},
+		{"codex", []string{"-c", "shell_environment_policy.inherit=all"}},
+		{"codex", []string{"-c", "shell_environment_policy.ignore_default_excludes=true"}},
 		// 形状不对
 		{"claude", []string{"--allowedTools"}},
 		{"claude", []string{"--allowedTools", "--dangerously-skip-permissions"}},

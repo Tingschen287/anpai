@@ -188,7 +188,7 @@ func TestReportsHintAndGraphRef(t *testing.T) {
 		t.Fatal("同时只留一条等送的提醒")
 	}
 	g, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Ref: "n1#3", Text: "账本"})
-	if !added || g.ID != h1.ID || g.Source != ReportGraph || g.CompletionID != "ledger:n1:3" {
+	if !added || g.ID != h1.ID || g.Source != ReportGraph || !strings.HasPrefix(g.CompletionID, "ledger:") || g.Ref != "n1#3" {
 		t.Fatalf("账本提醒换掉还没送的推断提醒：%+v %v", g, added)
 	}
 	if s.HasCompletion(sb.Key, CompletionIDFor(1)) {
@@ -199,6 +199,12 @@ func TestReportsHintAndGraphRef(t *testing.T) {
 	}
 	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportGraph, Text: "账本"}); added {
 		t.Fatal("账本提醒必须带 节点#attempt")
+	}
+	// 节点 id 很长：编号用摘要，不超上限、照样收下（attempt 4 自查）
+	s3 := withProject(t, testDirs(t), DefaultEnvelope("deck"))
+	_, sb3 := mainAndSub(t, s3)
+	if _, added, err := s3.EnqueueReport(Report{Sub: sb3.Key, Source: ReportGraph, Ref: strings.Repeat("n", 90) + "#12", Text: "账本"}); !added || err != nil {
+		t.Fatalf("长节点 id 的账本提醒应收下：%v %v", added, err)
 	}
 	// 主动报告换掉还没送的账本提醒（只送一次，送真正的完成）
 	a1, added, _ := s.EnqueueReport(Report{Sub: sb.Key, Source: ReportActive, Text: "做完了"})
