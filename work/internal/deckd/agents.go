@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -65,6 +66,8 @@ type agentsDeps struct {
 	toolInfo   ToolInfoFunc
 	graphStart GraphStartFunc
 	bypass     BypassChecks
+	// quotaOf 取某个工具的额度状态（dashquota 的 available/warn/exhausted/unknown）；空时用 Server 的看板客户端，测试可换
+	quotaOf func(ctx context.Context, tool string) string
 }
 
 // WithAgents 接上开子 agent 需要的依赖（daemon 与测试调用）。
@@ -281,6 +284,21 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			}
 		}
 	}
+	// 额度未知（看板取不到、数据过期、没有来源）或已用尽时启动 frontier 子 agent：一律上报（架构稿 §5、O5；n051 评审 1 B2）。
+	// 批准绑定本次请求（SpawnScope），主 agent 带同一请求与决定 id 再来一次即放行。主 agent 由 owner 自己起，不在此列。
+	quotaGate := x.Role == "sub" && x.Tier == deckstore.Frontier && s.quotaUnsure(ctx, x.Tool)
+	if quotaGate && exception == "" {
+		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
+			Summary: fmt.Sprintf("额度未知或已用尽时启动 frontier：请求开 %s（%s · %s）「%s」", plan.agent.Name, x.Tier, x.Model, x.Title),
+			Scope:   deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
+		if derr != nil {
+			fail(w, http.StatusConflict, "额度未知时启动 frontier 要 owner 批准，生成 cost 决定失败：%v", derr)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"pending": deckstore.KindCost, "decision": d,
+			"next": "owner 批准后带同一个请求（同一 request_id、任务、参数）与 exception=" + d.ID + " 再开一次"})
+		return
+	}
 	// 预算包络：预留名额；超出生成 cost 决定
 	if exception != "" {
 		if _, err := s.store.BeginExecute(exception, deckstore.SpawnScope(x, p)); err != nil {
@@ -314,7 +332,11 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if exception != "" {
 		// 批准后名额又够了：Reserve 没消耗例外，它会一直停在 executing（n051 自查）。收尾为已执行、作废，不能再用
 		if d, ok := s.store.Decision(exception); ok && d.State == deckstore.StateExecuting {
-			s.store.FinishExecute(exception, deckstore.StateApplied, "名额已够用，本次没有消耗这个例外；它已作废，不能再用")
+			why := "名额已够用，本次没有消耗这个例外；它已作废，不能再用"
+			if quotaGate {
+				why = "已按批准在额度未知时启动 frontier；这个例外已用掉，不能再用"
+			}
+			s.store.FinishExecute(exception, deckstore.StateApplied, why)
 		}
 	}
 	if graphNode != "" && s.agents.graphStart == nil {
@@ -424,6 +446,18 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	s.store.Notify(x.Project, "spawn", fmt.Sprintf("%s开了%s「%s」（%s · %s）", who, what, x.Title, plan.agent.Name, x.Model), creatorOf(c))
 	got, _ := s.store.Session(key)
 	writeJSON(w, http.StatusCreated, map[string]any{"session": got, "brief_delivered": delivered, "note": note})
+}
+
+// quotaUnsure：这个工具的额度是否未知或已用尽（取不到看板也算未知）。
+func (s *Server) quotaUnsure(ctx context.Context, tool string) bool {
+	status := dashquota.Unknown
+	switch {
+	case s.agents.quotaOf != nil:
+		status = s.agents.quotaOf(ctx, tool)
+	case s.quota != nil:
+		status = s.quota.Tool(ctx, tool).Status
+	}
+	return status == dashquota.Unknown || status == dashquota.Exhausted
 }
 
 // mainGone：旧主 agent 已经起来过（有 tmux 会话名），且那个 tmux 会话确实不在了。还在启动中、查不了、出错都按「还在」算。
