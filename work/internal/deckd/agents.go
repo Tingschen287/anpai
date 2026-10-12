@@ -701,6 +701,10 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadGateway, "发话失败：%v", err)
 		return
 	}
+	// 新的话：任务代次加 1，之后的完成算新的一次（n051 评审 1 B4）
+	if err := s.store.BumpTaskGen(x.Key); err != nil {
+		s.store.Notify(x.Project, "report", "记不下子 agent 的任务代次："+deckstore.Clean(err.Error(), 160), "deckd")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
 }
 

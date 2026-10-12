@@ -62,6 +62,12 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		}
 		for _, x := range s.reports {
 			if x.Sub == r.Sub && x.CompletionID == r.CompletionID {
+				// 同一次完成：推断先入队、还没送，主动报告到了就换成主动报告的正文与标注（只送一次，送更准的那条）
+				if x.State == ReportPending && x.Source == ReportInferred && r.Source == ReportActive {
+					x.Source, x.Text, x.UpdatedAt = r.Source, Clean(r.Text, 2000), s.now()
+					out = *x
+					return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
+				}
 				out = *x
 				return nil, nil, nil
 			}

@@ -242,7 +242,21 @@ type Session struct {
 	Dir        string `json:"dir"`         // 工作目录（绝对路径）
 	TaskSHA256 string `json:"task_sha256"` // 任务正文的 sha256
 	ArgsSHA256 string `json:"args_sha256"` // 启动参数的 sha256
+	// TaskGen 是子 agent 的任务代次（n051 评审 1 B4）：第一条 brief 是第 1 代，主 agent 每成功给它发一次话加 1。
+	// 「同一次完成只送一次」按代次去重：主动报告、推断、账本提交在同一代里只转告一次。0 按 1 算。
+	TaskGen int `json:"task_gen,omitempty"`
 }
+
+// Gen 是当前任务代次（没记过按 1）。
+func (x Session) Gen() int {
+	if x.TaskGen < 1 {
+		return 1
+	}
+	return x.TaskGen
+}
+
+// CompletionIDFor 是一个任务代次的完成编号。
+func CompletionIDFor(gen int) string { return fmt.Sprintf("gen:%d", gen) }
 
 // clone 返回不与内部共享指针的副本。
 func (x *Session) clone() Session {
@@ -465,6 +479,14 @@ func (s *Store) LaunchFailed(key string, uncertain bool, why string) error {
 func (s *Store) SetSessionStatus(key, status, note string) error {
 	return s.setSession(key, func(x *Session) error {
 		x.Status, x.Note = status, Clean(note, 300)
+		return nil
+	})
+}
+
+// BumpTaskGen 主 agent 给子 agent 发了新的话：任务代次加 1，之后的完成算新的一次。
+func (s *Store) BumpTaskGen(key string) error {
+	return s.setSession(key, func(x *Session) error {
+		x.TaskGen = x.Gen() + 1
 		return nil
 	})
 }

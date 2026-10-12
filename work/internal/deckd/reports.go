@@ -70,15 +70,20 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"queued": false, "notification": n})
 		return
 	}
-	// 同一次完成只送一次：完成编号取汇报正文的指纹，子 agent 重复运行同一条 report --done 不会重复转告
+	// 同一次完成只送一次（n051 评审 1 B4）：完成编号是子 agent 的任务代次，不是正文。改写正文、或推断之后再主动报告，
+	// 同一代都只转告一次；主 agent 发了新的话（代次加 1）之后的完成才算新的一次
 	rep, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportActive,
-		CompletionID: "active:" + TaskSHA256(b.Text)[:16], Text: b.Text})
+		CompletionID: deckstore.CompletionIDFor(x.Gen()), Text: b.Text})
 	if err != nil {
 		storeErr(w, err)
 		return
 	}
-	if added {
+	if added || rep.Source == deckstore.ReportActive && rep.Text == deckstore.Clean(b.Text, 2000) && rep.State == deckstore.ReportPending {
 		s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "子 agent 报告已完成")
+	}
+	if !added && rep.Text != deckstore.Clean(b.Text, 2000) {
+		// 同一次完成的补充说明：不再转告主 agent，记进通知栏，不悄悄丢
+		s.store.Notify(x.Project, "report", fmt.Sprintf("子 agent「%s」补充（同一次完成，已转告过或正在等送，不再转告）：%s", x.Title, deckstore.Clean(b.Text, 300)), x.Key)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queued": true, "report": rep, "duplicate": !added})
 }
@@ -134,9 +139,9 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 			if now.Sub(from) < inferAfter {
 				continue
 			}
-			// 这一段「在跑 → 安静」只推断一次：完成编号取转为安静的时刻
+			// 推断与主动报告共用任务代次：同一代只转告一次
 			s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportInferred,
-				CompletionID: fmt.Sprintf("inferred:%d", from.Unix()),
+				CompletionID: deckstore.CompletionIDFor(x.Gen()),
 				Text: fmt.Sprintf("子 agent「%s」可能已完成（推断：agent-deck 状态从 running 变为空闲并保持 %d 秒；它没有运行 deck agent report --done）。需要时用 deck agent output %s 查看。",
 					x.Title, int(inferAfter.Seconds()), x.Key)})
 			st.wasBusy[x.Key] = false
