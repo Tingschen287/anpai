@@ -124,4 +124,12 @@ func TestSendingReportBecomesUnconfirmedAfterRestart(t *testing.T) {
 	if err := s2.MarkReport(r.ID, ReportDelivered); err == nil {
 		t.Fatal("重启后应已是 unconfirmed，不能再改")
 	}
+	// n051 评审 1 B5：转为未确认要通知 owner，不悄悄留着
+	found := false
+	for _, n := range s2.Notifications(0, sb.Project) {
+		found = found || strings.Contains(n.Text, "重启时有一条汇报正在转告")
+	}
+	if !found {
+		t.Fatal("重启转为未确认应通知 owner")
+	}
 }

@@ -2,6 +2,7 @@ package deckd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -107,6 +108,7 @@ func (s *Server) runReports(ctx context.Context) {
 			return
 		case <-t.C:
 			s.inferCompletions(st, time.Now())
+			s.expireClaims(time.Now())
 			s.deliverReports(ctx, st)
 		}
 	}
@@ -234,10 +236,18 @@ func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(got) > 0 {
 			out := make([]map[string]string, 0, len(got))
+			ids := make([]string, 0, len(got))
 			for _, rep := range got {
 				out = append(out, map[string]string{"id": rep.ID, "sub": rep.Sub, "source": rep.Source, "text": s.reportText(rep)})
+				ids = append(ids, rep.ID)
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+			body, _ := json.Marshal(map[string]any{"reports": out, "ack": "收到后用 POST /v1/reports/ack 确认（deck agent wait 会自动确认）"})
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(append(body, '\n')); err != nil {
+				// 回应没写出去：主 agent 没看到，退回等送（n051 评审 1 B5）
+				s.store.ReleaseClaims(c.Session, ids)
+			}
 			return
 		}
 		if !time.Now().Before(deadline) {
@@ -268,6 +278,43 @@ func (s *Server) waitingFor(main string) bool {
 	s.waitMu.Lock()
 	defer s.waitMu.Unlock()
 	return s.waiting[main] > 0
+}
+
+// postReportsAck：主 agent 确认收到 deck agent wait 领走的汇报（POST /v1/reports/ack {"ids":[…]}）。
+func (s *Server) postReportsAck(w http.ResponseWriter, r *http.Request) {
+	c := s.caller(r)
+	if !need(w, c, true, RoleMain) {
+		return
+	}
+	var b struct {
+		IDs []string `json:"ids"`
+	}
+	if err := readBody(r, &b); err != nil || len(b.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "要给 ids")
+		return
+	}
+	n, err := s.store.AckReports(c.Session, b.IDs)
+	if err != nil {
+		storeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"acked": n})
+}
+
+// claimTimeout 是 deck agent wait 领走后等确认的上限；过了就转为未确认并通知 owner（测试可改）。
+var claimTimeout = 2 * time.Minute
+
+// expireClaims：领走后久不确认的汇报转为未确认（不重发），通知 owner。
+func (s *Server) expireClaims(now time.Time) {
+	reps, err := s.store.ExpireClaims(now.Add(-claimTimeout))
+	if err != nil {
+		return
+	}
+	for _, rep := range reps {
+		sub, _ := s.store.Session(rep.Sub)
+		s.store.Notify(rep.Project, "report", fmt.Sprintf("主 agent 用 deck agent wait 领走的汇报（%s）没有确认收到，送没送到不确定、不会重发，请在主 agent 那里核对：%s",
+			sub.Title, deckstore.Clean(rep.Text, 160)), "deckd")
+	}
 }
 
 // waitPoll 是 deck agent wait 查一次的间隔（测试可改）。

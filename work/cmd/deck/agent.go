@@ -70,7 +70,27 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 		if *timeout > 10*time.Minute {
 			*timeout = 10 * time.Minute
 		}
-		err = c.WithTimeout(*timeout+30*time.Second).Get(ctx, fmt.Sprintf("/v1/reports/wait?timeout=%d", int(timeout.Seconds())), &out)
+		var got struct {
+			Reports []map[string]string `json:"reports"`
+			Timeout bool                `json:"timeout,omitempty"`
+		}
+		if err = c.WithTimeout(*timeout+30*time.Second).Get(ctx, fmt.Sprintf("/v1/reports/wait?timeout=%d", int(timeout.Seconds())), &got); err != nil {
+			break
+		}
+		// 先打印，再确认收到（n051 评审 1 B5）：确认之前被杀掉，deckd 会把它标为送达未确认并通知 owner
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(got)
+		if len(got.Reports) > 0 {
+			ids := make([]string, 0, len(got.Reports))
+			for _, r := range got.Reports {
+				ids = append(ids, r["id"])
+			}
+			if aerr := c.Do(ctx, "POST", "/v1/reports/ack", map[string]any{"ids": ids}, nil); aerr != nil {
+				fmt.Fprintf(os.Stderr, "确认收到失败（deckd 会把这些汇报标为送达未确认并通知 owner）：%v\n", aerr)
+			}
+		}
+		return
 	case "report":
 		fs := flag.NewFlagSet("report", flag.ExitOnError)
 		done := fs.Bool("done", false, "做完了（转告主 agent）")

@@ -39,7 +39,13 @@ type Report struct {
 	State        string    `json:"state"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Claim 不空表示被 deck agent wait 领走、等主 agent 确认收到（n051 评审 1 B5）；推送中的 sending 没有它
+	Claim     string    `json:"claim,omitempty"`
+	ClaimedAt time.Time `json:"claimed_at,omitempty"`
 }
+
+// ClaimWait 是 deck agent wait 的领取标记。
+const ClaimWait = "wait"
 
 // EnqueueReport 收下一条汇报。同一子会话、同一完成编号已经收过就返回已有的那条，不重复。
 func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
@@ -80,6 +86,20 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 	})
 	return out, added, err
+}
+
+// Reports 返回某项目的全部汇报（副本，按时间）。
+func (s *Store) Reports(project string) []Report {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Report
+	for _, x := range s.reports {
+		if project == "" || x.Project == project {
+			out = append(out, *x)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
 }
 
 // PendingReports 返回某主 agent 还没送的汇报，按时间。
@@ -139,15 +159,16 @@ func (s *Store) AdoptOrphans(project, newMain string) (subs, reports int, err er
 	return subs, reports, err
 }
 
-// TakeReports 由主 agent 自己取走它还没送的汇报（deck agent wait，n051）：在锁内把 pending 直接标为 delivered 并返回。
-// 推送循环正在送（sending）的不取；被取走的，推送循环随后标 sending 会因状态不符而放弃，同一条只送一次。
+// TakeReports 由主 agent 自己领走它还没送的汇报（deck agent wait，n051）：在锁内把 pending 标为 sending 并记下领取，
+// 主 agent 收到后用 AckReports 确认才算送达；回应没写出去就 ReleaseClaims 退回；久不确认由 ExpireClaims 转为未确认（评审 1 B5）。
+// 推送循环正在送（sending）的不取；被领走的，推送循环随后标 sending 会因状态不符而放弃，同一条只送一次。
 func (s *Store) TakeReports(main string) ([]Report, error) {
 	var out []Report
 	err := s.mutate(func() (func() error, []Event, error) {
 		var evs []Event
 		for _, x := range s.reports {
 			if x.Main == main && x.State == ReportPending {
-				x.State, x.UpdatedAt = ReportDelivered, s.now()
+				x.State, x.Claim, x.ClaimedAt, x.UpdatedAt = ReportSending, ClaimWait, s.now(), s.now()
 				out = append(out, *x)
 				evs = append(evs, Event{Kind: "report", Project: x.Project, ID: x.ID})
 			}
@@ -162,6 +183,60 @@ func (s *Store) TakeReports(main string) ([]Report, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+// claimed 在锁内把主 agent main 领走的 ids 改成 state；返回改了几条。
+func (s *Store) claimed(main string, ids []string, state string) (int, error) {
+	n := 0
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	err := s.mutate(func() (func() error, []Event, error) {
+		var evs []Event
+		for _, x := range s.reports {
+			if want[x.ID] && x.Main == main && x.State == ReportSending && x.Claim == ClaimWait {
+				x.State, x.Claim, x.UpdatedAt = state, "", s.now()
+				n++
+				evs = append(evs, Event{Kind: "report", Project: x.Project, ID: x.ID})
+			}
+		}
+		if n == 0 {
+			return nil, nil, nil
+		}
+		return s.saveReports, evs, nil
+	})
+	return n, err
+}
+
+// AckReports：主 agent 确认收到领走的汇报，标为送达。
+func (s *Store) AckReports(main string, ids []string) (int, error) {
+	return s.claimed(main, ids, ReportDelivered)
+}
+
+// ReleaseClaims：领走后回应没写出去，退回等送（推送或下一次 wait 再送）。
+func (s *Store) ReleaseClaims(main string, ids []string) (int, error) {
+	return s.claimed(main, ids, ReportPending)
+}
+
+// ExpireClaims：领走后超过 before 还没确认的，转为未确认（不重发），返回这些汇报供通知 owner。
+func (s *Store) ExpireClaims(before time.Time) ([]Report, error) {
+	var out []Report
+	err := s.mutate(func() (func() error, []Event, error) {
+		var evs []Event
+		for _, x := range s.reports {
+			if x.State == ReportSending && x.Claim == ClaimWait && x.ClaimedAt.Before(before) {
+				x.State, x.Claim, x.UpdatedAt = ReportUnconfirmed, "", s.now()
+				out = append(out, *x)
+				evs = append(evs, Event{Kind: "report", Project: x.Project, ID: x.ID})
+			}
+		}
+		if len(out) == 0 {
+			return nil, nil, nil
+		}
+		return s.saveReports, evs, nil
+	})
+	return out, err
 }
 
 var completionRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)

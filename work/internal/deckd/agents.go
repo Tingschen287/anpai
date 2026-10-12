@@ -557,7 +557,7 @@ func MainBrief(p deckstore.ProjectDef) string {
 - owner 已作的决定：deck agent decisions（用来判断是否偏离）。
 - 不使用任何跳过权限确认的参数。子 agent 做完会自动转告你，标明「主动报告」或「推断」。
 - 开完子 agent 就结束这一轮回复、停下来等：汇报只在你空闲时送进来。不要用 sleep 或循环等待（你一直在忙，汇报就送不进来）。
-  确实需要在一个命令里等，就运行 deck agent wait --timeout 2m（可以重复运行）：有汇报就打印出来（算已送达，不会再转告一次），没有就到时返回。
+  确实需要在一个命令里等，就运行 deck agent wait --timeout 2m（可以重复运行）：有汇报就打印出来并自动确认收到（之后不会再转告一次），没有就到时返回。
 
 预算包络 %s v%d：同时最多 %d 个子 agent，frontier 子 agent 最多 %d 个；超出 deck 会生成决定等 owner 批准。
 `), p.Name, p.ID, p.Path, env.ID, env.Version, env.MaxSubagents, env.MaxFrontier)

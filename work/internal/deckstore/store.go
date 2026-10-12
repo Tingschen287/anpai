@@ -97,9 +97,12 @@ func Open(dirs Dirs) (*Store, error) {
 	if _, err := readJSON(s.path("reports.json"), &s.reports); err != nil {
 		return nil, err
 	}
+	var recovered []Report
 	for _, r := range s.reports {
 		if r.State == ReportSending {
 			r.State = ReportUnconfirmed
+			r.Claim = ""
+			recovered = append(recovered, *r)
 			changed = true
 		}
 	}
@@ -114,6 +117,12 @@ func Open(dirs Dirs) (*Store, error) {
 			return nil, err
 		}
 		if err := s.saveReports(); err != nil {
+			return nil, err
+		}
+	}
+	// 送到一半（sending）时停了的汇报转为未确认、不重发；告诉 owner，不悄悄留着（n051 评审 1 B5）
+	for _, r := range recovered {
+		if _, err := s.Notify(r.Project, "report", fmt.Sprintf("deckd 重启时有一条汇报正在转告（子 agent %s），送没送到不确定，不会重发；请在主 agent 那里核对：%s", r.Sub, Clean(r.Text, 160)), "deckd"); err != nil {
 			return nil, err
 		}
 	}
