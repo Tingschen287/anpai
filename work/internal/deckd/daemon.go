@@ -156,7 +156,11 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			Processes: func(ctx context.Context, tmux string) error {
 				return agentdeck.CheckSessionNoBypass(ctx, agentSock, tmux)
 			}})
-		go srv.runReports(ctx)
+		// 汇报循环（含后台查账本）结束之后再释放写入者锁：Run 返回前取消并等它（attempt 2 自查）
+		rctx, rcancel := context.WithCancel(ctx)
+		rdone := make(chan struct{})
+		go func() { defer close(rdone); srv.runReports(rctx) }()
+		defer func() { rcancel(); <-rdone }()
 	} else {
 		store.Notify("", "deckd", "没接上 agent-deck，开子 agent 不可用："+err.Error(), "deckd")
 	}

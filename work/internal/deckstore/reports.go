@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -71,7 +72,7 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			return nil, nil, fmt.Errorf("子 agent %s 没有登记主 agent", r.Sub)
 		}
 		for _, x := range s.reports {
-			if x.Sub == r.Sub && (x.CompletionID == r.CompletionID || r.Ref != "" && x.Ref == r.Ref) {
+			if x.Sub == r.Sub && x.Source != ReportInferred && (x.CompletionID == r.CompletionID || r.Ref != "" && x.Ref == r.Ref) {
 				// 同一次完成：推断先入队、还没送，主动报告到了就换成主动报告的正文与标注（只送一次，送更准的那条）
 				if x.State == ReportPending && x.Source != ReportActive && r.Source == ReportActive {
 					x.Source, x.Text, x.UpdatedAt = r.Source, Clean(r.Text, 2000), s.now()
@@ -81,6 +82,10 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 				out = *x
 				return nil, nil, nil
 			}
+		}
+		if r.Source == ReportInferred && s.hasCompletionLocked(r.Sub, hintGen(r.CompletionID)) {
+			// 这一代已经有真正的完成（检查与入队在同一把锁里，attempt 2 自查）：不提醒
+			return nil, nil, nil
 		}
 		for _, x := range s.reports {
 			if x.Sub != r.Sub || x.Source != ReportInferred || x.State != ReportPending {
@@ -106,16 +111,52 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 	return out, added, err
 }
 
-// HasCompletion：这个子 agent 的这次完成（完成编号）已经收过（主动报告或账本提交）。
+// HasCompletion：这个子 agent 的这次完成（完成编号）已经收过（主动报告或账本提交；推断提醒不算，旧版本按代次编号的推断行也不算）。
 func (s *Store) HasCompletion(sub, completionID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.hasCompletionLocked(sub, completionID)
+}
+
+func (s *Store) hasCompletionLocked(sub, completionID string) bool {
+	if completionID == "" {
+		return false
+	}
 	for _, x := range s.reports {
-		if x.Sub == sub && x.CompletionID == completionID {
+		if x.Sub == sub && x.Source != ReportInferred && x.CompletionID == completionID {
 			return true
 		}
 	}
 	return false
+}
+
+// HintID 是推断提醒的编号：代次 + 这段安静开始的时刻（毫秒）。
+func HintID(gen int, quietFrom time.Time) string {
+	return fmt.Sprintf("hint:%d:%d", gen, quietFrom.UnixMilli())
+}
+
+// hintGen 从提醒编号取出所属代次的完成编号；不是提醒编号返回空。
+func hintGen(id string) string {
+	p := strings.SplitN(id, ":", 3)
+	if len(p) != 3 || p[0] != "hint" {
+		return ""
+	}
+	return "gen:" + p[1]
+}
+
+// absorbLocked：提醒从 sending 退回 pending（主 agent 正忙、或 wait 的回应没写出去）时，同一子 agent 在它之后已经到了真正的完成，
+// 就把那条完成并进这条提醒的位置、删掉那条：只送一次，送真正的完成（attempt 2 自查：主 agent 忙时提醒多半处在 sending，原地替换常常落空）。
+func (s *Store) absorbLocked(x *Report) {
+	if x.Source != ReportInferred || x.State != ReportPending {
+		return
+	}
+	for i, y := range s.reports {
+		if y != x && y.Sub == x.Sub && y.Source != ReportInferred && y.State == ReportPending && !y.CreatedAt.Before(x.CreatedAt) {
+			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = y.CompletionID, y.Source, y.Text, y.Ref, s.now()
+			s.reports = append(s.reports[:i], s.reports[i+1:]...)
+			return
+		}
+	}
 }
 
 // Report 按 id 取一条汇报（副本）。
@@ -236,12 +277,17 @@ func (s *Store) claimed(main string, ids []string, state string) (int, error) {
 	}
 	err := s.mutate(func() (func() error, []Event, error) {
 		var evs []Event
+		var back []*Report
 		for _, x := range s.reports {
 			if want[x.ID] && x.Main == main && x.State == ReportSending && x.Claim == ClaimWait {
 				x.State, x.Claim, x.UpdatedAt = state, "", s.now()
+				back = append(back, x)
 				n++
 				evs = append(evs, Event{Kind: "report", Project: x.Project, ID: x.ID})
 			}
+		}
+		for _, x := range back {
+			s.absorbLocked(x)
 		}
 		if n == 0 {
 			return nil, nil, nil
@@ -299,6 +345,7 @@ func (s *Store) MarkReport(id, state string) error {
 					return nil, nil, fmt.Errorf("汇报 %s 是 %s，不能改成 %s", id, x.State, state)
 				}
 				x.State, x.UpdatedAt = state, s.now()
+				s.absorbLocked(x)
 				return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 			}
 		}

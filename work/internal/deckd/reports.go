@@ -103,6 +103,8 @@ type inferState struct {
 	lastGraph time.Time            // 上一次查账本提交信号的时刻
 	graphBusy bool                 // 正在后台查账本（一次 projectctl brief 要两三秒，不挡推送）
 	graphWG   sync.WaitGroup       // 后台查账本的 goroutine：循环退出前等它结束
+	startedAt time.Time            // 第一次推断的时刻：在这之前就有的子 agent，重启后没见过它在跑也照常计时
+	seen      map[string]bool      // 子会话 key → 本进程已经看过它的状态
 }
 
 func newInferState() *inferState {
@@ -137,9 +139,23 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if st.startedAt.IsZero() {
+		st.startedAt = now
+	}
+	if st.seen == nil {
+		st.seen = map[string]bool{}
+	}
 	for _, x := range s.store.Sessions("") {
 		if x.Role != "sub" || x.Parent == "" || x.Status != deckstore.StatusRunning && x.Status != deckstore.StatusDone || x.TmuxSession == "" {
 			continue
+		}
+		if !st.seen[x.Key] {
+			// deckd 重启：重启前就开的子 agent 第一次被看到时可能已经停着（等权限确认，或做完没报告）。没见过它在跑也当作刚停下，
+			// 从这一刻计时；这一代已报告过的入队时被拒（attempt 2 自查）
+			st.seen[x.Key] = true
+			if x.CreatedAt.Before(st.startedAt) {
+				st.wasBusy[x.Key] = true
+			}
 		}
 		switch s.activity.of(x.TmuxSession) {
 		case "running":
@@ -159,12 +175,10 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 			}
 			st.wasBusy[x.Key] = false
 			delete(st.quietFrom, x.Key)
-			if s.store.HasCompletion(x.Key, deckstore.CompletionIDFor(x.Gen())) {
-				continue // 这一代已经报告过（主动报告或账本提交），停下是正常的
-			}
+			// 这一代已经报告过（主动报告或账本提交）的，入队时在存储的锁里拒收（与后台账本、主动报告并发也不漏）
 			// 提醒有自己的编号（代次 + 这段安静开始的时刻）：不占这一代的完成
 			s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportInferred,
-				CompletionID: fmt.Sprintf("hint:%d:%d", x.Gen(), from.UnixMilli()),
+				CompletionID: deckstore.HintID(x.Gen(), from),
 				Text: fmt.Sprintf("推断：子 agent「%s」停下了 %d 秒（agent-deck 状态从 running 变为 %s），没有运行 deck agent report --done。可能已做完，也可能在等输入或权限确认。"+
 					"这只是提醒、不算完成：它之后真正的完成仍会转告。请用 deck agent output %s 查看。",
 					x.Title, int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})

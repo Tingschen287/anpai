@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
 
@@ -128,5 +131,109 @@ func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	w.srv.deliverReports(context.Background(), st)
 	if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "第 4 轮") {
 		t.Fatalf("新的一轮提交照常转告：%v", w.up.mainSends)
+	}
+}
+
+// busyOnceUp：第一次送主 agent 时先调 hook（模拟子 agent 在 --defer-if-busy 等待期间报告），再回「主 agent 正忙」。
+type busyOnceUp struct {
+	*fakeUp
+	mu   sync.Mutex
+	hook func()
+}
+
+func (h *busyOnceUp) SendToMain(ctx context.Context, p lease.Permit, id, msg string) error {
+	h.mu.Lock()
+	hook := h.hook
+	h.hook = nil
+	h.mu.Unlock()
+	if hook != nil {
+		hook()
+		return agentdeck.ErrTargetBusy
+	}
+	return h.fakeUp.SendToMain(ctx, p, id, msg)
+}
+
+// 自查：主 agent 正忙，提醒在 sending 里等；这时真正的完成到了。提醒退回等送时并入真正的完成，只送一次。
+func TestHintBackFromBusyAbsorbsCompletion(t *testing.T) {
+	w := newAgentWorld(t)
+	sub := spawnedSub(t, w)
+	st := newState()
+	quiet(w, st, sub.TmuxSession, "waiting", time.Now())
+	h := &busyOnceUp{fakeUp: w.up}
+	h.hook = func() { w.do("sub", "POST", "/v1/reports", `{"done":true,"text":"真正做完"}`) }
+	w.srv.agents.upstream = h
+	w.srv.deliverReports(context.Background(), st)
+	if n := len(w.store.PendingReports(w.main.Key)); n != 1 {
+		t.Fatalf("退回后只剩一条：%d", n)
+	}
+	w.srv.deliverReports(context.Background(), st)
+	if len(w.up.mainSends) != 1 || !strings.Contains(w.up.mainSends[0], "主动报告") || !strings.Contains(w.up.mainSends[0], "真正做完") {
+		t.Fatalf("只送真正的完成：%v", w.up.mainSends)
+	}
+}
+
+// 自查：wait 领走提醒、回应没写出去前真正的完成到了；退回时并入，只剩一条。
+func TestReleasedHintAbsorbsCompletion(t *testing.T) {
+	w := newAgentWorld(t)
+	sub := spawnedSub(t, w)
+	quiet(w, newState(), sub.TmuxSession, "idle", time.Now())
+	got, _ := w.store.TakeReports(w.main.Key)
+	w.do("sub", "POST", "/v1/reports", `{"done":true,"text":"真正做完"}`)
+	w.store.ReleaseClaims(w.main.Key, []string{got[0].ID})
+	reps := w.store.PendingReports(w.main.Key)
+	if len(reps) != 1 || reps[0].Source != deckstore.ReportActive || reps[0].ID != got[0].ID {
+		t.Fatalf("退回时并入真正的完成：%+v", reps)
+	}
+}
+
+// 自查：旧版本按代次编号（gen:N）留在盘上的推断行不占完成：已送的不吞主动报告；等送的被账本提交换掉。
+func TestOldInferredRowsDoNotHoldCompletion(t *testing.T) {
+	t.Run("已送的旧推断", func(t *testing.T) {
+		w := newAgentWorld(t)
+		sub := spawnedSub(t, w)
+		w.store.EnqueueReport(deckstore.Report{Sub: sub.Key, Source: deckstore.ReportInferred, CompletionID: deckstore.CompletionIDFor(1), Text: "旧推断"})
+		w.srv.deliverReports(context.Background(), newState())
+		w.do("sub", "POST", "/v1/reports", `{"done":true,"text":"做完了"}`)
+		w.srv.deliverReports(context.Background(), newState())
+		if len(w.up.mainSends) != 2 || !strings.Contains(w.up.mainSends[1], "做完了") {
+			t.Fatalf("真正的完成照常转告：%v", w.up.mainSends)
+		}
+	})
+	t.Run("等送的旧推断", func(t *testing.T) {
+		w, _ := graphWorld(t)
+		code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "go1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+		if code != 201 {
+			t.Fatalf("开子 agent：%d %s", code, b)
+		}
+		var out struct{ Session deckstore.Session }
+		json.Unmarshal([]byte(b), &out)
+		w.store.EnqueueReport(deckstore.Report{Sub: out.Session.Key, Source: deckstore.ReportInferred, CompletionID: deckstore.CompletionIDFor(1), Text: "旧推断"})
+		w.srv.agents.graphState = func(context.Context, deckstore.ProjectDef, string) (projectctl.State, error) {
+			return projectctl.StateSubmitted, nil
+		}
+		w.srv.graphSubmits(context.Background(), newState(), time.Now())
+		reps := w.store.PendingReports(w.main.Key)
+		if x, _ := w.store.Session(out.Session.Key); len(reps) != 1 || reps[0].Source != deckstore.ReportGraph || x.Status != deckstore.StatusDone {
+			t.Fatalf("账本提交换掉旧推断、子 agent 标 done：%+v %s", reps, x.Status)
+		}
+	})
+}
+
+// 自查：deckd 重启后，重启前就开的子 agent 第一次被看到就停着（等权限确认），从那一刻计时照常提醒。
+func TestHintAfterRestartWithoutSeeingRunning(t *testing.T) {
+	w := newAgentWorld(t)
+	old := spawnedSub(t, w)
+	t0 := time.Now().Add(time.Second)
+	w.srv.activity = &activityCache{byTmx: map[string]string{old.TmuxSession: "waiting"}, at: t0, now: func() time.Time { return t0 }}
+	st := newState() // 新进程
+	w.srv.inferCompletions(st, t0)
+	w.srv.inferCompletions(st, t0.Add(30*time.Second))
+	if n := len(w.store.PendingReports(w.main.Key)); n != 0 {
+		t.Fatalf("不到 60 秒不提醒：%d", n)
+	}
+	w.srv.inferCompletions(st, t0.Add(62*time.Second))
+	reps := w.store.PendingReports(w.main.Key)
+	if len(reps) != 1 || reps[0].Source != deckstore.ReportInferred {
+		t.Fatalf("重启前就开的子 agent 停着：照常提醒：%+v", reps)
 	}
 }

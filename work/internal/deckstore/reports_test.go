@@ -3,6 +3,7 @@ package deckstore
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func mainAndSub(t *testing.T, s *Store) (Session, Session) {
@@ -158,5 +159,12 @@ func TestReportsHintAndGraphRef(t *testing.T) {
 	}
 	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: CompletionIDFor(2), Source: ReportGraph, Ref: "n1#3", Text: "账本"}); added {
 		t.Fatal("同一轮提交（Ref 相同）换了代次也不重收")
+	}
+	// 这一代已有真正的完成：提醒在同一把锁里被拒（检查与入队之间不留空档）
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(1, time.Now()), Source: ReportInferred, Text: "迟到的推断"}); added {
+		t.Fatal("这一代已有完成：不收提醒")
+	}
+	if _, added, _ := s.EnqueueReport(Report{Sub: sb.Key, CompletionID: HintID(2, time.Now()), Source: ReportInferred, Text: "新一代的推断"}); !added {
+		t.Fatal("新一代还没完成：收提醒")
 	}
 }
