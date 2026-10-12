@@ -255,7 +255,7 @@ type Session struct {
 	TaskSHA256 string `json:"task_sha256"` // 任务正文的 sha256
 	ArgsSHA256 string `json:"args_sha256"` // 启动参数的 sha256
 	// TaskGen 是子 agent 的任务代次（n051 评审 1 B4）：第一条 brief 是第 1 代，主 agent 每成功给它发一次话加 1。
-	// 「同一次完成只送一次」按代次去重：主动报告与账本提交在同一代里只转告一次（推断只是提醒，不占完成）。0 按 1 算。
+	// 「同一次完成只送一次」按代次去重：同一代的主动报告只转告一次（推断提醒与账本提醒都只是提醒，不占完成）。0 按 1 算。
 	TaskGen int `json:"task_gen,omitempty"`
 	// SendInFlight：主 agent 给它的新话正在发（代次已加 1、上游还没返回）。这时到的完成分不清属于哪件任务：
 	// 上一代还没有完成就算上一代的（子 agent 正好做完上一件），否则算新的一代（n051 attempt 3，owner 选 A'）。

@@ -13,9 +13,10 @@ import (
 
 // 子 agent 完成后给主 agent 的汇报队列（owner 在 n048 验收时要求，架构稿 §14.4）。
 //
-// 同一个子 agent 的同一次完成只收一次（按 子会话 + 完成编号 去重；账本提交另按 节点 + attempt 去重）。
-// 推断只是「提醒」（owner 在 n051 attempt 2 设计评审选 A）：它有自己的编号、不占完成；同一子 agent 同时只留一条等送的提醒，
-// 真正的完成（主动报告或账本提交）到时提醒还没送，就把这条提醒换成真正的完成，只送一次。送不送、什么时候送由 viewstate 的送达门决定；
+// 同一个子 agent 的同一次真正完成只收一次：真正的完成只认主动报告，按 子会话 + 任务代次 去重。
+// 推断提醒与账本提醒都只是「提醒」（owner 在 n051 attempt 2 设计评审选 A、attempt 4 设计复审选 B2-A）：各有自己的编号、不占完成，
+// 账本提醒按 节点#attempt 只送一次；同一子 agent 同时只留一条等送的推断提醒。提醒还没送时到了更准的消息就换掉它（账本提醒换掉推断提醒，
+// 主动报告换掉任何提醒），只送一次。送不送、什么时候送由 viewstate 的送达门决定；
 // 这里只记状态：pending（等送）→ delivered（已送达）或 unconfirmed（送达未确认，不自动重发）。
 
 // 汇报来源。
@@ -43,12 +44,16 @@ type Report struct {
 	Source       string    `json:"source"`
 	Text         string    `json:"text"`
 	State        string    `json:"state"`
-	CreatedAt    time.Time `json:"created_at"`
+	CreatedAt    time.Time `json:"created_at"` // 这条汇报入队的时刻，决定转告顺序；被替换时不变
 	UpdatedAt    time.Time `json:"updated_at"`
+	// ArrivedAt 是现在这份内容到的时刻：新建时同 CreatedAt，被更准的消息替换（或并进）时改为那条消息到的时刻。
+	// 判断推断提醒是否过时看它（n051 评审 4 B1：账本提醒换掉旧推断提醒后沿用旧时刻，下一段安静又多送一条推断提醒）。
+	// 旧版本写的没有它，按 CreatedAt 算
+	ArrivedAt time.Time `json:"arrived_at,omitempty"`
 	// Claim 不空表示被 deck agent wait 领走、等主 agent 确认收到（n051 评审 1 B5）；推送中的 sending 没有它
 	Claim     string    `json:"claim,omitempty"`
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
-	// Ref 是账本提交的 节点#attempt：同一 attempt 只转告一次，主 agent 发了新的话也不重报（attempt 2 设计评审 A）
+	// Ref 是账本提醒的 节点#attempt：同一 attempt 只提醒一次，主 agent 发了新的话也不重报（attempt 2 设计评审 A；attempt 4 起只是提醒，B2-A）
 	Ref string `json:"ref,omitempty"`
 }
 
@@ -116,14 +121,16 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 			case r.Source == ReportGraph && x.Source == ReportGraph:
 				continue // 不同轮的账本提醒各送各的
 			}
-			// 提醒还没送：换成更准的那条（账本提醒换掉推断提醒；主动报告换掉任何提醒），只送一次
-			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = r.CompletionID, r.Source, Clean(r.Text, 2000), r.Ref, s.now()
+			// 提醒还没送：换成更准的那条（账本提醒换掉推断提醒；主动报告换掉任何提醒），只送一次。
+			// 到达时刻改为新消息的：过时判断看的是新内容什么时候到的（n051 评审 4 B1）
+			now := s.now()
+			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt, x.ArrivedAt = r.CompletionID, r.Source, Clean(r.Text, 2000), r.Ref, now, now
 			out, added = *x, true
 			return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 		}
 		now := s.now()
 		x := &Report{ID: newID("rep"), Project: sub.Project, Main: main.Key, Sub: sub.Key, CompletionID: r.CompletionID,
-			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now, Ref: r.Ref}
+			Source: r.Source, Text: Clean(r.Text, 2000), State: ReportPending, CreatedAt: now, UpdatedAt: now, ArrivedAt: now, Ref: r.Ref}
 		s.reports = append(s.reports, x)
 		out, added = *x, true
 		return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
@@ -134,7 +141,8 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 // isReminder：推断提醒与账本提醒都只是提醒，不占完成（attempt 2 裁定 A、attempt 4 裁定 B2-A）。
 func isReminder(source string) bool { return source == ReportInferred || source == ReportGraph }
 
-// staleHintLocked：推断提醒 hint:代次:安静开始的毫秒 已经过时——这一代有了主动报告，或安静开始之后到过主动报告或账本提醒。
+// staleHintLocked：推断提醒 hint:代次:安静开始的毫秒 已经过时——这一代有了主动报告，或安静开始之后到过主动报告或账本提醒
+// （按到达时刻算：替换进旧行的消息也算它自己到的时刻）。
 func (s *Store) staleHintLocked(sub, hintID string) bool {
 	if s.hasCompletionLocked(sub, hintGen(hintID)) {
 		return true
@@ -149,14 +157,14 @@ func (s *Store) staleHintLocked(sub, hintID string) bool {
 	}
 	from := time.UnixMilli(ms)
 	for _, x := range s.reports {
-		if x.Sub == sub && x.Source != ReportInferred && !x.CreatedAt.Before(from) {
+		if x.Sub == sub && x.Source != ReportInferred && !x.arrived().Before(from) {
 			return true
 		}
 	}
 	return false
 }
 
-// HasCompletion：这个子 agent 的这次完成（完成编号）已经收过（主动报告或账本提交；推断提醒不算，旧版本按代次编号的推断行也不算）。
+// HasCompletion：这个子 agent 的这次完成（完成编号）已经收过。只认主动报告：推断提醒与账本提醒都不算（B2-A），旧版本按代次编号的推断行也不算。
 func (s *Store) HasCompletion(sub, completionID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,6 +181,14 @@ func (s *Store) hasCompletionLocked(sub, completionID string) bool {
 		}
 	}
 	return false
+}
+
+// arrived 是现在这份内容到的时刻（旧版本写的没有 ArrivedAt，按 CreatedAt）。
+func (x *Report) arrived() time.Time {
+	if x.ArrivedAt.IsZero() {
+		return x.CreatedAt
+	}
+	return x.ArrivedAt
 }
 
 // HintID 是推断提醒的编号：代次 + 这段安静开始的时刻（毫秒）。
@@ -203,7 +219,7 @@ func (s *Store) absorbLocked(x *Report) {
 		}
 		// 合并只在同一主 agent 内（attempt 3 自查：提醒挂在已停止的旧主 agent 上时，并过去新主 agent 就取不到了）
 		if y.State == ReportPending && y.Main == x.Main {
-			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt = y.CompletionID, y.Source, y.Text, y.Ref, s.now()
+			x.CompletionID, x.Source, x.Text, x.Ref, x.UpdatedAt, x.ArrivedAt = y.CompletionID, y.Source, y.Text, y.Ref, s.now(), y.arrived()
 			s.reports = append(s.reports[:i], s.reports[i+1:]...)
 			return
 		}

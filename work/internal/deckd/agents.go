@@ -68,7 +68,7 @@ type agentsDeps struct {
 	toolInfo   ToolInfoFunc
 	graphStart GraphStartFunc
 	bypass     BypassChecks
-	// graphState 查 Graph 节点此刻的状态（projectctl brief，只读）；空则不看账本提交信号
+	// graphState 查 Graph 节点此刻的状态（projectctl brief，只读）；空则不看账本、不送账本提醒
 	graphState func(ctx context.Context, p deckstore.ProjectDef, node string) (projectctl.State, error)
 	// quotaOf 取某个工具的额度状态（dashquota 的 available/warn/exhausted/unknown）；空时用 Server 的看板客户端，测试可换
 	quotaOf func(ctx context.Context, tool string) string

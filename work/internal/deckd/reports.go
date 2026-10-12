@@ -21,7 +21,8 @@ import (
 //
 // 怎么判断「做完了」：
 //   - 主要信号：子 agent 收尾时运行 deck agent report --done（POST /v1/reports，标「主动报告」）；
-//   - Graph 通道：账本显示节点已提交，标「账本提交」；
+//   - Graph 通道：账本显示节点已提交，送一条「账本提醒」，同一 节点#attempt 只送一次。它也只是提醒、不算完成
+//     （owner 在 n051 attempt 4 设计复审选 B2-A）；
 //   - 兜底：agent-deck 状态从 running 变为 idle 或 waiting 并保持 inferAfter，送一条「推断提醒」。它只是提醒主 agent 子 agent 停下了
 //     （可能做完，也可能在等输入或权限确认；agent-deck 里做完一轮的会话没人看过就一直是 waiting），不算完成：
 //     之后真正的完成照常转告（owner 在 n051 attempt 2 设计评审选 A）。
@@ -75,8 +76,8 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"queued": false, "notification": n})
 		return
 	}
-	// 同一次完成只送一次（n051 评审 1 B4）：完成编号是子 agent 的任务代次，不是正文。改写正文、或账本提交之后再主动报告，
-	// 同一代都只转告一次；主 agent 发了新的话（代次加 1）之后的完成才算新的一次。推断提醒不占完成
+	// 同一次完成只送一次（n051 评审 1 B4）：完成编号是子 agent 的任务代次，不是正文。改写正文再主动报告，同一代只转告一次；
+	// 主 agent 发了新的话（代次加 1）之后的完成才算新的一次。推断提醒与账本提醒都不占完成（B2-A）
 	// 完成编号留空：存储在锁里按子 agent 当前的代次给（与发话的加代次、撤回在同一把锁里，attempt 3 自查 S2）
 	rep, added, err := s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportActive, Text: b.Text})
 	if err != nil {
@@ -100,7 +101,7 @@ type inferState struct {
 	wasBusy   map[string]bool      // 子会话 key → 曾经在跑
 	quietFrom map[string]time.Time // 子会话 key → 从 running 转为 idle/waiting 的时刻
 	notified  map[string]int       // 主会话 key → 已通知过「等着转告」的条数（避免刷屏）
-	lastGraph time.Time            // 上一次查账本提交信号的时刻
+	lastGraph time.Time            // 上一次查账本（账本提醒）的时刻
 	graphBusy bool                 // 正在后台查账本（一次 projectctl brief 要两三秒，不挡推送）
 	graphWG   sync.WaitGroup       // 后台查账本的 goroutine：循环退出前等它结束
 	startedAt time.Time            // 第一次推断的时刻：在这之前就有的子 agent，重启后没见过它在跑也照常计时
@@ -132,7 +133,7 @@ func (s *Server) runReports(ctx context.Context) {
 }
 
 // inferCompletions：子 agent 从 running 转为 idle 或 waiting 并保持 inferAfter，送一条「推断提醒」（每段安静一条）。
-// 提醒不占完成：这一代已经有主动报告或账本提交就不提醒；提醒之后真正的完成照常转告（attempt 2 设计评审 A）。
+// 提醒不占完成：这一代已经有主动报告、或这段安静开始之后到过主动报告或账本提醒，就不提醒；提醒之后真正的完成照常转告（attempt 2 设计评审 A）。
 // 已标 done 的子 agent 也看：主 agent 给它发了新的话（新的一代）、它干完又停下却没报告，同样提醒。
 func (s *Server) inferCompletions(st *inferState, now time.Time) {
 	if s.activity == nil {
@@ -181,7 +182,7 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 			}
 			st.wasBusy[x.Key] = false
 			delete(st.quietFrom, x.Key)
-			// 这一代已经报告过（主动报告或账本提交）的，入队时在存储的锁里拒收（与后台账本、主动报告并发也不漏）
+			// 这一代已经主动报告过、或安静开始之后到过主动报告或账本提醒的，入队时在存储的锁里拒收（与后台账本、主动报告并发也不漏）
 			// 提醒有自己的编号（代次 + 这段安静开始的时刻）：不占这一代的完成
 			s.store.EnqueueReport(deckstore.Report{Sub: x.Key, Source: deckstore.ReportInferred,
 				CompletionID: deckstore.HintID(st.quietGen[x.Key], from),
@@ -240,7 +241,7 @@ func (s *Server) deliverPending(ctx context.Context, st *inferState, project str
 }
 
 // deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
-// reportText 是转告给主 agent 的文字（推送与 deck agent wait 共用），标明主动报告、推断或账本提交。
+// reportText 是转告给主 agent 的文字（推送与 deck agent wait 共用），标明主动报告、推断提醒或账本提醒。
 func (s *Server) reportText(rep deckstore.Report) string {
 	sub, _ := s.store.Session(rep.Sub)
 	label := "主动报告"
@@ -350,8 +351,8 @@ func (s *Server) graphSubmitsAsync(ctx context.Context, st *inferState, now time
 }
 
 // graphSubmits：走 Graph 通道、还在跑的子 agent，账本显示它的节点已提交（submit 之后的 submitted、accepted、rework），
-// 就按「账本提交」入队（§14.4 的第三条信号，n051 评审 1 B6）。与主动报告共用任务代次：同一次完成只送一次；
-// 另按 节点#attempt 去重：同一轮提交只转告一次，主 agent 之后发了新的话、子 agent 又被看成在跑也不重报。
+// 就送一条「账本提醒」（§14.4 的第三条信号，n051 评审 1 B6）。attempt 4 起它只是提醒（B2-A）：不占完成、与任务代次无关；
+// 按 节点#attempt 去重：同一轮提交只提醒一次，主 agent 之后发了新的话、子 agent 又被看成在跑也不重报。
 func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time) {
 	if s.agents == nil || s.agents.graphState == nil {
 		return
