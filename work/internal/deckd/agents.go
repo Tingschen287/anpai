@@ -738,6 +738,12 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "%s", busySubText)
 		return
 	}
+	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() && cur.BriefSending {
+		// deckd 重启时它的任务正在送：送没送到不确定，deck 不会补送（rev 117），等它出现空输入框前不往它写（评审 3 B1）。
+		// 不能说「会自动送」：没送到时主 agent 照提示不重发就会一直空等（attempt 5 自查）
+		fail(w, http.StatusConflict, "%s 的任务在 deckd 重启时正在送，送没送到不确定，deck 不会补送；它出现输入框之前不能发话，请 owner 在中间看一眼，没收到就停掉它重新派", x.Key)
+		return
+	}
 	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() {
 		// 它还在启动期，或 CLI 停在启动确认（目录信任等）上：确认只归 owner，打进去的字加回车就替 owner 选了（n055 自查 B1、评审 1 B2）。
 		// deck 会在 CLI 就绪、owner 处理完确认后自动送它的任务，不要重发

@@ -283,6 +283,9 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 			// CLI 已经退出（例如 owner 在信任框里选了 No, exit）：不再等，记为已停止（自查：原先会一直轮询下去）
 			if up, err := alive(ctx, cur.TmuxSession); err == nil && !up {
 				why := "CLI 已经退出（可能在启动确认上选了退出），没有送第一条消息"
+				if uncertain {
+					why = "CLI 已经退出（可能在启动确认上选了退出）；deckd 重启前第一条消息正在送，送没送到不确定"
+				}
 				s.store.FinishStart(key)
 				s.store.SetSessionStatus(key, deckstore.StatusStopped, why)
 				s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
@@ -293,7 +296,10 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 			// 等久了：说明一次，之后放慢继续等（attempt 2 自查：原先到点就放弃，启动期标记永远不清、owner 之后处理了也不送）
 			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），还没送第一条 brief；处理完 deck 仍会自动送，不想要了就停掉它", int(tm.await.Minutes()))
 			if uncertain {
-				why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框），deck 一直没往它写；请在中间处理，不想要了就停掉它", int(tm.await.Minutes()))
+				why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框）；deckd 重启后 deck 没再往它写，重启前的第一条消息送没送到不确定。请在中间处理，不想要了就停掉它", int(tm.await.Minutes()))
+				if x.Role != "main" {
+					why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框）；deckd 重启后 deck 没再往它写，重启前的任务送没送到不确定。请显示在中间、按 F2 接管处理，不想要了就停掉它", int(tm.await.Minutes()))
+				}
 			}
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
@@ -433,15 +439,26 @@ func (s *Server) ResumeAwaiting() {
 	}
 }
 
-// uncertainReadyNow 在重启时看一眼画面：没有启动确认、认得出空输入框才算可以当场收尾（看不到画面就交给后台等）。
+// uncertainReadyNow 在重启时看画面：隔一个取画面间隔看两次，两次一样、没有启动确认、认得出空输入框，才算可以当场收尾
+// （与正常路径一样要求画面稳定，attempt 5 自查；看不到画面或不稳定就交给后台等）。
 func (s *Server) uncertainReadyNow(x deckstore.Session) bool {
 	ctx, cancel := context.WithTimeout(s.background(), 5*time.Second)
 	defer cancel()
-	screen, err := s.agents.upstream.PaneOutputPlain(ctx, x.AgentDeckID)
-	if err != nil || strings.TrimSpace(screen) == "" || StartupDialog(screen) != "" {
-		return false
+	prev := ""
+	for i := 0; i < 2; i++ {
+		if i > 0 && sleepCtx(ctx, s.startupTiming().poll) != nil {
+			return false
+		}
+		screen, err := s.agents.upstream.PaneOutputPlain(ctx, x.AgentDeckID)
+		if err != nil || strings.TrimSpace(screen) == "" || StartupDialog(screen) != "" || !ComposerReady(x.Tool, screen) {
+			return false
+		}
+		if i > 0 && screen != prev {
+			return false
+		}
+		prev = screen
 	}
-	return ComposerReady(x.Tool, screen)
+	return true
 }
 
 // background 是后台工作的 context：deckd 关闭时取消（daemon 用 WithBackground 接上），没接上时不取消。

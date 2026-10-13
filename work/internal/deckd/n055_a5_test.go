@@ -103,7 +103,45 @@ func TestUncertainResumeSubStaysPending(t *testing.T) {
 	}
 	w.up.setOutput(claudeComposerScreen)
 	waitUntil(t, "出现空输入框后解除", func() bool { y, _ := w.store.Session(sub.Key); return !y.StartPending() })
+	cancel()
+	w.srv.WaitBackground() // 收尾的写盘做完再结束，免得和 TempDir 清理赛跑（attempt 5 自查）
 	if w.up.sendCount() != before {
 		t.Fatal("任务不补送")
+	}
+}
+
+// attempt 5 自查：重启时只看一帧画面不够，画面要稳定（两次一样）才当场收尾；一闪而过的输入框之后又出现确认框时不收尾。
+func TestUncertainResumeNeedsStableScreen(t *testing.T) {
+	w := newAgentWorld(t)
+	uncertainMain(t, w)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); w.srv.WaitBackground() }()
+	w.srv.WithBackground(ctx)
+	w.up.setOutput(claudeComposerScreen)
+	calls := 0
+	w.up.mu.Lock()
+	w.up.paneHook = func() {
+		calls++
+		if calls == 2 {
+			w.up.setOutput(claudeTrustScreen) // 第二次取画面时确认框出现
+		}
+	}
+	w.up.mu.Unlock()
+	w.srv.ResumeAwaiting()
+	w.srv.deliverPending(context.Background(), newState(), "alpha", true)
+	if y, _ := w.store.Session(w.main.Key); mainPushes(w) != 0 || !y.StartPending() {
+		t.Fatalf("画面不稳定：不收尾、不推汇报：pushes=%d %+v", mainPushes(w), y)
+	}
+}
+
+// attempt 5 自查：子 agent 任务「送没送到不确定」时，发话的 409 不能说「deck 会自动送」。
+func TestSendRefusedWhileSubUncertain(t *testing.T) {
+	w := newAgentWorld(t)
+	sub := spawnedSub(t, w)
+	w.store.MarkStarting(sub.Key)
+	w.store.MarkBriefSending(sub.Key)
+	code, b := w.do("main", "POST", "/v1/agents/"+sub.Key+"/send", `{"text":"1"}`)
+	if code != 409 || !strings.Contains(b, "不会补送") || strings.Contains(b, "自动把任务送进去") {
+		t.Fatalf("说明不确定、不会补送：%d %s", code, b)
 	}
 }
