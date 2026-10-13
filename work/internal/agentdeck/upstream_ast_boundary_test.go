@@ -760,6 +760,7 @@ var stringBuilders = map[string]bool{"string": true, "fmt.Sprintf": true, "fmt.S
 var valueFlags = map[string]bool{
 	"-L": true, "-t": true, "-c": true, "-g": true,
 	"--model": true, "--listen": true, "--token": true,
+	"--extra-arg":    true, // n055：上游 launch --extra-arg 吃一个取值（cmd/agent-deck/launch_cmd.go fs.Func("extra-arg")）
 	"--message-file": true, // 评审指出的遗漏，见 send.go
 }
 

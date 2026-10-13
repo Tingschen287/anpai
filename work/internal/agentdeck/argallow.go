@@ -180,6 +180,10 @@ func checkDeclaredGroup(tool string, g []string) error {
 		if flag, value, ok = strings.Cut(g[0], "="); !ok {
 			return fmt.Errorf("要写成 参数 取值 两个元素，或 参数=取值")
 		}
+		if tool == "claude" && strings.ContainsAny(g[0], " \t\r\n") {
+			// 上游 launch --extra-arg 拒收「以 - 开头又含空白」的元素（n055：声明的参数随启动传上去）
+			return fmt.Errorf("取值里有空白时要写成 参数 取值 两个元素")
+		}
 	case 2:
 		flag, value = g[0], g[1]
 	default:

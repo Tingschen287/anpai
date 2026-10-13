@@ -200,3 +200,28 @@ func TestSubBriefWaitsForDialog(t *testing.T) {
 	sess := m["session"].(map[string]any)
 	waitUntil(t, "等待标记清掉", func() bool { y, _ := w.store.Session(sess["key"].(string)); return y.AwaitingOwner == "" })
 }
+
+// n055：设置里声明的额外参数随启动请求传给上游（n051 只当启动后核对的白名单）。
+func TestSpawnPassesDeclaredExtraArgs(t *testing.T) {
+	w := newAgentWorld(t)
+	set := w.store.Settings()
+	for i := range set.Agents {
+		if set.Agents[i].ID == "claude" {
+			set.Agents[i].ExtraArgs = [][]string{{"--allowedTools", "Bash(deck agent:*)"}}
+		}
+	}
+	if err := w.store.ReplaceSettings(set); err != nil {
+		t.Fatal(err)
+	}
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-extra", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	if code != 201 {
+		t.Fatalf("%d %s", code, b)
+	}
+	lr := w.up.launches[len(w.up.launches)-1]
+	if len(lr.Extra) != 1 || lr.Extra[0][0] != "--allowedTools" || lr.Extra[0][1] != "Bash(deck agent:*)" {
+		t.Fatalf("启动请求应带声明的参数：%+v", lr.Extra)
+	}
+	if want := w.procWant[len(w.procWant)-1]; len(want.Extra) != 1 {
+		t.Fatalf("启动后核对的白名单照旧：%+v", want)
+	}
+}

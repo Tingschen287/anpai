@@ -360,7 +360,8 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		return
 	}
 	// 启动
-	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: x.Title, Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true}
+	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: x.Title, Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true,
+		Extra: plan.agent.ExtraArgs} // owner 声明的额外参数随启动传上去（n055）；启动后照旧按白名单核对实际命令行
 	out, lerr := s.agents.upstream.Launch(ctx, lr)
 	id, uncertain, why := launchOutcome(out, lerr)
 	if id == "" {

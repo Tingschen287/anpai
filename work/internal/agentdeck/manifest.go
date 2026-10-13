@@ -182,7 +182,7 @@ var SendFlags = []string{"--message-file", "--json", "--defer-if-busy", "--defer
 const SendDeliveryField = "delivery"
 
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
-var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait"}
+var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait", "--extra-arg"}
 
 // WebFlags 是起 headless 服务时用的参数：集成测试（integration_test.go）用 --token；n055 起 deck up 自管服务
 // （WebServeCommand，交给布局 tmux 的后台窗口执行）用 --token-file。旧 Work Deck 仍只连现成服务。

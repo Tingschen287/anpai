@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // LaunchRequest 是一次派工请求。
@@ -28,6 +29,11 @@ type LaunchRequest struct {
 	// 登记失败时消息已经发出。任务文本一律等登记成功后，经 arbiter 的受仲裁投递口（SendMessage）送。
 	// 不等待 agent 就绪。
 	NoWait bool
+	// Extra 是 owner 在 deck 设置里声明的额外参数组（已按 CheckExtraArgs 白名单核过，n055）。n051 只拿它当启动后核对的白名单、
+	// 从没真正传给 CLI（端到端靠测试脚本的包装层加上），真实使用时 --allowedTools、Codex 的 network_access 都不生效。
+	// 现在随启动传上去：claude 用上游的 --extra-arg（每个元素一个，上游逐个 shell 转义后接在命令末尾）；
+	// codex 上游没有 --extra-arg，按上游 -c "工具 参数…" 的写法传（上游把工具名后面的参数接在它自己加的参数之后）。
+	Extra [][]string
 }
 
 // Validate 检查这次派工说不说得清楚。
@@ -44,7 +50,29 @@ func (r LaunchRequest) Validate() error {
 	case r.Model != "" && r.ModelNotApplicable:
 		return fmt.Errorf("请求自相矛盾：既声明了工具没有模型，又给了模型 %q", r.Model)
 	}
+	if len(r.Extra) > 0 {
+		if r.Tool != "claude" && r.Tool != "codex" {
+			return fmt.Errorf("%s 不支持声明额外参数", r.Tool)
+		}
+		if err := CheckExtraArgs(r.Tool, r.Extra); err != nil {
+			return err
+		}
+	}
 	return CheckToolModel(r.Tool, r.ModelNotApplicable)
+}
+
+// toolArg 是 launch -c 的取值：工具名；codex 带声明的额外参数时接在后面（逐个 shell 转义）。
+func (r LaunchRequest) toolArg() string {
+	if r.Tool != "codex" || len(r.Extra) == 0 {
+		return r.Tool
+	}
+	parts := []string{r.Tool}
+	for _, g := range r.Extra {
+		for _, tok := range g {
+			parts = append(parts, shQuote(tok))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // LaunchResult 是上游 launch --json 回传的内容。
@@ -76,7 +104,14 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 		return LaunchResult{}, err
 	}
 
-	args := []string{req.ProjectPath, "-c", req.Tool, "--json"}
+	args := []string{req.ProjectPath, "-c", req.toolArg(), "--json"}
+	if req.Tool == "claude" {
+		for _, g := range req.Extra {
+			for _, tok := range g {
+				args = append(args, "--extra-arg", tok)
+			}
+		}
+	}
 	if !req.ModelNotApplicable {
 		args = append(args, "--model", req.Model)
 	}
