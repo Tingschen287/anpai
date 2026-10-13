@@ -198,6 +198,10 @@ func checkDeclaredGroup(tool string, g []string) error {
 	if low := strings.ToLower(value); strings.Contains(low, `\u`) || strings.Contains(low, `\x`) || strings.ContainsRune(value, 0) {
 		return fmt.Errorf("含转义写法，deck 不解码，请改成不带转义的写法")
 	}
+	if tool == "codex" && strings.ContainsAny(value, "{}") {
+		// codex 的声明经上游 -c "codex 参数…" 的包装传上去，上游把包装里的 {command} 换成整条命令（自查）
+		return fmt.Errorf("-c 的取值不能含 { 或 }")
+	}
 	if tool == "codex" {
 		key, v, ok := strings.Cut(value, "=")
 		key = strings.TrimSpace(key)

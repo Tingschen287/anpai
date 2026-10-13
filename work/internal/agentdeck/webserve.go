@@ -36,9 +36,10 @@ func ProbeWeb(ctx context.Context, profile, addr, token string) error {
 
 // WebServeCommand 是在布局后台窗口里起 headless 服务的命令行（交给 tmux 的 shell 执行）。
 // 只监听回环；token 从文件读（上游要求文件 0600），不出现在命令行参数里；profile 与其余调用一样经环境变量给。
+// --read-only：deck 只读菜单与事件，不经它打字或改会话（自查：拿到 token 的进程不能借它往会话里输入）。
 func WebServeCommand(binary, profile, addr, tokenFile string) string {
 	return "exec env AGENTDECK_PROFILE=" + shQuote(profile) + " " + shQuote(binary) +
-		" web --no-tui --listen " + shQuote(addr) + " --token-file " + shQuote(tokenFile)
+		" web --no-tui --read-only --listen " + shQuote(addr) + " --token-file " + shQuote(tokenFile)
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

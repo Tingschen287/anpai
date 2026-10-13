@@ -209,6 +209,11 @@ func (s *Server) deliverPending(ctx context.Context, st *inferState, project str
 		if main.Role != "main" || main.AgentDeckID == "" || main.Status != deckstore.StatusRunning {
 			continue
 		}
+		if main.AwaitingOwner != "" {
+			// 主 agent 的 CLI 停在启动确认上：汇报留着，等 owner 处理完、第一条 brief 送达后再推（n055 自查 B2：
+			// 确认框在上游看来是空闲，--defer-if-busy 照样打字加回车，等于替 owner 选了）
+			continue
+		}
 		if s.waitingFor(main.Key) {
 			// 主 agent 正在 deck agent wait（n051 增量自查）：它这时算忙，推送会把汇报占在 sending 里一轮又一轮，wait 就取不到；让 wait 取
 			continue

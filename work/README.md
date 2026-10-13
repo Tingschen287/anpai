@@ -140,7 +140,7 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 
 ```bash
 go build -o deck ./cmd/deck
-./deck up                      # 一条命令打开四区布局（已有布局就直接接上；每次都查 deckd，没在跑就在布局的后台窗口里起它）
+./deck up                      # 一条命令打开四区布局（已有布局就直接接上；每次都查 deckd 与 agent-deck 状态服务，没在跑就在布局的后台窗口里起）
 ./deck settings -check         # 只读自查设置文件（升级前先跑；不需要 deckd，不写任何东西）
 ./deck daemon                  # 只起后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
 ./deck whoami                  # deckd 把当前进程认成谁
@@ -149,14 +149,16 @@ go build -o deck ./cmd/deck
 **布局**（n049）：deck 自己的 tmux server（`$TMUX_TMPDIR/tmux-UID/deck`，无前缀键、无状态栏）。左栏 `deck sidebar` 按项目列会话
 （★ 主 agent，圆点：绿在跑、黄等你输入、灰空闲、红出错、空心为未知），中间上方一行 `deck tabs` 是打开的会话，中间是连到
 agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是面板。点左栏的会话把它换进中间；子 agent 默认只读，
-主 agent 的第一条 brief 确认送达后可写。按键都在布局 server 上截获，不进中间的 CLI：
+主 agent 的第一条 brief 确认送达后可写；CLI 启动时停在确认（目录信任等）上时也对 owner 放开，由 owner 在中间自己选（n055）。
+按键都在布局 server 上截获，不进中间的 CLI：
 
 | 键 | 作用 |
 |---|---|
 | F2 | 接管中间正在显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还；交还没完成时再按 F2 重新接管） |
 | Ctrl-Q | 把中间正在看的会话放回后台（会话照常运行；任何 CLI 都收不到 Ctrl-Q） |
 | F5 / F6 / F7 | 显示或隐藏左栏 / 右栏 / 下栏（程序不退出，尺寸复原） |
-| F9 | agent 设置：全局可用清单（没装的标灰）、项目勾选 agent 与三档模型、主 agent、撤销记住的 Codex 授权 |
+| F9 | agent 设置：全局可用清单（没装的标灰）、项目勾选 agent 与三档模型、主 agent、撤销记住的 Codex 授权；按 n 选目录新建项目（从 deck up 所在的目录开始） |
+| m（左栏） | 为选中的项目起主 agent（项目标题行也能选；与 `deck agent start-main` 同一套准入） |
 | F10 | 键盘焦点回到中间窗格 |
 
 - logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时按终端名推断：有 `WT_SESSION`（Windows Terminal，1.22 起支持 Sixel）用 Sixel，其余用半格色块。这不是能力探测：老版本 Windows Terminal 或经 ssh 等丢了这个变量时，用 `DECK_GRAPHICS` 指定。
@@ -164,8 +166,11 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。重建的 client 与旧的共用中间窗格的终端，所以：deckd 的每个视图操作都绑定到开始时的那个 client，每条改动 client 的 tmux 命令执行后读回，落到了新 client 上就把它还原到起点（deck-idle、只读）；`deck center` 每次起 client 之前先等 deckd 确认没有进行中的视图操作（deckd 没在运行则不用等），deckd 在而没确认时中间显示原因、不起新 client。中途发现 client 被替换：还没写下任何东西就整体撤回；lease 交还已经落盘就按操作目标补齐焦点与打开集合（接口返回 409 与最新状态），由新 client 的重连通知收尾。
 - deckd 跑在布局的后台窗口里：关掉布局 server（例如 `tmux -S … kill-server`）deckd 随之停止，agent 会话照常在 agent-deck server 上跑，
   这期间决定、通知、派送都不可用。再 `deck up` 会把 deckd 起来；接管中的会话按重启恢复处理（保持接管、自动派送暂停，等你交还）。
-- 会话运行状态来自 agent-deck 的 headless 服务：`deck up -upstream 127.0.0.1:8420`（或 `DECK_AGENTDECK_ADDR`），
-  token 取 `WORKDECK_AGENTDECK_TOKEN`；不配时圆点一律是「状态未知」。
+- 会话运行状态来自 agent-deck 的 headless 服务。n055 起 `deck up` 自己管：不给 `-upstream` 时，token 文件
+  `$XDG_STATE_HOME/deck/agentdeck-web.token`（0600）没有就生成；`-upstream-listen`（默认 127.0.0.1:8420，只接受回环地址）上
+  已有 agent-deck 且 token 对得上就复用，没在跑就在布局后台窗口 `agent-deck-web` 里起 `agent-deck web --read-only --token-file …`
+  （随布局 server 停止）；deckd 经 `-upstream-token-file` 读 token，token 不进命令行。地址被别的服务占着或 token 对不上时，接上布局前
+  说明原因、按回车继续，圆点显示「状态未知」。仍可用 `-upstream`（或 `DECK_AGENTDECK_ADDR`）连现成服务，token 取 `WORKDECK_AGENTDECK_TOKEN`。
 
 - **唯一写入者**：deck 的状态（注册表、决策、通知、Codex 授权记忆、汇报队列、lease）只由 deckd 写，放在 `$XDG_STATE_HOME/deck/`，与旧 `work` 的目录分开。
 - **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。
@@ -182,6 +187,11 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
 - **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
 - 主 agent 工具（`deck agent`）在 n051。
+- **额外参数**（`agents.yaml` 的 `extra_args`）：只能声明白名单里的参数（`agentdeck.declaredAllow`）。n055 起随启动真正传给 CLI
+  （claude 经上游 `launch --extra-arg`，codex 经 `-c "codex 参数…"`），启动后照旧按白名单核对实际命令行。claude 的「参数=取值」写法
+  取值带空白时要写成两个元素。
+- **第一条消息前先看画面**（n055）：CLI 停在启动确认上就不送，记为等 owner 处理（侧栏与通知说明）；这期间不给它发话、不往主 agent
+  推送汇报；确认消失、画面稳定后 deck 自动送一次。deckd 重启后，主 agent 接着等；子 agent 的任务正文没保存，提示 owner 重派。
 
 ## 测试
 

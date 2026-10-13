@@ -33,6 +33,7 @@ type fakeUp struct {
 	subBusy   bool                      // 测试：子 agent 还在跑，SendIfIdle 什么都不送
 	stops     []string
 	stopErr   error
+	paneErr   error // 测试：取画面失败（n055）
 }
 
 func (f *fakeUp) StopSession(_ context.Context, p lease.Permit, id string) error {
@@ -113,7 +114,7 @@ func (f *fakeUp) SendToMain(_ context.Context, p lease.Permit, id, msg string) e
 func (f *fakeUp) PaneOutputPlain(context.Context, string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.output, nil
+	return f.output, f.paneErr
 }
 
 // setOutput 换掉假上游的画面（n055：后台送 brief 的循环会并发读它）。

@@ -288,7 +288,12 @@ func RunSidebar(api API, layoutSock string) error {
 	started := make(chan startedMain, 4)
 	starting := map[string]bool{}
 	startMain := func(project string) {
-		if project == "" || starting[project] {
+		if project == "" {
+			l.say("先选中一个项目（还没有项目就按 F9、再按 n 新建）", false)
+			return
+		}
+		if starting[project] {
+			l.say(fmt.Sprintf("「%s」的主 agent 正在起，请稍等", project), true)
 			return
 		}
 		starting[project] = true

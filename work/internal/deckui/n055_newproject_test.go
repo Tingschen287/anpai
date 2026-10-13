@@ -133,3 +133,19 @@ func TestSettingsEmptyHintsNew(t *testing.T) {
 		t.Fatalf("\n%s", v)
 	}
 }
+
+// 自查：经软链进到已有项目的目录，也算重复。
+func TestNewProjectSymlinkDuplicate(t *testing.T) {
+	root := tree(t)
+	link := filepath.Join(root, "ai", "alias")
+	if err := os.Symlink(filepath.Join(root, "ai", "alpha-proj"), link); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := settingsFixture()
+	m.set.Projects[0].Path = filepath.Join(root, "ai", "alpha-proj")
+	m.Start = filepath.Join(root, "ai")
+	press(m, "n", "down", "right", "enter") // alias/（排在 alpha-proj 前）
+	if m.form.chosen != "" || !strings.Contains(m.form.err, "已经是项目") {
+		t.Fatalf("软链指向已有项目的目录：%+v", m.form)
+	}
+}

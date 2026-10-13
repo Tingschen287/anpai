@@ -78,7 +78,7 @@ func ReadWebToken(path string) (string, error) {
 	}
 	tok := strings.TrimSpace(string(b))
 	if tok == "" || strings.ContainsAny(tok, " \t\r\n") || len(tok) > 512 {
-		return "", fmt.Errorf("%s 的内容不是一个 token（要一行、不含空白）", path)
+		return "", fmt.Errorf("%s 的内容不是一个 token（要一行、不含空白）：删掉它再 deck up 会重新生成", path)
 	}
 	return tok, nil
 }

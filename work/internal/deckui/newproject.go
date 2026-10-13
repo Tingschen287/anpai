@@ -177,8 +177,8 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 	default:
 		if msg.Type == tea.KeyRunes {
 			f.id += strings.ToLower(string(msg.Runes))
-			if len(f.id) > 64 {
-				f.id = f.id[:64]
+			if r := []rune(f.id); len(r) > 64 { // 按字符截，不切出半个汉字
+				f.id = string(r[:64])
 			}
 		}
 	}
@@ -194,8 +194,14 @@ func (m *Settings) choose(dir string) {
 		return
 	}
 	taken := map[string]bool{}
+	real := func(p string) string { // 经软链进来的同一个目录也算重复（自查）
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
 	for _, p := range m.set.Projects {
-		if filepath.Clean(p.Path) == dir {
+		if real(p.Path) == real(dir) {
 			f.err = fmt.Sprintf("这个目录已经是项目「%s」了", sanitize(p.Name))
 			return
 		}

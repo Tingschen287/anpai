@@ -186,7 +186,7 @@ var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait", "
 
 // WebFlags 是起 headless 服务时用的参数：集成测试（integration_test.go）用 --token；n055 起 deck up 自管服务
 // （WebServeCommand，交给布局 tmux 的后台窗口执行）用 --token-file。旧 Work Deck 仍只连现成服务。
-var WebFlags = []string{"--no-tui", "--listen", "--token", "--token-file"}
+var WebFlags = []string{"--no-tui", "--listen", "--token", "--token-file", "--read-only"}
 
 // Evidence 是一条断言在上游源码里的落点：某一行代码。
 //

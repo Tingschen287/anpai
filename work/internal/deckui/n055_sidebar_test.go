@@ -95,3 +95,24 @@ func TestStartMainText(t *testing.T) {
 		}
 	}
 }
+
+// 自查：新部署还没有任何会话时，默认选中第一个项目（按 m 就能起）；选中的项目被删掉后回到会话。
+func TestSidebarDefaultsToFirstProject(t *testing.T) {
+	sb := &Sidebar{Data: Data{Projects: []deckstore.ProjectDef{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}}}, Mode: "none"}
+	if sb.SelectedProject() != "a" {
+		t.Fatalf("没有会话时选中第一个项目：%q", sb.SelectedProject())
+	}
+	sb.Move(1)
+	if sb.Proj != "b" {
+		t.Fatalf("↓ 到第二个项目，不跳过：%q", sb.Proj)
+	}
+	f := sb.Render(32, 20)
+	if !strings.Contains(ansi.Strip(strings.Join(f.Lines, "\n")), "B · 0") {
+		t.Fatal("渲染")
+	}
+	d := sample()
+	sb = &Sidebar{Data: d, Mode: "none", Proj: "gone"}
+	if sb.SelectedProject() != "deck" || sb.Proj != "" {
+		t.Fatalf("选中的项目没了：回到会话（第一个会话属于 deck）：%q %q", sb.SelectedProject(), sb.Proj)
+	}
+}

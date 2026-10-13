@@ -194,8 +194,27 @@ func (s *Sidebar) HitProject(y int) (string, bool) {
 	return h.proj, true
 }
 
+// normalize 让选中行总落在一行上（自查）：选中的项目已从设置里去掉就回到会话；还没有任何会话时选中第一个项目，
+// 新部署第一次打开侧栏按 m 就能起主 agent。
+func (s *Sidebar) normalize() {
+	groups := s.Data.Groups()
+	if s.Proj != "" {
+		found := false
+		for _, g := range groups {
+			found = found || g.ID == s.Proj
+		}
+		if !found {
+			s.Proj = ""
+		}
+	}
+	if s.Proj == "" && len(s.Data.Ordered()) == 0 && len(groups) > 0 {
+		s.Proj = groups[0].ID
+	}
+}
+
 // Move 按 Entries 上下移动选中行（项目标题与会话都算一行）。
 func (s *Sidebar) Move(delta int) {
+	s.normalize()
 	es := s.Data.Entries()
 	if len(es) == 0 {
 		return
@@ -217,6 +236,7 @@ func (s *Sidebar) Move(delta int) {
 
 // SelectedProject 是选中行所属的项目（项目标题或会话所在项目）。
 func (s *Sidebar) SelectedProject() string {
+	s.normalize()
 	if s.Proj != "" {
 		return s.Proj
 	}
@@ -269,6 +289,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 	var lines []string
 	var images []Image
 	lines = append(lines, Fit("\x1b[1;38;5;39m Agent Deck\x1b[0m", w), "")
+	s.normalize()
 	ordered := s.Data.Ordered()
 	if s.Sel >= len(ordered) {
 		s.Sel = max(0, len(ordered)-1)

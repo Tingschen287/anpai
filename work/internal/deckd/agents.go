@@ -726,6 +726,12 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "%s", busySubText)
 		return
 	}
+	if cur, ok := s.store.Session(x.Key); ok && cur.AwaitingOwner != "" {
+		// 它的 CLI 停在启动确认（目录信任等）上：确认只归 owner，打进去的字加回车就替 owner 选了（n055 自查 B1）。
+		// deck 会在 owner 处理完后自动送它的任务，不要重发
+		fail(w, http.StatusConflict, "%s 的 CLI 还停在启动确认上，等 owner 处理；处理完 deck 会自动把任务送进去，不要重发", x.Key)
+		return
+	}
 	permit, err := s.agents.leases.Automatic(x.AgentDeckID)
 	if err != nil {
 		fail(w, http.StatusConflict, "现在不能给它发话：%v", err)

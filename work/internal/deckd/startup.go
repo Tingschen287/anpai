@@ -34,23 +34,48 @@ var startupMarkers = []struct{ needle, what string }{
 	{"yes, i trust these settings", "项目设置确认"},
 	{"do you trust the contents of this directory", "目录信任确认"},
 	{"allow codex to work in this folder", "目录信任确认"},
+	{"do you want to use this api key", "API key 确认"},
+	{"enter to confirm", "启动时的选择确认"},
 }
 
-// numberedMenu：带光标的编号选项（「❯ 1. Yes」与「2. No」同屏），启动时出现就是在等人选。
+// 带光标的编号选项（「❯ 2. No」与另一条编号选项同屏），启动时出现就是在等人选。光标停在哪一项都算（自查：API key 确认默认在 2 上）；
+// 只认 ❯ 与 ›（Claude 回显用户消息用 >，带编号的消息不当成菜单）。
 var (
-	menuCursor = regexp.MustCompile(`(?m)^\s*[❯›>]\s*1\.\s+\S`)
-	menuSecond = regexp.MustCompile(`(?m)^\s*2\.\s+\S`)
+	menuCursor = regexp.MustCompile(`^\s*[❯›]\s*\d+\.\s+\S`)
+	menuItem   = regexp.MustCompile(`^\s*(?:[❯›]\s*)?\d+\.\s+\S`)
 )
 
-// StartupDialog 返回画面上 CLI 启动确认的说明；没有返回空。
+// screenTail 是画面末尾的可见部分（最后 40 行非空行）：上游取画面带 2000 行历史，历史里的旧对话或已消失的确认框不算数（自查）。
+func screenTail(screen string) []string {
+	var lines []string
+	for _, l := range strings.Split(screen, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > 40 {
+		lines = lines[len(lines)-40:]
+	}
+	return lines
+}
+
+// StartupDialog 返回画面末尾 CLI 启动确认的说明；没有返回空。
 func StartupDialog(screen string) string {
-	low := strings.ToLower(screen)
+	tail := screenTail(screen)
+	low := strings.ToLower(strings.Join(tail, "\n"))
 	for _, m := range startupMarkers {
 		if strings.Contains(low, m.needle) {
 			return m.what
 		}
 	}
-	if menuCursor.MatchString(screen) && menuSecond.MatchString(screen) {
+	cursor, items := false, 0
+	for _, l := range tail {
+		cursor = cursor || menuCursor.MatchString(l)
+		if menuItem.MatchString(l) {
+			items++
+		}
+	}
+	if cursor && items >= 2 {
 		return "启动时的选择确认"
 	}
 	return ""
@@ -72,8 +97,12 @@ func (s *Server) startupTiming() startupTiming {
 	return defaultStartupTiming
 }
 
-// settleScreen 等 CLI 启动后的画面稳定：画面不空且连续两次一样，或已经看到启动确认。返回最后一次画面上的确认（没有为空）。
-// 取画面失败不当成有确认（照旧交给上游的就绪等待），只是没法多一道检查。
+// notReady 是 settleScreen 在等不到稳定画面（取不到画面、一直空屏或一直在变）时给的说明：这时不直接送，
+// 走与启动确认同一条后台路径，等画面稳定、没有确认再送（自查：退回直送会让之后才出现的确认框挨打字）。
+const notReady = "启动（取不到画面或画面还没稳定）"
+
+// settleScreen 等 CLI 启动后的画面稳定：画面不空且连续两次一样，或已经看到启动确认。返回确认的说明；稳定且没有确认返回空；
+// 等到上限仍不稳定返回 notReady。
 func (s *Server) settleScreen(ctx context.Context, id string) string {
 	tm := s.startupTiming()
 	deadline := time.Now().Add(tm.settle)
@@ -90,7 +119,7 @@ func (s *Server) settleScreen(ctx context.Context, id string) string {
 			prev = screen
 		}
 		if time.Now().After(deadline) || sleepCtx(ctx, tm.poll) != nil {
-			return ""
+			return notReady
 		}
 	}
 }
@@ -109,17 +138,21 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // holdForOwner：CLI 停在启动确认上。记下、通知 owner；主 agent 显示到中间并放开输入。然后在后台等确认消失再送 brief。
 func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, permit lease.Permit) string {
 	var note string
-	if x.Role == "main" {
+	switch {
+	case what == notReady:
+		note = "CLI 还没就绪（取不到画面或画面一直在变）：deck 等它就绪、确认没有启动确认后自动送第一条消息，请在中间看一眼"
+	case x.Role == "main":
 		note = fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选，选完 deck 会自动送第一条 brief", what)
-	} else {
+	default:
 		note = fmt.Sprintf("CLI 停在%s上：请把它显示在中间、按 F2 接管后自己选，交还后 deck 会自动送任务", what)
 	}
 	s.store.SetAwaitingOwner(key, note)
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
 	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, note), "deckd")
-	if x.Role == "main" && s.view != nil {
-		// 显示到中间、按最新状态放开输入；失败只影响方便程度（owner 仍可在侧栏点它），记在通知里
-		if err := s.view.Focus(id); err != nil {
+	if x.Role == "main" && s.view != nil && len(s.view.State().TakenOver) == 0 {
+		// 显示到中间（新主 agent 还不在打开集合里，用 Open），按最新状态放开输入。owner 正接管着别的会话时不动中间：
+		// 切走会把接管交还（自查）；owner 仍可在侧栏点它。失败只影响方便程度，记在通知里
+		if err := s.view.Open(id); err != nil {
 			s.store.Notify(x.Project, "view", "把主 agent 显示到中间失败（请在侧栏点它）："+deckstore.Clean(err.Error(), 160), "deckd")
 		} else if err := s.view.OpenMainInput(id); err != nil {
 			s.store.Notify(x.Project, "view", "放开主 agent 输入失败："+deckstore.Clean(err.Error(), 160), "deckd")
@@ -209,6 +242,35 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 	}
 	return true
+}
+
+// ResumeAwaiting 在 deckd 启动时接着处理重启前停在启动确认上的会话（自查：后台等待随进程消失，提示却还写着会自动送）。
+// 主 agent 的 brief 按项目设置重新生成、接着等；子 agent 的任务正文没有落盘，送不了，改说明请 owner 停掉重派。
+func (s *Server) ResumeAwaiting() {
+	if s.agents == nil {
+		return
+	}
+	set := s.store.Settings()
+	for _, x := range s.store.Sessions("") {
+		if x.AwaitingOwner == "" || x.BriefConfirmed || x.Status != deckstore.StatusRunning || x.AgentDeckID == "" {
+			continue
+		}
+		p, ok := set.Project(x.Project)
+		if x.Role != "main" || !ok {
+			why := "deckd 重启前它停在启动确认上，任务正文没有保存、送不了：请停掉它重新派"
+			s.store.SetAwaitingOwner(x.Key, why)
+			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
+			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+			continue
+		}
+		permit, err := s.agents.leases.Manual(x.AgentDeckID)
+		if err != nil {
+			continue
+		}
+		x := x
+		s.bgWG.Add(1)
+		go func() { defer s.bgWG.Done(); s.briefAfterOwner(x, x.Key, x.AgentDeckID, MainBrief(p), permit) }()
+	}
 }
 
 // background 是后台工作的 context：deckd 关闭时取消（daemon 用 WithBackground 接上），没接上时不取消。

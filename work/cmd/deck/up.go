@@ -167,7 +167,7 @@ func ensureUpstream(dirs deckstore.Dirs, spec layout.Spec, listen string) (addr,
 		warnAndWait("%s 上有服务在听，但不是能用的 agent-deck 状态服务（%v）。\n"+
 			"可能是你手动起的 agent-deck web 用了别的 token，或别的程序占着这个端口：关掉它再 deck up，deck 会自己起一个。\n"+
 			"这次侧栏的运行状态会显示「未知」，其余功能照常。", addr, err)
-		return addr, path
+		return "", "" // 不把 token 交给来历不明的监听者（自查）
 	}
 	cmd := agentdeck.WebServeCommand("agent-deck", upstreamProfile, addr, path)
 	if err := agentdeck.LayoutBackgroundWindow(ctx, spec.LayoutSocket, "deck", "agent-deck-web", cmd); err != nil {

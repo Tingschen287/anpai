@@ -40,11 +40,11 @@ func TestProbeWeb(t *testing.T) {
 
 func TestWebServeCommand(t *testing.T) {
 	got := WebServeCommand("agent-deck", "deck", "127.0.0.1:8420", "/home/x/it's/agentdeck-web.token")
-	want := `exec env AGENTDECK_PROFILE='deck' 'agent-deck' web --no-tui --listen '127.0.0.1:8420' --token-file '/home/x/it'\''s/agentdeck-web.token'`
+	want := `exec env AGENTDECK_PROFILE='deck' 'agent-deck' web --no-tui --read-only --listen '127.0.0.1:8420' --token-file '/home/x/it'\''s/agentdeck-web.token'`
 	if got != want {
 		t.Fatalf("\n%s\n%s", got, want)
 	}
-	for _, f := range []string{"--no-tui", "--listen", "--token-file"} {
+	for _, f := range []string{"--no-tui", "--read-only", "--listen", "--token-file"} {
 		found := false
 		for _, w := range WebFlags {
 			found = found || w == f

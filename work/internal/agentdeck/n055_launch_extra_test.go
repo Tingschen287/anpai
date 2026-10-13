@@ -74,6 +74,7 @@ func TestLaunchRefusesUndeclarableExtra(t *testing.T) {
 		{ProjectPath: "/p", Tool: "codex", Model: "m", Extra: [][]string{{"-c", "approval_policy=never"}}},
 		{ProjectPath: "/p", Tool: "gemini", Model: "m", Extra: [][]string{{"--model", "x"}}},
 		{ProjectPath: "/p", Tool: "claude", Model: "m", Extra: [][]string{{"--allowedTools=Bash(deck agent:*)"}}},
+		{ProjectPath: "/p", Tool: "codex", Model: "m", Extra: [][]string{{"-c", "shell_environment_policy.set.X={command}"}}},
 	}
 	for i, r := range cases {
 		if err := r.Validate(); err == nil {
