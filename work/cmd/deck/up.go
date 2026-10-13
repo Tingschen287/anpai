@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -47,7 +48,8 @@ func up(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	layoutSock, agentSock := socketFlags(fs)
 	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断")
-	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（会话运行状态）")
+	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"),
+		"agent-deck headless 服务地址（会话运行状态）；留空由 deck 自己管（"+agentdeck.DefaultWebAddr+"，没在跑就起，token 自动生成）")
 	fs.Parse(args)
 	self, err := os.Executable()
 	if err != nil {
@@ -73,8 +75,13 @@ func up(dirs deckstore.Dirs, args []string) {
 			fail("%v", err)
 		}
 	}
+	// 没指定上游地址：deck 自己管 headless 服务（n055：owner 不必另开窗口常驻、手传 token）
+	tokenFile := ""
+	if *upstream == "" {
+		*upstream, tokenFile = ensureUpstream(dirs, spec)
+	}
 	// 每次 up 都查一次 deckd：布局还在而 deckd 单独退出了，再运行 deck up 就把它重新起来（n049 评审 1 S1）
-	if err := ensureDeckd(dirs, spec, *upstream); err != nil {
+	if err := ensureDeckd(dirs, spec, *upstream, tokenFile); err != nil {
 		fail("%v", err)
 	}
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
@@ -115,18 +122,65 @@ func buildLayout(dirs deckstore.Dirs, spec layout.Spec) error {
 // ensureDeckd：deckd 没在跑就在布局的后台窗口里起它（外部命令只许在 adapter 包里调，所以不在这里另起进程）。
 // 后果：关掉布局 server 时 deckd 随之停止，agent 会话照常在 agent-deck server 上跑；再 deck up 时重新起来，
 // 接管中的会话按 n050 的重启恢复处理（保持接管、自动派送暂停，等 owner 交还）。
-func ensureDeckd(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
+func ensureDeckd(dirs deckstore.Dirs, spec layout.Spec, upstream, tokenFile string) error {
 	var health map[string]any
 	if deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/health", &health) != nil {
 		d := []string{layout.Quote(spec.Deck), "daemon", "-layout-socket", layout.Quote(spec.LayoutSocket), "-agent-socket", layout.Quote(spec.AgentSocket)}
 		if upstream != "" {
 			d = append(d, "-upstream", layout.Quote(upstream))
 		}
+		if tokenFile != "" {
+			d = append(d, "-upstream-token-file", layout.Quote(tokenFile)) // 文件路径，不是 token 本身
+		}
 		if err := agentdeck.LayoutBackgroundWindow(context.Background(), spec.LayoutSocket, "deck", "deckd", strings.Join(d, " ")); err != nil {
 			return fmt.Errorf("起 deckd 失败：%w", err)
 		}
 	}
 	return nil
+}
+
+// upstreamProfile 是 deck 用的 agent-deck profile（与 deck daemon 的默认一致）。
+const upstreamProfile = "deck"
+
+// ensureUpstream：deck 自管 agent-deck 的 headless 服务。token 文件没有就生成；地址上已有 agent-deck 且 token 对得上就复用，
+// 没在跑就在布局的后台窗口里起（随布局 server 停止，再 deck up 时重新起）。起不来或地址被别的服务占着时说明原因、
+// 等 owner 按回车继续（侧栏状态显示未知，其余功能照常）。返回给 deckd 的地址与 token 文件。
+func ensureUpstream(dirs deckstore.Dirs, spec layout.Spec) (addr, tokenFile string) {
+	addr = agentdeck.DefaultWebAddr
+	path, token, err := deckstore.EnsureWebToken(dirs)
+	if err != nil {
+		warnAndWait("准备 agent-deck 状态服务的 token 失败：%v\n侧栏的运行状态会显示「未知」，其余功能照常。", err)
+		return "", ""
+	}
+	ctx := context.Background()
+	err = agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token)
+	if err == nil {
+		return addr, path
+	}
+	if !errors.Is(err, agentdeck.ErrWebDown) {
+		warnAndWait("%s 上有服务在听，但不是能用的 agent-deck 状态服务（%v）。\n"+
+			"可能是你手动起的 agent-deck web 用了别的 token，或别的程序占着这个端口：关掉它再 deck up，deck 会自己起一个。\n"+
+			"这次侧栏的运行状态会显示「未知」，其余功能照常。", addr, err)
+		return addr, path
+	}
+	cmd := agentdeck.WebServeCommand("agent-deck", upstreamProfile, addr, path)
+	if err := agentdeck.LayoutBackgroundWindow(ctx, spec.LayoutSocket, "deck", "agent-deck-web", cmd); err != nil {
+		warnAndWait("起 agent-deck 状态服务失败：%v\n侧栏的运行状态会显示「未知」，其余功能照常。", err)
+		return addr, path
+	}
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+		if err = agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token); err == nil {
+			return addr, path
+		}
+	}
+	warnAndWait("agent-deck 状态服务 15 秒内没有就绪（%v）。它在布局的后台窗口 agent-deck-web 里，起来后侧栏会自动显示状态。", err)
+	return addr, path
+}
+
+// warnAndWait 在接上布局之前把问题说清楚，等 owner 按回车（接上布局后终端被占满，看不到这段话）。
+func warnAndWait(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "deck：注意："+format+"\n按回车继续……", args...)
+	bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
 // center：中间窗格里的重连循环（架构稿 §1、§7）。

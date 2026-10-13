@@ -2,6 +2,8 @@
 //
 // 这里有一条硬规矩：**token 不落盘**。上游 headless 服务的 bearer token 只从
 // 环境变量读，配置文件里连这个字段都没有，省得哪天有人顺手写进去再提交上去。
+// （这条管的是 Work Deck 的配置文件。deck v1 自管的 headless 服务另用一个 0600 的 token 文件，
+// 放在 deck 的状态目录里，不在任何配置文件里，见 deckstore.EnsureWebToken，n055。）
 package config
 
 import (
