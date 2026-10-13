@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
@@ -287,7 +289,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 		}
 		body = append(body, row{text: Fit(fmt.Sprintf("%s\x1b[1m ▾ %s\x1b[22m\x1b[38;5;242m · %d\x1b[0m", hb, sanitize(g.Name), len(g.Sessions)), w), idx: -1, proj: g.ID})
 		if len(g.Sessions) == 0 {
-			body = append(body, row{text: "\x1b[38;5;242m   （还没有会话 · 选中项目按 m 起主 agent）\x1b[0m", idx: -1})
+			body = append(body, row{text: Fit("\x1b[38;5;242m   按 m 起主 agent\x1b[0m", w), idx: -1})
 		}
 		for _, x := range g.Sessions {
 			dot, st := status(x)
@@ -329,12 +331,13 @@ func (s *Sidebar) Render(w, h int) Frame {
 		}
 		body = append(body, row{idx: -1})
 	}
-	footer := []string{Fit("\x1b[38;5;242m ↑↓ 选  ⏎ 打开  h 放回后台  m 起主 agent\x1b[0m", w)}
+	footer := []string{Fit("\x1b[38;5;242m ↑↓ 选  ⏎ 打开  h 放回后台\x1b[0m", w), Fit("\x1b[38;5;242m m 起主 agent\x1b[0m", w)}
+	// 结果与出错说明可能比侧栏宽（例如「停在目录信任确认上……」）：折行显示，最多 4 行（n055 端到端：一行截断看不全）
 	if s.Data.Info != "" {
-		footer = append([]string{Fit("\x1b[38;5;42m "+s.Data.Info+"\x1b[0m", w)}, footer...)
+		footer = append(wrapLines(s.Data.Info, w, "\x1b[38;5;42m"), footer...)
 	}
 	if s.Data.Err != "" {
-		footer = append([]string{Fit("\x1b[38;5;196m "+s.Data.Err+"\x1b[0m", w)}, footer...)
+		footer = append(wrapLines(s.Data.Err, w, "\x1b[38;5;196m"), footer...)
 	}
 	room := h - len(lines) - len(footer)
 	// 让选中的会话可见
@@ -376,6 +379,20 @@ func (s *Sidebar) Render(w, h int) Frame {
 	}
 	lines = append(lines, footer...)
 	return Frame{Lines: lines, Images: images}
+}
+
+// wrapLines 把一段说明按宽度折成最多 4 行（每行前空一格），超出的截断。
+func wrapLines(text string, w int, color string) []string {
+	lines := strings.Split(ansi.Hardwrap(oneLine(text), max(1, w-1), false), "\n")
+	if len(lines) > 4 {
+		lines = lines[:4]
+		lines[3] = ansi.Truncate(lines[3], max(1, w-2), "") + "…"
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = Fit(color+" "+l+"\x1b[0m", w)
+	}
+	return out
 }
 
 // sanitize 去掉会话标题里的控制字符与疑似密钥（标题来自模型，可能夹带转义序列），

@@ -41,8 +41,15 @@ func TestSidebarProjectRowsSelectable(t *testing.T) {
 	}
 	f := sb.Render(48, 40)
 	all := ansi.Strip(strings.Join(f.Lines, "\n"))
-	if !strings.Contains(all, "试用项目 · 0") || !strings.Contains(all, "选中项目按 m 起主 agent") || !strings.Contains(all, "m 起主 agent") {
+	if !strings.Contains(all, "试用项目 · 0") || !strings.Contains(all, "按 m 起主 agent") || !strings.Contains(all, " m 起主 agent") {
 		t.Fatalf("空项目要提示怎么起主 agent：\n%s", all)
+	}
+	// 侧栏实际只有三十来列宽：提示与结果说明都不能被截掉（n055 端到端发现）
+	narrow := &Sidebar{Data: d, Mode: "none", Proj: "trial"}
+	narrow.Data.Info = "已起「trial」的主 agent：CLI 停在目录信任确认上：请在中间窗格自己选，选完 deck 会自动送第一条 brief"
+	nf := ansi.Strip(strings.Join(narrow.Render(32, 40).Lines, "\n"))
+	if !strings.Contains(nf, "按 m 起主 agent") || !strings.Contains(nf, " m 起主 agent") || !strings.Contains(strings.Join(strings.Fields(nf), ""), "选完deck会自动送第一条brief") {
+		t.Fatalf("32 列宽时提示与说明要完整：\n%s", nf)
 	}
 	// 选中的标题行有底色、点它命中项目
 	row := -1

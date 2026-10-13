@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -49,7 +50,8 @@ func up(dirs deckstore.Dirs, args []string) {
 	layoutSock, agentSock := socketFlags(fs)
 	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断")
 	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"),
-		"agent-deck headless 服务地址（会话运行状态）；留空由 deck 自己管（"+agentdeck.DefaultWebAddr+"，没在跑就起，token 自动生成）")
+		"agent-deck headless 服务地址（会话运行状态）；留空由 deck 自己管（没在跑就起，token 自动生成）")
+	listen := fs.String("upstream-listen", agentdeck.DefaultWebAddr, "deck 自管 headless 服务时的监听地址（只用回环地址）")
 	fs.Parse(args)
 	self, err := os.Executable()
 	if err != nil {
@@ -78,7 +80,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	// 没指定上游地址：deck 自己管 headless 服务（n055：owner 不必另开窗口常驻、手传 token）
 	tokenFile := ""
 	if *upstream == "" {
-		*upstream, tokenFile = ensureUpstream(dirs, spec)
+		*upstream, tokenFile = ensureUpstream(dirs, spec, *listen)
 	}
 	// 每次 up 都查一次 deckd：布局还在而 deckd 单独退出了，再运行 deck up 就把它重新起来（n049 评审 1 S1）
 	if err := ensureDeckd(dirs, spec, *upstream, tokenFile); err != nil {
@@ -145,8 +147,12 @@ const upstreamProfile = "deck"
 // ensureUpstream：deck 自管 agent-deck 的 headless 服务。token 文件没有就生成；地址上已有 agent-deck 且 token 对得上就复用，
 // 没在跑就在布局的后台窗口里起（随布局 server 停止，再 deck up 时重新起）。起不来或地址被别的服务占着时说明原因、
 // 等 owner 按回车继续（侧栏状态显示未知，其余功能照常）。返回给 deckd 的地址与 token 文件。
-func ensureUpstream(dirs deckstore.Dirs, spec layout.Spec) (addr, tokenFile string) {
-	addr = agentdeck.DefaultWebAddr
+func ensureUpstream(dirs deckstore.Dirs, spec layout.Spec, listen string) (addr, tokenFile string) {
+	addr = listen
+	if host, _, err := net.SplitHostPort(addr); err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		warnAndWait("-upstream-listen %q 不是本机回环地址加端口：deck 只在回环地址上起状态服务。这次侧栏的运行状态会显示「未知」。", listen)
+		return "", ""
+	}
 	path, token, err := deckstore.EnsureWebToken(dirs)
 	if err != nil {
 		warnAndWait("准备 agent-deck 状态服务的 token 失败：%v\n侧栏的运行状态会显示「未知」，其余功能照常。", err)
