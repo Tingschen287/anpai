@@ -95,8 +95,13 @@ type Target struct {
 	Tmux           string // tmux session 名（中间 client 切换用）
 	Role           string // main 或 sub
 	BriefConfirmed bool   // 主 agent 的第一条 brief 已确认送达
-	Title          string
+	// AwaitingOwner：主 agent 的 CLI 停在启动确认上（目录信任等），等 owner 在中间处理（n055）。这时也对 owner 放开输入
+	AwaitingOwner bool
+	Title         string
 }
+
+// ownerInput：主 agent 显示在中间时 owner 能不能打字——第一条 brief 已送达，或 CLI 停在启动确认上等 owner 处理。
+func (t Target) ownerInput() bool { return t.Role == "main" && (t.BriefConfirmed || t.AwaitingOwner) }
 
 // Lookup 按任意标识（注册表 key 或 agent-deck id）取目标；找不到返回 false。
 type Lookup func(id string) (Target, bool)
@@ -483,7 +488,7 @@ func (m *Machine) switchLocked(target string) error {
 		return fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)
 	}
 	m.focus = target
-	if target != "" && t.Role == "main" && t.BriefConfirmed {
+	if target != "" && t.ownerInput() {
 		if err := m.center.SetReadOnly(false); err != nil {
 			m.protectUnconfirmed(err)
 			if errors.Is(err, ErrStaleClient) && !handedBack {
@@ -749,12 +754,29 @@ func (m *Machine) deliverToMain(id string, deliver func() error, now bool) error
 	if serr := m.writable(); serr != nil {
 		return errors.Join(derr, fmt.Errorf("%v；主 agent 输入保持关闭", serr))
 	}
-	if t.BriefConfirmed {
+	// 送完按最新状态放开（第一条 brief 就是经这里送的：送前还在等 owner 处理启动确认、送后已确认，n055）
+	if cur, ok := m.lookup(id); ok && cur.ownerInput() {
 		if err := m.center.SetReadOnly(false); err != nil {
 			m.notify("送完汇报后放开主 agent 输入失败，中间保持只读")
 		}
 	}
 	return derr
+}
+
+// OpenMainInput：主 agent 的状态变了（第一条 brief 刚确认送达，或 CLI 停在启动确认上等 owner 处理），它正显示在中间、
+// 又没有被别的操作关着输入时，按最新状态放开输入（n055；原先要等下一次切换才放开）。不在中间就什么都不做。
+func (m *Machine) OpenMainInput(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.writable(); err != nil {
+		return err
+	}
+	t, err := m.canon(id)
+	if err != nil || m.focus != t.Session || !t.ownerInput() {
+		return err
+	}
+	defer m.bind()()
+	return m.center.SetReadOnly(false)
 }
 
 func isHandback(err error) bool {

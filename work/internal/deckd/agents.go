@@ -72,6 +72,8 @@ type agentsDeps struct {
 	graphState func(ctx context.Context, p deckstore.ProjectDef, node string) (projectctl.State, error)
 	// quotaOf 取某个工具的额度状态（dashquota 的 available/warn/exhausted/unknown）；空时用 Server 的看板客户端，测试可换
 	quotaOf func(ctx context.Context, tool string) string
+	// startup 是送第一条 brief 前看画面的节奏（n055）；零值用 defaultStartupTiming，测试换成很短的
+	startup startupTiming
 }
 
 // WithAgents 接上开子 agent 需要的依赖（daemon 与测试调用）。
@@ -428,8 +430,16 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	delivered := false
 	note := ""
+	dialog := ""
+	if err == nil {
+		// 先看画面：CLI 停在启动确认（目录信任等）上就不送，等 owner 处理（n055）
+		dialog = s.settleScreen(ctx, id)
+	}
 	if err != nil {
 		note = "不能送 brief：" + err.Error()
+	} else if dialog != "" {
+		got, _ := s.store.Session(key)
+		note = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
 	} else if derr := s.agents.upstream.SendMessage(ctx, permit, id, plan.brief); derr != nil {
 		note = "brief " + deckstore.Clean(derr.Error(), 200)
 		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
@@ -447,6 +457,9 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	if note != "" {
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
+	}
+	if x.Role == "main" && s.view != nil {
+		s.view.OpenMainInput(id) // 主 agent 若已显示在中间：按最新状态放开输入（原先要等下一次切换）
 	}
 	who := "owner"
 	if c.Role == RoleMain {

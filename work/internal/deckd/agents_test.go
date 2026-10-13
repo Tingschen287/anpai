@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
@@ -110,7 +111,23 @@ func (f *fakeUp) SendToMain(_ context.Context, p lease.Permit, id, msg string) e
 	return f.mainErr
 }
 func (f *fakeUp) PaneOutputPlain(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.output, nil
+}
+
+// setOutput 换掉假上游的画面（n055：后台送 brief 的循环会并发读它）。
+func (f *fakeUp) setOutput(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.output = s
+}
+
+// sendCount 是已送出的消息条数（加锁读）。
+func (f *fakeUp) sendCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sends)
 }
 
 type agentWorld struct {
@@ -144,6 +161,8 @@ func newAgentWorld(t *testing.T) *agentWorld {
 	f.srv.WithAgents(w.up, l, func(_ context.Context, bin string) (string, string, error) {
 		return "/usr/bin/" + bin, w.version, nil
 	}, nil)
+	// 送 brief 前看画面的节奏换成很短的（n055）
+	f.srv.agents.startup = startupTiming{poll: time.Millisecond, settle: 50 * time.Millisecond, await: 2 * time.Second}
 	// 上游侧绕过检查换成可控的假检查（不读本机真实的 agent-deck 配置）
 	f.srv.WithBypassChecks(BypassChecks{
 		Config: func(tool string) error { return w.cfgBypass[tool] },

@@ -61,6 +61,9 @@ type Server struct {
 	activity *activityCache
 	// agents 是开子 agent、发话、转告主 agent 需要的依赖（n051）；没接上时相关接口返回 503。
 	agents *agentsDeps
+	// bg 是后台工作的 context（n055：等 owner 处理 CLI 启动确认后再送 brief），deckd 关闭时取消
+	bg   context.Context
+	bgWG sync.WaitGroup
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
