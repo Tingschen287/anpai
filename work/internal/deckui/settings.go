@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -82,6 +83,11 @@ type Settings struct {
 	msg       string
 	loaded    bool
 	width     int
+	height    int
+	// Start 是新建项目时目录浏览的起点（deck settings 进程的当前目录，即 deck up 所在的目录，n055）
+	Start string
+	form  *projectForm // 不为 nil：正在新建项目
+	hint  string       // 下一次保存成功后附在「保存完成」后面的提示（新建项目后的下一步）
 }
 
 type loadedMsg struct {
@@ -284,7 +290,7 @@ func (m *Settings) cycleMain() {
 func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
+		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
 		if msg.err != nil {
 			m.msg = "读不到设置：" + errText(msg.err)
@@ -306,9 +312,16 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		if msg.err != nil {
 			m.msg = msg.what + "失败：" + errText(msg.err)
+			if msg.save {
+				m.hint = ""
+			}
 			return m, nil
 		}
 		m.msg = msg.what + "完成"
+		if msg.save && m.hint != "" {
+			m.msg += "：" + m.hint
+			m.hint = ""
+		}
 		if msg.save && msg.edits == m.edits {
 			return m, m.reloadAfterSave(m.edits)
 		}
@@ -317,9 +330,27 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.loadTrust // 撤销授权不能丢掉没保存的编辑
 	case tea.KeyMsg:
+		if m.form != nil {
+			return m, m.formKey(msg)
+		}
 		return m.key(msg.String())
 	}
 	return m, nil
+}
+
+// save 整份保存（在后台跑，继续编辑不能改到正在发出的那份）。
+func (m *Settings) save() tea.Cmd {
+	set, err := cloneSettings(m.set)
+	if err != nil {
+		m.msg = "保存失败：" + errText(err)
+		return nil
+	}
+	edits := m.edits
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits}
+	}
 }
 
 func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
@@ -370,24 +401,26 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "s":
-		set, err := cloneSettings(m.set) // 保存在后台跑，继续编辑不能改到正在发出的那份
-		if err != nil {
-			m.msg = "保存失败：" + errText(err)
-			return m, nil
+		return m, m.save()
+	case "n":
+		if !m.loaded {
+			break
 		}
-		edits := m.edits
-		return m, func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits}
+		start := m.Start
+		if start == "" {
+			start, _ = os.Getwd()
 		}
+		m.form, m.msg = newProjectForm(start), ""
 	}
 	return m, nil
 }
 
 func (m *Settings) View() string {
+	if m.form != nil {
+		return m.formView()
+	}
 	var b strings.Builder
-	b.WriteString("\x1b[1;38;5;39m agent 设置\x1b[0m\x1b[38;5;242m   ↑↓ 选  空格/⏎ 改  ←→ 换项目  d 撤销授权  s 保存  q 关闭\x1b[0m\n\n")
+	b.WriteString("\x1b[1;38;5;39m agent 设置\x1b[0m\x1b[38;5;242m   ↑↓ 选  空格/⏎ 改  ←→ 换项目  n 新建项目  d 撤销授权  s 保存  q 关闭\x1b[0m\n\n")
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String()
@@ -442,7 +475,7 @@ func (m *Settings) View() string {
 		}
 		fmt.Fprintf(&b, " %s 主 agent  %s\n", cursor(), main)
 	} else {
-		b.WriteString("\x1b[38;5;242m 还没有项目（项目由主 agent 流程建立，n051）\x1b[0m\n")
+		b.WriteString("\x1b[38;5;242m 还没有项目：按 n 新建（选一个目录）\x1b[0m\n")
 	}
 	b.WriteString("\n\x1b[1m 已记住的 Codex 授权\x1b[0m\n")
 	if len(m.trust) == 0 {
@@ -463,7 +496,8 @@ func (m *Settings) View() string {
 
 // RunSettings 跑设置界面（布局里按 F9 开的窗口，关掉就回到布局）。
 func RunSettings(api SettingsAPI) error {
-	_, err := tea.NewProgram(&Settings{API: api}, tea.WithAltScreen()).Run()
+	start, _ := os.Getwd()
+	_, err := tea.NewProgram(&Settings{API: api, Start: start}, tea.WithAltScreen()).Run()
 	return err
 }
 
