@@ -193,7 +193,7 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	case what == notReady:
 		note = "CLI 还没就绪（取不到画面或还没出现输入框）：deck 等到输入框、确认没有启动确认后自动送第一条消息，请在中间看一眼"
 	default:
-		note = dialogNote(x, what)
+		note = dialogNote(x, what, false)
 	}
 	s.markAwaiting(x, key, id, note, true)
 	s.bgWG.Add(1)
@@ -201,8 +201,14 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	return note
 }
 
-// dialogNote 是 CLI 停在启动确认上时给 owner 的说明。
-func dialogNote(x deckstore.Session, what string) string {
+// dialogNote 是 CLI 停在启动确认上时给 owner 的说明。uncertain 为真时第一条消息送没送到不确定（重启时见到「正在送」），deck 不会补送。
+func dialogNote(x deckstore.Session, what string, uncertain bool) string {
+	if uncertain {
+		if x.Role == "main" {
+			return fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选。deckd 重启前第一条 brief 正在送，送没送到不确定，deck 不会补送，选完请看一眼它有没有收到", what)
+		}
+		return fmt.Sprintf("CLI 停在%s上：请把它显示在中间、按 F2 接管后自己选。deckd 重启前任务正在送，送没送到不确定，deck 不会补送", what)
+	}
 	if x.Role == "main" {
 		return fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选，选完 deck 会自动送第一条 brief", what)
 	}
@@ -235,6 +241,31 @@ func (s *Server) markAwaiting(x deckstore.Session, key, id, note string, open bo
 // briefAfterOwner 在后台等启动确认消失、画面稳定，再送第一条 brief（只送一次）。
 // 主 agent 经中间窗格的送达门送（owner 刚打过字就等，送前关输入，送完按最新状态放开）；子 agent 等 owner 交还写入权后送。
 func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, permit lease.Permit) {
+	s.waitForComposer(x, key, id, false, func(ctx context.Context) bool { return s.sendFirstBrief(ctx, x, key, id, brief, permit) })
+}
+
+// uncertainAfterOwner 是重启时见到「正在送」的后台等待（评审 3 B1）：不补送，但在认出空输入框之前一直保持启动期，
+// 发话、推送、F8 都挡着，确认框交给 owner；认出后才按「送没送到不确定」收尾。
+func (s *Server) uncertainAfterOwner(x deckstore.Session, key, id string) {
+	s.waitForComposer(x, key, id, true, func(context.Context) bool { s.finishUncertain(x, key); return true })
+}
+
+// finishUncertain 结束「送没送到不确定」的启动期：不补送，主 agent 记为已确认（owner 能在中间直接和它说话，汇报照常转告），
+// 子 agent 解除启动期，并请 owner 看一眼。
+func (s *Server) finishUncertain(x deckstore.Session, key string) {
+	why := "deckd 重启时第一条消息正在送，送没送到不确定：请在中间看一眼，没收到就停掉它重新开"
+	if x.Role == "main" {
+		s.store.ConfirmBrief(key)
+	} else {
+		s.store.FinishStart(key)
+	}
+	s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
+	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+}
+
+// waitForComposer 是启动期的后台等待：等启动确认消失、认出这个 CLI 的空输入框、画面稳定，再调 ready（返回 true 表示结束）。
+// 期间会话一直在启动期（往它写入的路径都挡着）；CLI 退出就记为已停止；deckd 关闭就停下，状态留给重启时接着处理。
+func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain bool, ready func(context.Context) bool) {
 	ctx := s.background()
 	tm := s.startupTiming()
 	deadline := time.Now().Add(tm.await)
@@ -261,6 +292,9 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 		if !told && time.Now().After(deadline) {
 			// 等久了：说明一次，之后放慢继续等（attempt 2 自查：原先到点就放弃，启动期标记永远不清、owner 之后处理了也不送）
 			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），还没送第一条 brief；处理完 deck 仍会自动送，不想要了就停掉它", int(tm.await.Minutes()))
+			if uncertain {
+				why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框），deck 一直没往它写；请在中间处理，不想要了就停掉它", int(tm.await.Minutes()))
+			}
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 			told, poll = true, 10*tm.poll
@@ -268,7 +302,7 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
 		if err == nil {
 			if d := StartupDialog(screen); d != "" {
-				if note := dialogNote(x, d); cur.AwaitingOwner != note {
+				if note := dialogNote(x, d, uncertain); cur.AwaitingOwner != note {
 					s.markAwaiting(x, key, id, note, false) // 之前没认出（例如重启前还在看画面）：补记等 owner、放开输入（评审 2 R1）
 				}
 				prev = ""
@@ -283,7 +317,7 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 			prev = screen
 			continue
 		}
-		if s.sendFirstBrief(ctx, x, key, id, brief, permit) {
+		if ready(ctx) {
 			return
 		}
 		prev = ""
@@ -355,23 +389,28 @@ func (s *Server) ResumeAwaiting() {
 		if !x.StartPending() || x.BriefConfirmed || x.Status != deckstore.StatusRunning || x.AgentDeckID == "" {
 			continue
 		}
-		if x.BriefSending {
-			// 重启时第一条消息正在送：送没送到不确定（评审 2 R2），不补送，请 owner 看一眼。只有认出输入框才会开始送，
-			// 所以这时不会停在确认上；主 agent 记为已确认，好让 owner 能在中间直接和它说话
-			why := "deckd 重启时第一条消息正在送，送没送到不确定：请在中间看一眼，没收到就停掉它重新开"
-			if x.Role == "main" {
-				s.store.ConfirmBrief(x.Key)
-			} else {
-				s.store.FinishStart(x.Key)
-			}
-			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
-			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
-			continue
-		}
-		// 没有「正在送」：第一条消息肯定还没送（评审 2 R1：不能当成已确认），保持启动期、接着等
 		if !x.Starting {
 			s.store.MarkStarting(x.Key) // attempt 1 落盘的旧状态只有 AwaitingOwner：补上启动期，后台等待才不会第一轮就退出
 		}
+		if x.BriefSending {
+			// 重启时第一条消息正在送：送没送到不确定（评审 2 R2），不补送。但不能马上解除启动期（评审 3 B1）：画面上可能是确认框，
+			// 解除后汇报会被自动推进去。先看一眼画面：已经是空输入框就收尾；否则保持启动期（发话、推送、F8 都挡着），
+			// 只对 owner 放开中间输入，后台等到空输入框再收尾（输入框里留着半截消息时也等 owner 处理）
+			if s.uncertainReadyNow(x) {
+				s.finishUncertain(x, x.Key)
+				continue
+			}
+			note := "deckd 重启时第一条消息正在送，送没送到不确定，deck 不会补送；等它出现空输入框之前不往它转告任何东西，请在中间看一眼（输入框里留着半截消息就自己处理）"
+			if x.Role != "main" {
+				note = "deckd 重启时任务正在送，送没送到不确定，deck 不会补送；等它出现空输入框之前不往它写，请显示在中间、按 F2 接管看一眼"
+			}
+			s.markAwaiting(x, x.Key, x.AgentDeckID, note, false)
+			x := x
+			s.bgWG.Add(1)
+			go func() { defer s.bgWG.Done(); s.uncertainAfterOwner(x, x.Key, x.AgentDeckID) }()
+			continue
+		}
+		// 没有「正在送」：第一条消息肯定还没送（评审 2 R1：不能当成已确认），保持启动期、接着等
 		p, ok := set.Project(x.Project)
 		if x.Role != "main" || !ok {
 			why := "deckd 重启前它还没收到任务，任务正文没有保存、送不了：请停掉它重新派"
@@ -392,6 +431,17 @@ func (s *Server) ResumeAwaiting() {
 		s.bgWG.Add(1)
 		go func() { defer s.bgWG.Done(); s.briefAfterOwner(x, x.Key, x.AgentDeckID, MainBrief(p), permit) }()
 	}
+}
+
+// uncertainReadyNow 在重启时看一眼画面：没有启动确认、认得出空输入框才算可以当场收尾（看不到画面就交给后台等）。
+func (s *Server) uncertainReadyNow(x deckstore.Session) bool {
+	ctx, cancel := context.WithTimeout(s.background(), 5*time.Second)
+	defer cancel()
+	screen, err := s.agents.upstream.PaneOutputPlain(ctx, x.AgentDeckID)
+	if err != nil || strings.TrimSpace(screen) == "" || StartupDialog(screen) != "" {
+		return false
+	}
+	return ComposerReady(x.Tool, screen)
 }
 
 // background 是后台工作的 context：deckd 关闭时取消（daemon 用 WithBackground 接上），没接上时不取消。
