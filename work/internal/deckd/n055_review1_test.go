@@ -2,7 +2,6 @@ package deckd
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -115,32 +114,6 @@ func TestComposerReady(t *testing.T) {
 		if got := ComposerReady(c.tool, c.screen); got != c.ready {
 			t.Errorf("第 %d 个（%s）：%v，应为 %v\n%s", i, c.tool, got, c.ready, c.screen)
 		}
-	}
-}
-
-// 重启时会话还在启动期、没停在确认上：第一条消息送没送到不确定，不补送，解除限制并请 owner 看一眼。
-func TestResumeStartingWithoutDialog(t *testing.T) {
-	w := newAgentWorld(t)
-	addGamma(t, w)
-	dead, cancel := context.WithCancel(context.Background())
-	cancel()
-	w.srv.WithBackground(dead)
-	w.up.setOutput(" ▐▛███▛█   Claude Code v2.1.296\n\n  Loading…")
-	if code, b := w.do("owner", "POST", "/v1/projects/gamma/main", `{}`); code != 201 {
-		t.Fatalf("%d %s", code, b)
-	}
-	w.srv.WaitBackground()
-	x := mainOf(t, w, "gamma")
-	w.store.SetAwaitingOwner(x.Key, "") // 模拟重启前只记了启动期
-	before := w.up.sendCount()
-	w.srv.WithBackground(context.Background())
-	w.srv.ResumeAwaiting()
-	y := mainOf(t, w, "gamma")
-	if y.StartPending() || !strings.Contains(y.Note, "不确定") || w.up.sendCount() != before {
-		t.Fatalf("不补送、解除限制并说明：%+v", y)
-	}
-	if !y.BriefConfirmed {
-		t.Fatal("主 agent 记为已确认：中间对 owner 可写，好在中间直接和它说话（attempt 2 自查）")
 	}
 }
 

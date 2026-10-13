@@ -254,8 +254,11 @@ type Session struct {
 	// Starting：会话已登记、第一条消息（brief 或任务）还没有结果。这期间 deck 的其他写入（主 agent 发话、推送汇报、立即送）
 	// 一律不往它打字：CLI 可能正停在启动确认上，而识别要等取到画面（n055 评审 1 B2：登记到识别之间的空窗）。
 	// 第一条消息送达、未确认或失败后清掉
-	Starting bool   `json:"starting,omitempty"`
-	Note     string `json:"note,omitempty"`
+	Starting bool `json:"starting,omitempty"`
+	// BriefSending：第一条消息（brief 或任务）已开始往上游送、结果还没落盘（n055 评审 2 R2）。deckd 这时重启，
+	// 送没送到不确定：恢复时不补送，请 owner 看一眼。第一条消息有结果后清掉
+	BriefSending bool   `json:"brief_sending,omitempty"`
+	Note         string `json:"note,omitempty"`
 	// 启动请求的指纹（架构稿 §4，n050 评审 R1）：由发起方（n051 的 deck agent）给出，预留时校验并写入批准范围。
 	RequestID  string `json:"request_id"`  // 本次启动请求 id，同一 id 只能预留一次
 	Dir        string `json:"dir"`         // 工作目录（绝对路径）
@@ -548,7 +551,7 @@ func (s *Store) SetGraphAttempt(key, node string, attempt int) error {
 // ConfirmBrief 记下主 agent 的第一条 brief 已确认送达。
 func (s *Store) ConfirmBrief(key string) error {
 	return s.setSession(key, func(x *Session) error {
-		x.BriefConfirmed, x.AwaitingOwner, x.Starting = true, "", false
+		x.BriefConfirmed, x.AwaitingOwner, x.Starting, x.BriefSending = true, "", false, false
 		return nil
 	})
 }
@@ -560,7 +563,15 @@ func (s *Store) MarkStarting(key string) error {
 
 // FinishStart 清掉启动期的标记（第一条消息已有结果：送达、未确认或失败）。
 func (s *Store) FinishStart(key string) error {
-	return s.setSession(key, func(x *Session) error { x.Starting, x.AwaitingOwner = false, ""; return nil })
+	return s.setSession(key, func(x *Session) error {
+		x.Starting, x.AwaitingOwner, x.BriefSending = false, "", false
+		return nil
+	})
+}
+
+// MarkBriefSending 在往上游送第一条消息之前落盘「正在送」（n055 评审 2 R2）。
+func (s *Store) MarkBriefSending(key string) error {
+	return s.setSession(key, func(x *Session) error { x.BriefSending = true; return nil })
 }
 
 // StartPending 说明会话现在是否不能被 deck 的其他写入打扰：还在启动期，或 CLI 停在启动确认上等 owner。

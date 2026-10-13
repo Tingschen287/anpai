@@ -449,7 +449,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	} else if dialog != "" {
 		got, _ := s.store.Session(key)
 		note = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
-	} else if derr := s.agents.upstream.SendMessage(ctx, permit, id, plan.brief); derr != nil {
+	} else if derr := s.sendFirstMessage(ctx, key, permit, id, plan.brief); derr != nil {
 		note = "brief " + deckstore.Clean(derr.Error(), 200)
 		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
 		// 主 agent 照常放开输入；记下并请 owner 看一眼（没提交的话，brief 留在输入框里看得见）
