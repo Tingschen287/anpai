@@ -33,7 +33,7 @@ type fakeUp struct {
 	subBusy   bool                      // 测试：子 agent 还在跑，SendIfIdle 什么都不送
 	stops     []string
 	stopErr   error
-	paneErr   error // 测试：取画面失败（n055）
+	paneErr   error  // 测试：取画面失败（n055）
 	paneHook  func() // 测试：取画面时先调它（不持锁；n055 评审 1 B2：卡在登记之后、看完画面之前）
 }
 

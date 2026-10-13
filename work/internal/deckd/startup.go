@@ -96,7 +96,8 @@ func ComposerReady(tool, screen string) bool {
 			l := tail[i]
 			if strings.HasPrefix(l, "❯ ") || strings.HasPrefix(l, "❯\u00a0") || l == "❯" {
 				if prev := strings.TrimSpace(tail[i-1]); len([]rune(prev)) >= 10 && strings.Trim(prev, "─") == "" {
-					return true
+					// 输入框要是空的：owner 在里面留了半句草稿时不送，免得 brief 接在草稿后面一起提交（attempt 2 自查）
+					return strings.TrimSpace(strings.TrimPrefix(l, "❯")) == ""
 				}
 			}
 		}
@@ -108,7 +109,8 @@ func ComposerReady(tool, screen string) bool {
 		}
 		for _, l := range tail {
 			if strings.HasPrefix(l, "›") && !menuItem.MatchString(l) {
-				return shortcuts
+				// 启动中的输入框占位「Waiting for startup」不算就绪（attempt 2 自查：Codex 二进制里与正常占位相邻）
+				return shortcuts && !strings.Contains(l, "Waiting for startup")
 			}
 		}
 		return false
@@ -204,19 +206,21 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 	ctx := s.background()
 	tm := s.startupTiming()
 	deadline := time.Now().Add(tm.await)
+	poll, told := tm.poll, false
 	prev := ""
 	for {
-		if sleepCtx(ctx, tm.poll) != nil {
+		if sleepCtx(ctx, poll) != nil {
 			return
 		}
 		if cur, ok := s.store.Session(key); !ok || !cur.Starting || cur.Status != deckstore.StatusRunning {
 			return // 已有结果、会话已结束或被停掉：不再送
 		}
-		if time.Now().After(deadline) {
-			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），没有送第一条 brief；处理完后请停掉这个会话重新开", int(tm.await.Minutes()))
+		if !told && time.Now().After(deadline) {
+			// 等久了：说明一次，之后放慢继续等（attempt 2 自查：原先到点就放弃，启动期标记永远不清、owner 之后处理了也不送）
+			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），还没送第一条 brief；处理完 deck 仍会自动送，不想要了就停掉它", int(tm.await.Minutes()))
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
-			return
+			told, poll = true, 10*tm.poll
 		}
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
 		if err != nil || StartupDialog(screen) != "" || strings.TrimSpace(screen) == "" {
@@ -290,12 +294,20 @@ func (s *Server) ResumeAwaiting() {
 			continue
 		}
 		if x.AwaitingOwner == "" {
-			// 重启时它还在启动期、没停在确认上：第一条消息送没送到不确定（可能刚送完就重启），不补送，请 owner 看一眼
+			// 重启时它还在启动期、没停在确认上：第一条消息送没送到不确定（可能刚送完就重启），不补送，请 owner 看一眼。
+			// 主 agent 记为已确认，好让 owner 能在中间直接和它说话（attempt 2 自查：只清启动期会让中间永久只读）
 			why := "deckd 重启时它还在启动，第一条消息送没送到不确定：请在中间看一眼，没收到就停掉它重新开"
-			s.store.FinishStart(x.Key)
+			if x.Role == "main" {
+				s.store.ConfirmBrief(x.Key)
+			} else {
+				s.store.FinishStart(x.Key)
+			}
 			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 			continue
+		}
+		if !x.Starting {
+			s.store.MarkStarting(x.Key) // attempt 1 落盘的旧状态只有 AwaitingOwner：补上启动期，后台等待才不会第一轮就退出
 		}
 		p, ok := set.Project(x.Project)
 		if x.Role != "main" || !ok {

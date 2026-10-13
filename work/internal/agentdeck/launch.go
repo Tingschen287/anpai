@@ -151,3 +151,6 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 	}
 	return res, nil
 }
+
+// shQuote 用单引号包一个 shell 参数（codex 声明参数经上游 -c 包装时用）。
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

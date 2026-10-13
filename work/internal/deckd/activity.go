@@ -8,8 +8,10 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 )
 
-// 会话运行状态（n049，侧栏状态圆点）：deckd 定时读 agent-deck 的会话菜单，按 tmux 会话名记下状态。
-// 读不到、过期、或会话不在菜单里，一律 unknown，不猜。
+// 会话运行状态（n049，侧栏状态圆点）：deckd 定时读 agent-deck 的会话状态，按 tmux 会话名记下。
+// 读不到、过期、或会话不在列表里，一律 unknown，不猜。
+// n055（owner 在设计复审选 A）起默认用 CLI `agent-deck list --json` 读：只读、不经 headless 服务，没有 token、没有端口；
+// 上游注释写明它与 /api/menu、TUI 给的是同一个状态（issue #610）。显式给了 -upstream 时仍走 headless 服务（旧行为）。
 
 const (
 	activityEvery  = 3 * time.Second
@@ -65,6 +67,28 @@ func (a *activityCache) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// listActivity 用 CLI `agent-deck list --json` 读状态（n055 默认）。
+func listActivity(binary, profile string) func(ctx context.Context) (map[string]string, error) {
+	return func(ctx context.Context) (map[string]string, error) {
+		c, err := agentdeck.NewClient(binary, profile, "", "")
+		if err != nil {
+			return nil, err
+		}
+		c.Timeout = 5 * time.Second
+		list, err := c.ListSessions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, x := range list {
+			if x.TmuxSession != "" {
+				out[x.TmuxSession] = x.Status
+			}
+		}
+		return out, nil
 	}
 }
 

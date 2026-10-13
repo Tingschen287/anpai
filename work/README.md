@@ -140,7 +140,7 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 
 ```bash
 go build -o deck ./cmd/deck
-./deck up                      # 一条命令打开四区布局（已有布局就直接接上；每次都查 deckd 与 agent-deck 状态服务，没在跑就在布局的后台窗口里起）
+./deck up                      # 一条命令打开四区布局（已有布局就直接接上；每次都查 deckd，没在跑就在布局的后台窗口里起它）
 ./deck settings -check         # 只读自查设置文件（升级前先跑；不需要 deckd，不写任何东西）
 ./deck daemon                  # 只起后台服务 deckd：$XDG_STATE_HOME/deck/deckd.sock（0600）
 ./deck whoami                  # deckd 把当前进程认成谁
@@ -166,11 +166,9 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。重建的 client 与旧的共用中间窗格的终端，所以：deckd 的每个视图操作都绑定到开始时的那个 client，每条改动 client 的 tmux 命令执行后读回，落到了新 client 上就把它还原到起点（deck-idle、只读）；`deck center` 每次起 client 之前先等 deckd 确认没有进行中的视图操作（deckd 没在运行则不用等），deckd 在而没确认时中间显示原因、不起新 client。中途发现 client 被替换：还没写下任何东西就整体撤回；lease 交还已经落盘就按操作目标补齐焦点与打开集合（接口返回 409 与最新状态），由新 client 的重连通知收尾。
 - deckd 跑在布局的后台窗口里：关掉布局 server（例如 `tmux -S … kill-server`）deckd 随之停止，agent 会话照常在 agent-deck server 上跑，
   这期间决定、通知、派送都不可用。再 `deck up` 会把 deckd 起来；接管中的会话按重启恢复处理（保持接管、自动派送暂停，等你交还）。
-- 会话运行状态来自 agent-deck 的 headless 服务。n055 起 `deck up` 自己管：不给 `-upstream` 时，token 文件
-  `$XDG_STATE_HOME/deck/agentdeck-web.token`（0600）没有就生成；`-upstream-listen`（默认 127.0.0.1:8420，只接受回环地址）上
-  已有 agent-deck 且 token 对得上就复用，没在跑就在布局后台窗口 `agent-deck-web` 里起 `agent-deck web --read-only --token-file …`
-  （随布局 server 停止）；deckd 经 `-upstream-token-file` 读 token，token 不进命令行。地址被别的服务占着或 token 对不上时，接上布局前
-  说明原因、按回车继续，圆点显示「状态未知」。仍可用 `-upstream`（或 `DECK_AGENTDECK_ADDR`）连现成服务，token 取 `WORKDECK_AGENTDECK_TOKEN`。
+- 会话运行状态：n055 起 deckd 默认每 3 秒调一次只读的 `agent-deck list --json`（与 `/api/menu`、TUI 同一个状态），不需要 agent-deck
+  的 headless 服务，没有 token、没有端口（owner 在设计复审选 A：经 TCP 端口发 token 无法保证对面是自己的服务，WSL2 mirrored 网络下尤甚）。
+  仍可用 `deck up -upstream 127.0.0.1:8420`（或 `DECK_AGENTDECK_ADDR`）改连现成的 headless 服务，token 取 `WORKDECK_AGENTDECK_TOKEN`。
 
 - **唯一写入者**：deck 的状态（注册表、决策、通知、Codex 授权记忆、汇报队列、lease）只由 deckd 写，放在 `$XDG_STATE_HOME/deck/`，与旧 `work` 的目录分开。
 - **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。

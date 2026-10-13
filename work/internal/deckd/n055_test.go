@@ -157,6 +157,10 @@ func TestMainBriefGivesUpAfterAwait(t *testing.T) {
 		}
 		return false
 	})
+	// 超时后不放弃（attempt 2 自查）：owner 之后处理了确认，照样送一次、解除启动期
+	w.up.setOutput(claudeComposerScreen)
+	waitUntil(t, "超时后处理了确认仍送", func() bool { return w.up.sendCount() == before+1 })
+	waitUntil(t, "启动期解除", func() bool { x := mainOf(t, w, "gamma"); return x.BriefConfirmed && !x.StartPending() })
 }
 
 // 等的时候会话被停掉：确认消失后也不再送。

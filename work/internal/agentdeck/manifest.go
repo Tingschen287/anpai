@@ -184,9 +184,10 @@ const SendDeliveryField = "delivery"
 // LaunchFlags 是 Work Deck 会传给 launch 的全部参数。
 var LaunchFlags = []string{"-c", "--model", "--json", "-t", "-g", "--no-wait", "--extra-arg"}
 
-// WebFlags 是起 headless 服务时用的参数：集成测试（integration_test.go）用 --token；n055 起 deck up 自管服务
-// （WebServeCommand，交给布局 tmux 的后台窗口执行）用 --token-file。旧 Work Deck 仍只连现成服务。
-var WebFlags = []string{"--no-tui", "--listen", "--token", "--token-file", "--read-only"}
+// WebFlags 是集成测试起 headless 服务时用的参数（integration_test.go）。
+// 发布代码不启动 web：Work Deck 连配置里 upstream_addr 指向的现成服务；deck v1 默认用 list --json 读状态（n055）。
+// 没有测试核对这份列表。
+var WebFlags = []string{"--no-tui", "--listen", "--token"}
 
 // Evidence 是一条断言在上游源码里的落点：某一行代码。
 //

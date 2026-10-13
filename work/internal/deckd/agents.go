@@ -409,7 +409,9 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	// 先记「启动期」再让会话对外可见：登记成 running 之后、看完画面之前，推送与发话都不能往它打字（n055 评审 1 B2）
 	if err := s.store.MarkStarting(key); err != nil {
-		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下启动状态：%v", id, err)
+		// 记不下启动期就不能保证这期间没有别的写入：停掉刚起的会话、不送任务（attempt 2 自查）
+		s.stopLaunched(ctx, key, id, x, "记不下启动状态："+err.Error(), false, "记不下启动状态")
+		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下启动状态，已停掉：%v", id, err)
 		return
 	}
 	if err := s.store.LaunchSucceeded(key, id, tmux); err != nil {

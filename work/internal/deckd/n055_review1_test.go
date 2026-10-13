@@ -109,7 +109,7 @@ func TestComposerReady(t *testing.T) {
 		{"codex", codexReady, true},
 		{"codex", codexTrust, false},
 		{"codex", "› Ask Codex to do anything", false}, // 没有底部提示
-		{"gemini", "anything stable", true},           // 其他工具没有可靠特征，按稳定判断
+		{"gemini", "anything stable", true},            // 其他工具没有可靠特征，按稳定判断
 	}
 	for i, c := range cases {
 		if got := ComposerReady(c.tool, c.screen); got != c.ready {
@@ -138,6 +138,9 @@ func TestResumeStartingWithoutDialog(t *testing.T) {
 	y := mainOf(t, w, "gamma")
 	if y.StartPending() || !strings.Contains(y.Note, "不确定") || w.up.sendCount() != before {
 		t.Fatalf("不补送、解除限制并说明：%+v", y)
+	}
+	if !y.BriefConfirmed {
+		t.Fatal("主 agent 记为已确认：中间对 owner 可写，好在中间直接和它说话（attempt 2 自查）")
 	}
 }
 

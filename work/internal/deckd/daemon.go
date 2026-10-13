@@ -130,8 +130,10 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		view, graphProgress(cfg.Projectctl))
 	if cfg.UpstreamAddr != "" {
 		srv.activity = newActivityCache(upstreamActivity(cfg.Profile, cfg.UpstreamAddr, cfg.UpstreamToken))
-		go srv.activity.run(ctx)
+	} else {
+		srv.activity = newActivityCache(listActivity(cfg.agentDeckBinary(), cfg.Profile)) // n055：默认用 list --json，不用 token
 	}
+	go srv.activity.run(ctx)
 	// 开子 agent、发话、转告主 agent（n051）：经 agent-deck 命令行
 	if up, err := agentdeck.NewClient(cfg.agentDeckBinary(), cfg.Profile, cfg.UpstreamAddr, cfg.UpstreamToken); err == nil {
 		var gs GraphStartFunc

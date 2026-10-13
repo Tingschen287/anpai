@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ListedSession 是 `list --json` 输出里的一行。
@@ -38,6 +39,10 @@ func (c *Client) ListSessions(ctx context.Context) ([]ListedSession, error) {
 	out, err := c.exec(ctx, "list", "--json")
 	if err != nil {
 		return nil, err
+	}
+	// 一个会话都没有时，上游 list --json 不输出 JSON，只打一行「No sessions found in profile …」（cmd/agent-deck/main.go handleList）
+	if t := strings.TrimSpace(string(out)); strings.HasPrefix(t, "No sessions found") {
+		return nil, nil
 	}
 	var sessions []ListedSession
 	if err := json.Unmarshal(out, &sessions); err != nil {

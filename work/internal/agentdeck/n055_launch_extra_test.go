@@ -85,3 +85,15 @@ func TestLaunchRefusesUndeclarableExtra(t *testing.T) {
 		t.Fatalf("不带空白的 参数=取值 照常：%v", err)
 	}
 }
+
+// 一个会话都没有时上游 list --json 只打一行字，不是 JSON：按空表处理（n055：侧栏状态改用它读）。
+func TestListSessionsEmptyProfile(t *testing.T) {
+	dir := t.TempDir()
+	bin := dir + "/agent-deck"
+	os.WriteFile(bin, []byte("#!/bin/sh\necho \"No sessions found in profile 'deck'.\"\n"), 0o755)
+	c, _ := NewClient(bin, "deck", "", "")
+	got, err := c.ListSessions(context.Background())
+	if err != nil || len(got) != 0 {
+		t.Fatalf("%v %v", got, err)
+	}
+}
