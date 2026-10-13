@@ -2,7 +2,11 @@ package deckui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,6 +27,17 @@ import (
 type API interface {
 	Fetch(ctx context.Context) (Data, error)
 	View(ctx context.Context, op, session string) error
+	// StartMain 为项目起主 agent（n055：侧栏按 m，与 deck agent start-main 走同一个接口、同一套准入）
+	StartMain(ctx context.Context, project string) (StartMainResult, error)
+}
+
+// StartMainResult 是 POST /v1/projects/{id}/main 的结果：开成（201）或等 owner 批准（202 pending）。
+type StartMainResult struct {
+	Session        deckstore.Session `json:"session"`
+	BriefDelivered bool              `json:"brief_delivered"`
+	Note           string            `json:"note"`
+	Pending        string            `json:"pending"`
+	Next           string            `json:"next"`
 }
 
 // DeckAPI 走 deckd 的 unix socket。
@@ -52,6 +67,29 @@ func (a DeckAPI) Fetch(ctx context.Context) (Data, error) {
 func (a DeckAPI) View(ctx context.Context, op, session string) error {
 	var out any
 	return a.C.Do(ctx, "POST", "/v1/view", map[string]string{"op": op, "session": session}, &out)
+}
+
+// StartMain 起主 agent。每次都是新的启动请求 id（失败或等批准之后再按一次就是新的请求）。
+func (a DeckAPI) StartMain(ctx context.Context, project string) (StartMainResult, error) {
+	var out StartMainResult
+	b := make([]byte, 8)
+	rand.Read(b)
+	err := a.C.WithTimeout(deckclient.LongTimeout).Do(ctx, "POST", "/v1/projects/"+url.PathEscape(project)+"/main",
+		map[string]string{"request_id": "req-" + hex.EncodeToString(b)}, &out)
+	return out, err
+}
+
+// startMainText 是起主 agent 的结果说明（侧栏底部显示）；ok 为 false 时按出错显示。
+func startMainText(project string, r StartMainResult, err error) (text string, ok bool) {
+	switch {
+	case err != nil:
+		return fmt.Sprintf("起「%s」的主 agent 失败：%s", project, errText(err)), false
+	case r.Pending != "":
+		return fmt.Sprintf("「%s」的主 agent 要先等你在右栏批准（%s），批准后选中项目再按一次 m", project, r.Pending), true
+	case r.Note != "":
+		return oneLine(deckstore.Clean(fmt.Sprintf("已起「%s」的主 agent：%s", project, r.Note), 160)), true
+	}
+	return fmt.Sprintf("已起「%s」的主 agent", project), true
 }
 
 // errText 把错误清洗成一行可显示的文字。
@@ -139,6 +177,8 @@ type loop struct {
 	data     chan Data
 	errText  string
 	errUntil time.Time
+	info     string // 动作的结果说明（绿色），显示 12 秒
+	infoTill time.Time
 }
 
 func newLoop(api API) *loop {
@@ -193,7 +233,26 @@ func (l *loop) merge(d Data) Data {
 	if l.errText != "" && time.Now().Before(l.errUntil) && d.Err == "" {
 		d.Err = l.errText
 	}
+	if l.info != "" && time.Now().Before(l.infoTill) {
+		d.Info = l.info
+	}
 	return d
+}
+
+// say 在底部显示一条结果说明：ok 为 false 时按出错显示。
+func (l *loop) say(text string, ok bool) {
+	if ok {
+		l.info, l.infoTill, l.errText = text, time.Now().Add(12*time.Second), ""
+	} else {
+		l.errText, l.errUntil, l.info = text, time.Now().Add(12*time.Second), ""
+	}
+}
+
+// startedMain 是后台起主 agent 的结果（交回主循环处理，免得并发改界面状态）。
+type startedMain struct {
+	project string
+	res     StartMainResult
+	err     error
 }
 
 // RunSidebar 跑左侧会话栏。
@@ -225,6 +284,22 @@ func RunSidebar(api API, layoutSock string) error {
 			selectCenter(layoutSock)
 		}
 	}
+	// 起主 agent 要等上游起 CLI、送 brief（可能一分钟以上）：放到后台，结果经 started 交回；同一个项目在起时不重复发
+	started := make(chan startedMain, 4)
+	starting := map[string]bool{}
+	startMain := func(project string) {
+		if project == "" || starting[project] {
+			return
+		}
+		starting[project] = true
+		l.say(fmt.Sprintf("正在起「%s」的主 agent……", project), true)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), deckclient.LongTimeout)
+			defer cancel()
+			r, err := api.StartMain(ctx, project)
+			started <- startedMain{project, r, err}
+		}()
+	}
 	tick := time.NewTicker(time.Second) // 让出错提示按时消失
 	defer tick.Stop()
 	for {
@@ -234,6 +309,18 @@ func RunSidebar(api API, layoutSock string) error {
 			sb.CellW, sb.CellH = cellSize()
 			last = ""
 		case <-tick.C:
+		case r := <-started:
+			delete(starting, r.project)
+			text, ok := startMainText(r.project, r.res, r.err)
+			l.say(text, ok)
+			if r.err == nil && r.res.Pending == "" && r.res.Session.AgentDeckID != "" {
+				// 开成：换进中间（停在启动确认上时 deckd 已经换过去，再换一次无妨）
+				if l.act("open", r.res.Session.AgentDeckID) == nil {
+					selectCenter(layoutSock)
+				}
+				l.say(text, ok) // act 成功会清掉提示，补回来
+			}
+			l.refresh()
 		case ev, ok := <-d.events:
 			if !ok {
 				return nil
@@ -241,10 +328,12 @@ func RunSidebar(api API, layoutSock string) error {
 			list := sb.Data.Ordered()
 			switch {
 			case ev.Mouse != nil && ev.Mouse.Wheel != 0:
-				sb.Sel = max(0, min(len(list)-1, sb.Sel+ev.Mouse.Wheel))
+				sb.Move(ev.Mouse.Wheel)
 			case ev.Mouse != nil && ev.Mouse.Press && ev.Mouse.Button == 0:
-				if i, eye, ok := sb.Hit(ev.Mouse.X, ev.Mouse.Y); ok {
-					sb.Sel = i
+				if p, ok := sb.HitProject(ev.Mouse.Y); ok {
+					sb.Proj = p // 点项目标题只选中，不起任何东西
+				} else if i, eye, ok := sb.Hit(ev.Mouse.X, ev.Mouse.Y); ok {
+					sb.Proj, sb.Sel = "", i
 					if eye && sb.Data.IsOpen(list[i]) {
 						l.act("hide", list[i].AgentDeckID)
 					} else {
@@ -252,13 +341,17 @@ func RunSidebar(api API, layoutSock string) error {
 					}
 				}
 			case ev.Key == "up" || ev.Key == "k":
-				sb.Sel = max(0, sb.Sel-1)
+				sb.Move(-1)
 			case ev.Key == "down" || ev.Key == "j":
-				sb.Sel = min(len(list)-1, sb.Sel+1)
+				sb.Move(1)
+			case ev.Key == "m":
+				startMain(sb.SelectedProject())
 			case ev.Key == "enter" || ev.Key == "o":
-				open(sb.Sel)
+				if sb.Proj == "" {
+					open(sb.Sel)
+				}
 			case ev.Key == "h":
-				if sb.Sel < len(list) && sb.Data.IsOpen(list[sb.Sel]) {
+				if sb.Proj == "" && sb.Sel < len(list) && sb.Data.IsOpen(list[sb.Sel]) {
 					l.act("hide", list[sb.Sel].AgentDeckID)
 				}
 			case ev.Key == "esc" || ev.Key == "f10":

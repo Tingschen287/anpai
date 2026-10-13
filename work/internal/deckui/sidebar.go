@@ -22,6 +22,7 @@ type Data struct {
 	Sessions []SessionInfo
 	View     viewstate.State
 	Err      string // 取数据或做动作出的错（已清洗）
+	Info     string // 动作的结果说明（n055：起主 agent 等），绿色显示
 }
 
 func contains(xs []string, x string) bool {
@@ -52,6 +53,7 @@ func (d Data) IsTaken(x SessionInfo) bool {
 
 // Group 是一个项目和它的会话（主 agent 在前，其余按创建先后）。
 type Group struct {
+	ID       string // 项目 id
 	Name     string
 	Sessions []SessionInfo
 }
@@ -72,7 +74,7 @@ func (d Data) Groups() []Group {
 			}
 			return list[i].CreatedAt.Before(list[j].CreatedAt)
 		})
-		out = append(out, Group{Name: name, Sessions: list})
+		out = append(out, Group{ID: id, Name: name, Sessions: list})
 		seen[id] = true
 	}
 	for _, p := range d.Projects {
@@ -100,6 +102,27 @@ func (d Data) Ordered() []SessionInfo {
 	var out []SessionInfo
 	for _, g := range d.Groups() {
 		out = append(out, g.Sessions...)
+	}
+	return out
+}
+
+// Entry 是侧栏里可以选中的一行：项目标题（Session 为 -1）或会话（Ordered 里的下标）。n055 起项目标题也能选，
+// 新建、还没有会话的项目才能用键盘选到、按 m 起主 agent。
+type Entry struct {
+	Project string
+	Session int
+}
+
+// Entries 是键盘上下移动的先后：每个项目先是标题，再是它的会话。
+func (d Data) Entries() []Entry {
+	var out []Entry
+	idx := 0
+	for _, g := range d.Groups() {
+		out = append(out, Entry{Project: g.ID, Session: -1})
+		for range g.Sessions {
+			out = append(out, Entry{Project: g.ID, Session: idx})
+			idx++
+		}
 	}
 	return out
 }
@@ -134,7 +157,8 @@ func status(x SessionInfo) (dot, text string) {
 // Sidebar 是左侧会话栏。
 type Sidebar struct {
 	Data   Data
-	Sel    int    // 键盘选中的会话（Ordered 里的下标）
+	Sel    int    // 键盘选中的会话（Ordered 里的下标）；Proj 不空时不用
+	Proj   string // 键盘选中的是这个项目的标题行（n055）
 	Mode   string // sixel、blocks、none
 	CellW  int    // 字符格像素宽高（Sixel 用；取不到按 10×20）
 	CellH  int
@@ -145,17 +169,59 @@ type Sidebar struct {
 }
 
 type hit struct {
-	idx int
-	eye int // 眼睛所在的列（行尾）；-1 表示这一行没有眼睛
+	idx  int
+	eye  int    // 眼睛所在的列（行尾）；-1 表示这一行没有眼睛
+	proj string // 项目标题行：项目 id（idx 为 -1）
 }
 
 // Hit 返回点在 (x, y) 的是哪个会话、是否点在眼睛上。
 func (s *Sidebar) Hit(x, y int) (idx int, eye bool, ok bool) {
 	h, ok := s.hits[y]
-	if !ok {
+	if !ok || h.idx < 0 {
 		return 0, false, false
 	}
 	return h.idx, h.eye >= 0 && x >= h.eye-1, true
+}
+
+// HitProject 返回点在第 y 行的项目标题（n055）。
+func (s *Sidebar) HitProject(y int) (string, bool) {
+	h, ok := s.hits[y]
+	if !ok || h.idx >= 0 || h.proj == "" {
+		return "", false
+	}
+	return h.proj, true
+}
+
+// Move 按 Entries 上下移动选中行（项目标题与会话都算一行）。
+func (s *Sidebar) Move(delta int) {
+	es := s.Data.Entries()
+	if len(es) == 0 {
+		return
+	}
+	cur := 0
+	for i, e := range es {
+		if s.Proj != "" && e.Session < 0 && e.Project == s.Proj || s.Proj == "" && e.Session == s.Sel {
+			cur = i
+			break
+		}
+	}
+	e := es[max(0, min(len(es)-1, cur+delta))]
+	if e.Session < 0 {
+		s.Proj = e.Project
+	} else {
+		s.Proj, s.Sel = "", e.Session
+	}
+}
+
+// SelectedProject 是选中行所属的项目（项目标题或会话所在项目）。
+func (s *Sidebar) SelectedProject() string {
+	if s.Proj != "" {
+		return s.Proj
+	}
+	if list := s.Data.Ordered(); s.Sel >= 0 && s.Sel < len(list) {
+		return list[s.Sel].Project
+	}
+	return ""
 }
 
 const logoCols, logoRows = 4, 2
@@ -210,13 +276,18 @@ func (s *Sidebar) Render(w, h int) Frame {
 		idx   int // -1 表示不是会话行
 		eye   bool
 		image string
+		proj  string // 项目标题行的项目 id
 	}
 	var body []row
 	idx := 0
 	for _, g := range s.Data.Groups() {
-		body = append(body, row{text: Fit(fmt.Sprintf("\x1b[1m ▾ %s\x1b[0m\x1b[38;5;242m · %d\x1b[0m", sanitize(g.Name), len(g.Sessions)), w), idx: -1})
+		hb := ""
+		if s.Proj != "" && s.Proj == g.ID {
+			hb = "\x1b[48;5;236m"
+		}
+		body = append(body, row{text: Fit(fmt.Sprintf("%s\x1b[1m ▾ %s\x1b[22m\x1b[38;5;242m · %d\x1b[0m", hb, sanitize(g.Name), len(g.Sessions)), w), idx: -1, proj: g.ID})
 		if len(g.Sessions) == 0 {
-			body = append(body, row{text: "\x1b[38;5;242m   （还没有会话）\x1b[0m", idx: -1})
+			body = append(body, row{text: "\x1b[38;5;242m   （还没有会话 · 选中项目按 m 起主 agent）\x1b[0m", idx: -1})
 		}
 		for _, x := range g.Sessions {
 			dot, st := status(x)
@@ -224,7 +295,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 			if s.Data.IsFocus(x) {
 				bar = "\x1b[38;5;39m▌\x1b[0m"
 			}
-			if idx == s.Sel {
+			if s.Proj == "" && idx == s.Sel {
 				bg = "\x1b[48;5;236m"
 			}
 			lg := s.logoLines(x.Tool)
@@ -258,7 +329,10 @@ func (s *Sidebar) Render(w, h int) Frame {
 		}
 		body = append(body, row{idx: -1})
 	}
-	footer := []string{Fit("\x1b[38;5;242m ↑↓ 选  ⏎ 打开  h 放回后台\x1b[0m", w)}
+	footer := []string{Fit("\x1b[38;5;242m ↑↓ 选  ⏎ 打开  h 放回后台  m 起主 agent\x1b[0m", w)}
+	if s.Data.Info != "" {
+		footer = append([]string{Fit("\x1b[38;5;42m "+s.Data.Info+"\x1b[0m", w)}, footer...)
+	}
 	if s.Data.Err != "" {
 		footer = append([]string{Fit("\x1b[38;5;196m "+s.Data.Err+"\x1b[0m", w)}, footer...)
 	}
@@ -266,7 +340,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 	// 让选中的会话可见
 	selRow := -1
 	for i, r := range body {
-		if r.idx == s.Sel && r.eye {
+		if s.Proj == "" && r.idx == s.Sel && r.eye || s.Proj != "" && r.proj == s.Proj {
 			selRow = i
 		}
 	}
@@ -283,6 +357,9 @@ func (s *Sidebar) Render(w, h int) Frame {
 		r := body[i]
 		y := len(lines)
 		lines = append(lines, r.text)
+		if r.proj != "" {
+			s.hits[y] = hit{idx: -1, eye: -1, proj: r.proj}
+		}
 		if r.idx >= 0 {
 			e := -1
 			if r.eye {
