@@ -2,7 +2,6 @@ package deckd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
-	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
 // n055：CLI 启动时的确认（目录信任等）。
@@ -109,7 +107,8 @@ func ComposerReady(tool, screen string) bool {
 		for _, l := range tail {
 			shortcuts = shortcuts || strings.Contains(l, "for shortcuts")
 		}
-		for _, l := range tail {
+		for i := len(tail) - 1; i >= 0; i-- { // 从底往上：历史里 owner 发过的消息也以 › 开头，输入框在最下面（attempt 4 自查）
+			l := tail[i]
 			if strings.HasPrefix(l, "›") && !menuItem.MatchString(l) {
 				// 输入框只在为空或正好是占位时算就绪：其余文字都当 owner 没提交的草稿，免得和 brief 一起提交（评审 2 R3）。
 				// Codex 0.162 二进制里只有这一个正常占位；「Waiting for startup」是启动中的占位，不算就绪（attempt 2 自查）
@@ -196,7 +195,7 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	default:
 		note = dialogNote(x, what)
 	}
-	s.markAwaiting(x, key, id, note)
+	s.markAwaiting(x, key, id, note, true)
 	s.bgWG.Add(1)
 	go func() { defer s.bgWG.Done(); s.briefAfterOwner(x, key, id, brief, permit) }()
 	return note
@@ -210,11 +209,18 @@ func dialogNote(x deckstore.Session, what string) string {
 	return fmt.Sprintf("CLI 停在%s上：请把它显示在中间、按 F2 接管后自己选，交还后 deck 会自动送任务", what)
 }
 
-// markAwaiting 记下「等 owner 处理」、通知；主 agent 在 owner 没接管别的会话时换进中间并放开输入。
-func (s *Server) markAwaiting(x deckstore.Session, key, id, note string) {
+// markAwaiting 记下「等 owner 处理」、通知。open 为真（owner 刚起的会话）时，主 agent 在 owner 没接管别的会话时换进中间；
+// 后台等待里补记时 open 为假：不切中间（owner 可能正在别的会话里打字，attempt 4 自查），只在它已经显示在中间时放开输入。
+func (s *Server) markAwaiting(x deckstore.Session, key, id, note string, open bool) {
 	s.store.SetAwaitingOwner(key, note)
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
 	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, note), "deckd")
+	if !open {
+		if x.Role == "main" && s.view != nil {
+			s.view.OpenMainInput(id)
+		}
+		return
+	}
 	if x.Role == "main" && s.view != nil && len(s.view.State().TakenOver) == 0 {
 		// 显示到中间（新主 agent 还不在打开集合里，用 Open），按最新状态放开输入。owner 正接管着别的会话时不动中间：
 		// 切走会把接管交还（自查）；owner 仍可在侧栏点它。失败只影响方便程度，记在通知里
@@ -263,7 +269,7 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 		if err == nil {
 			if d := StartupDialog(screen); d != "" {
 				if note := dialogNote(x, d); cur.AwaitingOwner != note {
-					s.markAwaiting(x, key, id, note) // 之前没认出（例如重启前还在看画面）：补记等 owner、放开输入（评审 2 R1）
+					s.markAwaiting(x, key, id, note, false) // 之前没认出（例如重启前还在看画面）：补记等 owner、放开输入（评审 2 R1）
 				}
 				prev = ""
 				continue
@@ -286,7 +292,8 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 
 // sendFirstBrief 送一次第一条 brief；返回 true 表示这件事结束了（送达、送达未确认或不该再试）。
 func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, id, brief string, permit lease.Permit) bool {
-	send := func() error { return s.sendFirstMessage(ctx, key, permit, id, brief) }
+	called := false
+	send := func() error { called = true; return s.sendFirstMessage(ctx, key, permit, id, brief) }
 	var err error
 	if x.Role == "main" {
 		if s.view != nil {
@@ -300,8 +307,10 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 		} else if err = send(); err == nil || agentdeck.IsDeliveryUnconfirmed(err) {
 			s.store.ConfirmBrief(key)
 		}
-		if errors.Is(err, viewstate.ErrOwnerTyping) {
-			return false // owner 刚在中间打过字：稍后再送
+		if !called {
+			// 送达门在真正发送之前就挡下（owner 刚打过字、中间 client 正被替换、读不到输入时间等）：什么都没送，下一轮再试
+			// （attempt 4 自查：原先除了 owner 打字，其余都当发送失败、首条 brief 永久丢掉）
+			return false
 		}
 	} else {
 		// 子 agent：owner 接管着就等交还（自动许可拿不到）
@@ -310,6 +319,13 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 			return false
 		}
 		err = s.sendFirstMessage(ctx, key, p, id, brief)
+	}
+	if err != nil && !agentdeck.IsDeliveryUnconfirmed(err) && ctx.Err() != nil {
+		// deckd 正在关闭（例如 owner 关了布局），发送被打断：送没送到不确定，不记失败，保留启动期与「正在送」，
+		// 重启时按「不确定」处理（attempt 4 自查：原先记成失败，绕过了评审 2 R2 的处理）
+		return true
+	}
+	if x.Role != "main" {
 		s.store.FinishStart(key) // 有结果了（送达、未确认或失败）：解除启动期的写入限制
 	}
 	switch {
@@ -367,6 +383,10 @@ func (s *Server) ResumeAwaiting() {
 		permit, err := s.agents.leases.Manual(x.AgentDeckID)
 		if err != nil {
 			continue
+		}
+		if x.AwaitingOwner == "" {
+			// 与正常启动的「还没就绪」一致：记下等待、对 owner 放开输入（不切中间），看到确认框或输入框再往下走（attempt 4 自查）
+			s.markAwaiting(x, x.Key, x.AgentDeckID, "deckd 重启时它还在启动、还没出现输入框：deck 等到输入框后自动送第一条 brief，请在中间看一眼", false)
 		}
 		x := x
 		s.bgWG.Add(1)
