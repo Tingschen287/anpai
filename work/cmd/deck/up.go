@@ -159,26 +159,44 @@ func ensureUpstream(dirs deckstore.Dirs, spec layout.Spec, listen string) (addr,
 		return "", ""
 	}
 	ctx := context.Background()
-	err = agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token)
-	if err == nil {
-		return addr, path
+	foreign := func(err error) (string, string) {
+		warnAndWait("%v。\n"+
+			"deck 不往这个端口发 token：关掉占着它的程序再 deck up，或用 -upstream-listen 换一个端口。\n"+
+			"这次侧栏的运行状态会显示「未知」，其余功能照常。", err)
+		return "", ""
 	}
-	if !errors.Is(err, agentdeck.ErrWebDown) {
-		warnAndWait("%s 上有服务在听，但不是能用的 agent-deck 状态服务（%v）。\n"+
-			"可能是你手动起的 agent-deck web 用了别的 token，或别的程序占着这个端口：关掉它再 deck up，deck 会自己起一个。\n"+
-			"这次侧栏的运行状态会显示「未知」，其余功能照常。", addr, err)
-		return "", "" // 不把 token 交给来历不明的监听者（自查）
+	// 带 token 探测之前先认清端口上是谁（n055 评审 1 B1）：只有本用户的 agent-deck 才发 token；没人听才由 deck 起一个
+	switch err := agentdeck.CheckWebListener(addr); {
+	case err == nil:
+		if err := agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token); err != nil {
+			warnAndWait("%s 上是你自己的 agent-deck，但用这个 token 读不了（%v）：可能是你手动起的、用了别的 token 或 profile。\n"+
+				"关掉它再 deck up，deck 会自己起一个。这次侧栏的运行状态会显示「未知」，其余功能照常。", addr, err)
+			return "", ""
+		}
+		return addr, path
+	case !errors.Is(err, agentdeck.ErrWebDown):
+		return foreign(err)
 	}
 	cmd := agentdeck.WebServeCommand("agent-deck", upstreamProfile, addr, path)
 	if err := agentdeck.LayoutBackgroundWindow(ctx, spec.LayoutSocket, "deck", "agent-deck-web", cmd); err != nil {
 		warnAndWait("起 agent-deck 状态服务失败：%v\n侧栏的运行状态会显示「未知」，其余功能照常。", err)
 		return addr, path
 	}
+	var err2 error
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
-		if err = agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token); err == nil {
-			return addr, path
+		// 起来之后同样先认清是不是自己刚起的那个，再带 token 读
+		switch e := agentdeck.CheckWebListener(addr); {
+		case e == nil:
+			if err2 = agentdeck.ProbeWeb(ctx, upstreamProfile, addr, token); err2 == nil {
+				return addr, path
+			}
+		case errors.Is(e, agentdeck.ErrWebDown):
+			err2 = e
+		default:
+			return foreign(e) // 起的同时被别的程序抢了端口
 		}
 	}
+	err = err2
 	warnAndWait("agent-deck 状态服务 15 秒内没有就绪（%v）。它在布局的后台窗口 agent-deck-web 里，起来后侧栏会自动显示状态。", err)
 	return addr, path
 }

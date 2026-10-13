@@ -81,6 +81,41 @@ func StartupDialog(screen string) string {
 	return ""
 }
 
+// ComposerReady：画面末尾是这个 CLI 真正的输入框（n055 评审 1 B3：两次相同的非空画面不等于就绪，欢迎或加载画面停久了，
+// 之后才出的确认框会被上游的就绪判断当成输入框，brief 连回车打进去）。按真机画面（Claude Code 2.1.296、Codex 0.x，
+// n051/n055 端到端）认：
+//   - claude：一行以 ❯ 开头（顶格，后面是空格或不换行空格），上一行是一整条 ─ 横线（输入框的上边）；
+//     信任框的「 ❯ No, exit」前面有空格、上面也不是横线；
+//   - codex：一行以 › 开头（顶格、后面不是编号），画面末尾有「for shortcuts」；
+//   - 其他工具没有可靠的输入框特征，按「画面稳定、没有确认」判断（报告写明）。
+func ComposerReady(tool, screen string) bool {
+	tail := screenTail(screen)
+	switch tool {
+	case "claude":
+		for i := 1; i < len(tail); i++ {
+			l := tail[i]
+			if strings.HasPrefix(l, "❯ ") || strings.HasPrefix(l, "❯\u00a0") || l == "❯" {
+				if prev := strings.TrimSpace(tail[i-1]); len([]rune(prev)) >= 10 && strings.Trim(prev, "─") == "" {
+					return true
+				}
+			}
+		}
+		return false
+	case "codex":
+		shortcuts := false
+		for _, l := range tail {
+			shortcuts = shortcuts || strings.Contains(l, "for shortcuts")
+		}
+		for _, l := range tail {
+			if strings.HasPrefix(l, "›") && !menuItem.MatchString(l) {
+				return shortcuts
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // startupTiming 是看画面的节奏；测试换成很短的。
 type startupTiming struct {
 	poll   time.Duration // 两次取画面的间隔
@@ -97,13 +132,13 @@ func (s *Server) startupTiming() startupTiming {
 	return defaultStartupTiming
 }
 
-// notReady 是 settleScreen 在等不到稳定画面（取不到画面、一直空屏或一直在变）时给的说明：这时不直接送，
-// 走与启动确认同一条后台路径，等画面稳定、没有确认再送（自查：退回直送会让之后才出现的确认框挨打字）。
-const notReady = "启动（取不到画面或画面还没稳定）"
+// notReady 是 settleScreen 在等不到就绪画面（取不到画面、一直空屏、一直在变或认不出输入框）时给的说明：这时不直接送，
+// 走与启动确认同一条后台路径，等到真正的输入框再送（自查与评审 1 B3：退回直送会让之后才出现的确认框挨打字）。
+const notReady = "启动（取不到画面或还没出现输入框）"
 
-// settleScreen 等 CLI 启动后的画面稳定：画面不空且连续两次一样，或已经看到启动确认。返回确认的说明；稳定且没有确认返回空；
-// 等到上限仍不稳定返回 notReady。
-func (s *Server) settleScreen(ctx context.Context, id string) string {
+// settleScreen 等 CLI 启动后就绪：画面连续两次一样、没有启动确认、并且认得出这个 CLI 的输入框（ComposerReady）。
+// 返回确认的说明；就绪返回空；等到上限仍没就绪返回 notReady。
+func (s *Server) settleScreen(ctx context.Context, id, tool string) string {
 	tm := s.startupTiming()
 	deadline := time.Now().Add(tm.settle)
 	prev := ""
@@ -113,7 +148,7 @@ func (s *Server) settleScreen(ctx context.Context, id string) string {
 			if d := StartupDialog(screen); d != "" {
 				return d
 			}
-			if strings.TrimSpace(screen) != "" && screen == prev {
+			if strings.TrimSpace(screen) != "" && screen == prev && ComposerReady(tool, screen) {
 				return ""
 			}
 			prev = screen
@@ -140,7 +175,7 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	var note string
 	switch {
 	case what == notReady:
-		note = "CLI 还没就绪（取不到画面或画面一直在变）：deck 等它就绪、确认没有启动确认后自动送第一条消息，请在中间看一眼"
+		note = "CLI 还没就绪（取不到画面或还没出现输入框）：deck 等到输入框、确认没有启动确认后自动送第一条消息，请在中间看一眼"
 	case x.Role == "main":
 		note = fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选，选完 deck 会自动送第一条 brief", what)
 	default:
@@ -174,11 +209,11 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 		if sleepCtx(ctx, tm.poll) != nil {
 			return
 		}
-		if cur, ok := s.store.Session(key); !ok || cur.AwaitingOwner == "" || cur.Status != deckstore.StatusRunning {
-			return // 已送过、会话已结束或被停掉：不再送
+		if cur, ok := s.store.Session(key); !ok || !cur.Starting || cur.Status != deckstore.StatusRunning {
+			return // 已有结果、会话已结束或被停掉：不再送
 		}
 		if time.Now().After(deadline) {
-			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上，没有送第一条 brief；处理完后请停掉这个会话重新开", int(tm.await.Minutes()))
+			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），没有送第一条 brief；处理完后请停掉这个会话重新开", int(tm.await.Minutes()))
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 			return
@@ -188,7 +223,7 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 			prev = ""
 			continue
 		}
-		if screen != prev { // 画面还在变（CLI 刚从确认进到输入框）：等它连续两次一样
+		if screen != prev || !ComposerReady(x.Tool, screen) { // 画面还在变，或还没出现输入框：接着等
 			prev = screen
 			continue
 		}
@@ -224,9 +259,8 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 		if perr != nil {
 			return false
 		}
-		if err = s.agents.upstream.SendMessage(ctx, p, id, brief); err == nil || agentdeck.IsDeliveryUnconfirmed(err) {
-			s.store.SetAwaitingOwner(key, "")
-		}
+		err = s.agents.upstream.SendMessage(ctx, p, id, brief)
+		s.store.FinishStart(key) // 有结果了（送达、未确认或失败）：解除启动期的写入限制
 	}
 	switch {
 	case err == nil:
@@ -237,7 +271,7 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的第一条 brief 已送出，但上游没证实提交，请在中间窗格看一眼", x.Title), "deckd")
 	default:
 		why := "启动确认处理后送第一条 brief 失败：" + deckstore.Clean(err.Error(), 200)
-		s.store.SetAwaitingOwner(key, "")
+		s.store.FinishStart(key)
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
 		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 	}
@@ -252,7 +286,15 @@ func (s *Server) ResumeAwaiting() {
 	}
 	set := s.store.Settings()
 	for _, x := range s.store.Sessions("") {
-		if x.AwaitingOwner == "" || x.BriefConfirmed || x.Status != deckstore.StatusRunning || x.AgentDeckID == "" {
+		if !x.StartPending() || x.BriefConfirmed || x.Status != deckstore.StatusRunning || x.AgentDeckID == "" {
+			continue
+		}
+		if x.AwaitingOwner == "" {
+			// 重启时它还在启动期、没停在确认上：第一条消息送没送到不确定（可能刚送完就重启），不补送，请 owner 看一眼
+			why := "deckd 重启时它还在启动，第一条消息送没送到不确定：请在中间看一眼，没收到就停掉它重新开"
+			s.store.FinishStart(x.Key)
+			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
+			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
 			continue
 		}
 		p, ok := set.Project(x.Project)

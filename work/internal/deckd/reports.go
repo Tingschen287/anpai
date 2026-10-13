@@ -209,7 +209,7 @@ func (s *Server) deliverPending(ctx context.Context, st *inferState, project str
 		if main.Role != "main" || main.AgentDeckID == "" || main.Status != deckstore.StatusRunning {
 			continue
 		}
-		if main.AwaitingOwner != "" {
+		if main.StartPending() {
 			// 主 agent 的 CLI 停在启动确认上：汇报留着，等 owner 处理完、第一条 brief 送达后再推（n055 自查 B2：
 			// 确认框在上游看来是空闲，--defer-if-busy 照样打字加回车，等于替 owner 选了）
 			continue
@@ -471,10 +471,17 @@ func (s *Server) expireClaims(now time.Time) {
 var waitPoll = time.Second
 
 // deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
+// errMainStarting：主 agent 还在启动期或停在启动确认上，汇报先不送。
+var errMainStarting = errors.New("主 agent 还在启动或停在启动确认上，汇报先留着")
+
 func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report, now bool) error {
 	sub, _ := s.store.Session(rep.Sub)
 	text := s.reportText(rep)
 	send := func() error {
+		// 写入门里再按最新状态查一次（n055 评审 1 B2：遍历时拿的是快照）：主 agent 还在启动期或停在启动确认上就不送，留在 pending
+		if cur, ok := s.store.Session(main.Key); !ok || cur.StartPending() {
+			return errMainStarting
+		}
 		permit, err := s.agents.leases.Manual(main.AgentDeckID)
 		if err != nil {
 			return err

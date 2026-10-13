@@ -21,10 +21,10 @@ const claudeTrustScreen = ` Accessing workspace:
 
  Enter to confirm · Esc to cancel`
 
-const claudeComposerScreen = `╭──────────────────────────────────────────╮
-│ >                                        │
-╰──────────────────────────────────────────╯
-  ? for shortcuts`
+// Claude Code 2.1.296 的输入框（n055 端到端真机画面）：上下两条横线，中间一行是 ❯ 加不换行空格。
+const claudeComposerScreen = " ▐▛███▛█   Claude Code v2.1.296\n\n" +
+	"──────────────────────────────────────────────────\n❯\u00a0\n──────────────────────────────────────────────────\n" +
+	"  Opus 5.5 | ✍️ 0/1.0m (0%) | demo\n  ⏵⏵ auto mode on (shift+tab to cycle)"
 
 func TestStartupDialogRecognition(t *testing.T) {
 	cases := []struct {
@@ -149,13 +149,14 @@ func TestMainBriefGivesUpAfterAwait(t *testing.T) {
 	if w.up.sendCount() != before {
 		t.Fatal("超时也不该送")
 	}
-	found := false
-	for _, n := range w.store.Notifications(0, "gamma") {
-		found = found || strings.Contains(n.Text, "仍停在启动确认上")
-	}
-	if !found {
-		t.Fatal("超时要通知 owner")
-	}
+	waitUntil(t, "超时要通知 owner", func() bool {
+		for _, n := range w.store.Notifications(0, "gamma") {
+			if strings.Contains(n.Text, "仍停在启动确认上") {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // 等的时候会话被停掉：确认消失后也不再送。
@@ -189,7 +190,7 @@ func TestSubBriefWaitsForDialog(t *testing.T) {
 	if m["brief_delivered"] != false || !strings.Contains(m["note"].(string), "F2") {
 		t.Fatalf("子 agent 停在确认上：不送、提示接管：%v", m)
 	}
-	w.up.setOutput("› \n  ⏎ send")
+	w.up.setOutput(claudeComposerScreen)
 	waitUntil(t, "任务送达", func() bool { return w.up.sendCount() == before+1 })
 	w.up.mu.Lock()
 	last := w.up.sends[len(w.up.sends)-1]

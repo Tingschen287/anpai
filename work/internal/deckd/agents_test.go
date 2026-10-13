@@ -34,6 +34,7 @@ type fakeUp struct {
 	stops     []string
 	stopErr   error
 	paneErr   error // 测试：取画面失败（n055）
+	paneHook  func() // 测试：取画面时先调它（不持锁；n055 评审 1 B2：卡在登记之后、看完画面之前）
 }
 
 func (f *fakeUp) StopSession(_ context.Context, p lease.Permit, id string) error {
@@ -113,9 +114,18 @@ func (f *fakeUp) SendToMain(_ context.Context, p lease.Permit, id, msg string) e
 }
 func (f *fakeUp) PaneOutputPlain(context.Context, string) (string, error) {
 	f.mu.Lock()
+	hook := f.paneHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.output, f.paneErr
 }
+
+// fakeReadyScreen 是 Claude 与 Codex 的输入框都认得出的画面（n055：送第一条消息前要认出输入框，真机画面的写法）。
+const fakeReadyScreen = "──────────────────────────────\n❯\u00a0\n──────────────────────────────\n› \n  ? for shortcuts"
 
 // setOutput 换掉假上游的画面（n055：后台送 brief 的循环会并发读它）。
 func (f *fakeUp) setOutput(s string) {
@@ -158,7 +168,7 @@ func newAgentWorld(t *testing.T) *agentWorld {
 		t.Fatal(err)
 	}
 	t.Cleanup(l.Close)
-	w := &agentWorld{fixture: f, up: &fakeUp{output: "\x1b[31mhello\x1b[0m done"}, leases: l, version: "codex 1.0"}
+	w := &agentWorld{fixture: f, up: &fakeUp{output: "\x1b[31mhello\x1b[0m done\n" + fakeReadyScreen}, leases: l, version: "codex 1.0"}
 	f.srv.WithAgents(w.up, l, func(_ context.Context, bin string) (string, string, error) {
 		return "/usr/bin/" + bin, w.version, nil
 	}, nil)

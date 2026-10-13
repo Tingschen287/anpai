@@ -251,7 +251,11 @@ type Session struct {
 	// AwaitingOwner 不空：CLI 启动时停在确认上（例如目录信任），等 owner 在中间处理，处理完 deck 再送第一条 brief（n055）。
 	// 主 agent 这时中间窗格对 owner 放开输入；内容是给 owner 看的说明
 	AwaitingOwner string `json:"awaiting_owner,omitempty"`
-	Note          string `json:"note,omitempty"`
+	// Starting：会话已登记、第一条消息（brief 或任务）还没有结果。这期间 deck 的其他写入（主 agent 发话、推送汇报、立即送）
+	// 一律不往它打字：CLI 可能正停在启动确认上，而识别要等取到画面（n055 评审 1 B2：登记到识别之间的空窗）。
+	// 第一条消息送达、未确认或失败后清掉
+	Starting bool   `json:"starting,omitempty"`
+	Note     string `json:"note,omitempty"`
 	// 启动请求的指纹（架构稿 §4，n050 评审 R1）：由发起方（n051 的 deck agent）给出，预留时校验并写入批准范围。
 	RequestID  string `json:"request_id"`  // 本次启动请求 id，同一 id 只能预留一次
 	Dir        string `json:"dir"`         // 工作目录（绝对路径）
@@ -543,8 +547,24 @@ func (s *Store) SetGraphAttempt(key, node string, attempt int) error {
 
 // ConfirmBrief 记下主 agent 的第一条 brief 已确认送达。
 func (s *Store) ConfirmBrief(key string) error {
-	return s.setSession(key, func(x *Session) error { x.BriefConfirmed, x.AwaitingOwner = true, ""; return nil })
+	return s.setSession(key, func(x *Session) error {
+		x.BriefConfirmed, x.AwaitingOwner, x.Starting = true, "", false
+		return nil
+	})
 }
+
+// MarkStarting 记下「第一条消息还没有结果」（n055 评审 1 B2）：在会话对外可见（LaunchSucceeded）之前调。
+func (s *Store) MarkStarting(key string) error {
+	return s.setSession(key, func(x *Session) error { x.Starting = true; return nil })
+}
+
+// FinishStart 清掉启动期的标记（第一条消息已有结果：送达、未确认或失败）。
+func (s *Store) FinishStart(key string) error {
+	return s.setSession(key, func(x *Session) error { x.Starting, x.AwaitingOwner = false, ""; return nil })
+}
+
+// StartPending 说明会话现在是否不能被 deck 的其他写入打扰：还在启动期，或 CLI 停在启动确认上等 owner。
+func (x Session) StartPending() bool { return x.Starting || x.AwaitingOwner != "" }
 
 // SetAwaitingOwner 记下（why 不空）或清掉（why 为空）「CLI 停在启动确认上、等 owner 处理」（n055）。
 func (s *Store) SetAwaitingOwner(key, why string) error {

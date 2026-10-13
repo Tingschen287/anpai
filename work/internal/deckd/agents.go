@@ -407,6 +407,11 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			return
 		}
 	}
+	// 先记「启动期」再让会话对外可见：登记成 running 之后、看完画面之前，推送与发话都不能往它打字（n055 评审 1 B2）
+	if err := s.store.MarkStarting(key); err != nil {
+		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下启动状态：%v", id, err)
+		return
+	}
 	if err := s.store.LaunchSucceeded(key, id, tmux); err != nil {
 		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下：%v", id, err)
 		return
@@ -433,11 +438,12 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	note := ""
 	dialog := ""
 	if err == nil {
-		// 先看画面：CLI 停在启动确认（目录信任等）上就不送，等 owner 处理（n055）
-		dialog = s.settleScreen(ctx, id)
+		// 先看画面：CLI 停在启动确认（目录信任等）上、或认不出输入框，就不送，在后台等（n055）
+		dialog = s.settleScreen(ctx, id, x.Tool)
 	}
 	if err != nil {
 		note = "不能送 brief：" + err.Error()
+		s.store.FinishStart(key)
 	} else if dialog != "" {
 		got, _ := s.store.Session(key)
 		note = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
@@ -449,11 +455,15 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			s.store.ConfirmBrief(key)
 			note = "brief 已送出，上游没证实提交，请 owner 在中间窗格看一眼：" + deckstore.Clean(derr.Error(), 160)
 			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的第一条 brief 已送出，但上游没证实提交，请在中间窗格看一眼", x.Title), "deckd")
+		} else {
+			s.store.FinishStart(key)
 		}
 	} else {
 		delivered = true
 		if x.Role == "main" {
 			s.store.ConfirmBrief(key)
+		} else {
+			s.store.FinishStart(key)
 		}
 	}
 	if note != "" {
@@ -726,10 +736,10 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "%s", busySubText)
 		return
 	}
-	if cur, ok := s.store.Session(x.Key); ok && cur.AwaitingOwner != "" {
-		// 它的 CLI 停在启动确认（目录信任等）上：确认只归 owner，打进去的字加回车就替 owner 选了（n055 自查 B1）。
-		// deck 会在 owner 处理完后自动送它的任务，不要重发
-		fail(w, http.StatusConflict, "%s 的 CLI 还停在启动确认上，等 owner 处理；处理完 deck 会自动把任务送进去，不要重发", x.Key)
+	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() {
+		// 它还在启动期，或 CLI 停在启动确认（目录信任等）上：确认只归 owner，打进去的字加回车就替 owner 选了（n055 自查 B1、评审 1 B2）。
+		// deck 会在 CLI 就绪、owner 处理完确认后自动送它的任务，不要重发
+		fail(w, http.StatusConflict, "%s 还在启动，或 CLI 停在启动确认上等 owner 处理；deck 会在之后自动把任务送进去，不要重发", x.Key)
 		return
 	}
 	permit, err := s.agents.leases.Automatic(x.AgentDeckID)
