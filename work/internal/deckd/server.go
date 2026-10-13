@@ -226,6 +226,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if err := s.stopped(); err != nil {
 		out["ok"], out["broken"] = false, err.Error()
 	}
+	if e := s.activity.Err(); e != "" {
+		out["activity_error"] = deckstore.Clean(e, 300) // 会话状态读不到的原因（侧栏圆点显示「未知」时看这里）
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

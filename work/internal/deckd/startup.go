@@ -96,8 +96,10 @@ func ComposerReady(tool, screen string) bool {
 			l := tail[i]
 			if strings.HasPrefix(l, "❯ ") || strings.HasPrefix(l, "❯\u00a0") || l == "❯" {
 				if prev := strings.TrimSpace(tail[i-1]); len([]rune(prev)) >= 10 && strings.Trim(prev, "─") == "" {
-					// 输入框要是空的：owner 在里面留了半句草稿时不送，免得 brief 接在草稿后面一起提交（attempt 2 自查）
-					return strings.TrimSpace(strings.TrimPrefix(l, "❯")) == ""
+					// 输入框要是空的：owner 在里面留了半句草稿时不送，免得 brief 接在草稿后面一起提交（attempt 2 自查）。
+					// 新会话空输入框里的灰色提示 Try "…" 不算草稿（与上游 internal/send/guard.go IsComposerPlaceholder 同一规则）
+					body := strings.TrimSpace(strings.TrimPrefix(l, "❯"))
+					return body == "" || strings.HasPrefix(body, `Try "`) && strings.HasSuffix(body, `"`)
 				}
 			}
 		}
@@ -212,8 +214,19 @@ func (s *Server) briefAfterOwner(x deckstore.Session, key, id, brief string, per
 		if sleepCtx(ctx, poll) != nil {
 			return
 		}
-		if cur, ok := s.store.Session(key); !ok || !cur.Starting || cur.Status != deckstore.StatusRunning {
+		cur, ok := s.store.Session(key)
+		if !ok || !cur.Starting || cur.Status != deckstore.StatusRunning {
 			return // 已有结果、会话已结束或被停掉：不再送
+		}
+		if alive := s.agents.bypass.Alive; alive != nil && cur.TmuxSession != "" {
+			// CLI 已经退出（例如 owner 在信任框里选了 No, exit）：不再等，记为已停止（自查：原先会一直轮询下去）
+			if up, err := alive(ctx, cur.TmuxSession); err == nil && !up {
+				why := "CLI 已经退出（可能在启动确认上选了退出），没有送第一条消息"
+				s.store.FinishStart(key)
+				s.store.SetSessionStatus(key, deckstore.StatusStopped, why)
+				s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+				return
+			}
 		}
 		if !told && time.Now().After(deadline) {
 			// 等久了：说明一次，之后放慢继续等（attempt 2 自查：原先到点就放弃，启动期标记永远不清、owner 之后处理了也不送）
