@@ -3,6 +3,8 @@ package deckui
 import (
 	"context"
 	"fmt"
+	"image"
+	"image/draw"
 	"os"
 	"time"
 
@@ -13,9 +15,10 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 )
 
-// QuotaFrame 画额度面板的一屏（n056）：文字由 panels.QuotaLines 给出，sixel 模式下在每个来源名字那两行的第 1 列贴 logo。
-// err 非空时只写原因（不显示旧数据冒充新数据）。sixelOf 给出某个工具 logo 的 sixel 数据（空表示不画）。
-func QuotaFrame(qs []dashquota.ToolQuota, err error, w, h int, mode string, sixelOf func(tool string) string) Frame {
+// QuotaFrame 画额度面板的一屏（n056）：文字由 panels.QuotaLines 给出，sixel 模式下在每个来源那一块的第 1 列贴 logo，
+// 图高等于这一块的行数、logo 在其中垂直居中。err 非空时只写原因（不显示旧数据冒充新数据）。
+// sixelOf 给出某个工具占 rows 行的 logo sixel（空表示不画）。
+func QuotaFrame(qs []dashquota.ToolQuota, err error, w, h int, mode string, sixelOf func(tool string, rows int) string) Frame {
 	if err != nil {
 		// 错误文本可能带上游内容：显示前清洗（同 n050 评审 B7）
 		return Frame{Lines: []string{"\x1b[1m额度\x1b[0m", "\x1b[38;5;203m取不到：" + oneLine(deckstore.Clean(err.Error(), 300)) + "\x1b[0m"}}
@@ -23,10 +26,10 @@ func QuotaFrame(qs []dashquota.ToolQuota, err error, w, h int, mode string, sixe
 	lines, logos := panels.QuotaLines(qs, w, mode)
 	var ims []Image
 	for _, lg := range logos {
-		if lg.Row+panels.QuotaLogoRows > h { // 两行都在屏上才画
+		if lg.Row+lg.Rows > h { // 整块都在屏上才画
 			continue
 		}
-		if d := sixelOf(lg.Tool); d != "" {
+		if d := sixelOf(lg.Tool, lg.Rows); d != "" {
 			ims = append(ims, Image{Row: lg.Row, Col: 1, Data: d})
 		}
 	}
@@ -43,7 +46,7 @@ func RunQuota(c *deckclient.Client) error {
 	mode := logo.Mode()
 	cw, ch := cellSize()
 	cache := map[string]string{}
-	sixelOf := func(tool string) string {
+	sixelOf := func(tool string, rows int) string {
 		im := logo.For(tool)
 		if im == nil {
 			return ""
@@ -52,12 +55,12 @@ func RunQuota(c *deckclient.Client) error {
 		if w <= 0 || h <= 0 {
 			w, h = 10, 20
 		}
-		key := fmt.Sprintf("%s/%dx%d", tool, w, h)
+		key := fmt.Sprintf("%s/%dx%d/%d", tool, w, h, rows)
 		if v, ok := cache[key]; ok {
 			return v
 		}
 		side := min(panels.QuotaLogoRows*h, panels.QuotaLogoCols*w)
-		v := logo.Sixel(im, side, side)
+		v := logo.Sixel(PadVertical(im, side, max(rows, panels.QuotaLogoRows)*h), side, max(rows, panels.QuotaLogoRows)*h)
 		cache[key] = v
 		return v
 	}
@@ -115,4 +118,18 @@ func RunQuota(c *deckclient.Client) error {
 			fetch()
 		}
 	}
+}
+
+// PadVertical 把边长 side 的 logo 放进 side × height 像素的透明画布、垂直居中（按 img 自己的分辨率等比放大画布，
+// 交给 logo.Sixel 缩到 side × height）。额度面板一块有三行时，两行高的 logo 才能和这一块居中对齐（n056）。
+func PadVertical(img image.Image, side, height int) image.Image {
+	if height <= side || side <= 0 {
+		return img
+	}
+	b := img.Bounds()
+	ch := b.Dy() * height / side
+	canvas := image.NewNRGBA(image.Rect(0, 0, b.Dx(), ch))
+	top := (ch - b.Dy()) / 2
+	draw.Draw(canvas, image.Rect(0, top, b.Dx(), top+b.Dy()), img, b.Min, draw.Src)
+	return canvas
 }

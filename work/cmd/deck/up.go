@@ -369,7 +369,7 @@ func idle() {
 			col := max(1, (w-displayWidth(l))/2)
 			style := "\x1b[2m"
 			if i == 0 {
-				style = "\x1b[1;38;2;205;245;69m"
+				style = "\x1b[1;38;2;180;245;70m"
 			}
 			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", top+i, col, style, l)
 		}

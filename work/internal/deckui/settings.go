@@ -420,7 +420,7 @@ func (m *Settings) View() string {
 		return m.formView()
 	}
 	var b strings.Builder
-	b.WriteString("\x1b[1;38;2;205;245;69m agent 设置\x1b[0m\x1b[38;5;242m   ↑↓ 选  空格/⏎ 改  ←→ 换项目  n 新建项目  d 撤销授权  s 保存  q 关闭\x1b[0m\n\n")
+	b.WriteString("\x1b[1;38;2;180;245;70m agent 设置\x1b[0m\x1b[38;5;242m   ↑↓ 选  空格/⏎ 改  ←→ 换项目  n 新建项目  d 撤销授权  s 保存  q 关闭\x1b[0m\n\n")
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String()
@@ -448,7 +448,7 @@ func (m *Settings) View() string {
 	cursor := func() string {
 		defer func() { line++ }()
 		if line == m.cur {
-			return "\x1b[38;2;205;245;69m›\x1b[0m"
+			return "\x1b[38;2;180;245;70m›\x1b[0m"
 		}
 		return " "
 	}

@@ -200,7 +200,7 @@ func TestSidebarSixelReservesSpaceAndPlacesImages(t *testing.T) {
 		}
 	}
 	none := (&Sidebar{Data: sample(), Mode: "none"}).Render(40, 30)
-	if len(none.Images) != 0 || !strings.HasPrefix(ansi.Strip(none.Lines[0]), " Agent Deck") || !strings.Contains(none.Lines[0], "38;2;205;245;69") {
+	if len(none.Images) != 0 || !strings.HasPrefix(ansi.Strip(none.Lines[0]), " Agent Deck") || !strings.Contains(none.Lines[0], "38;2;180;245;70") {
 		t.Fatalf("字母徽章模式：不画图，标题是品牌色文字：%q", none.Lines[0])
 	}
 	blocks := (&Sidebar{Data: sample(), Mode: "blocks"}).Render(40, 30)

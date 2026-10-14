@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,6 +55,10 @@ type ToolQuota struct {
 	// Estimated 为真表示窗口是估算的（OpenCode 免费模型的撞墙日均值），只给面板显示；
 	// Tool 永远不返回估算窗口，deckd 的额度门照旧把这类来源当「未知」（n056 自查：估算不能放开 frontier 子 agent 的门）。
 	Estimated bool `json:"estimated,omitempty"`
+	// Label 是面板上显示的名字（同一工具有几个额度池时区分，例如 Antigravity 的 Gemini 与 Claude）；空就按工具名。
+	Label string `json:"label,omitempty"`
+	// Source 说明窗口从哪来（面板专用的补充来源，例如 Claude 状态栏的缓存）；空表示 Token 看板。
+	Source string `json:"source,omitempty"`
 }
 
 // Thresholds 是告急与用尽的阈值（百分比），可配。
@@ -71,6 +78,8 @@ type Client struct {
 	Thresholds Thresholds
 	HTTP       *http.Client
 	Now        func() time.Time
+	// ClaudeUsagePath 是 Claude 状态栏缓存的位置；空用 ClaudeUsagePath()（测试换掉）。
+	ClaudeUsagePath string
 
 	mu      sync.Mutex
 	fetched time.Time
@@ -229,23 +238,136 @@ func (c *Client) statusOf(wins []Window) string {
 	return status
 }
 
-// Display 是给额度面板看的全部工具额度（deckd 的 /v1/quota）：在 All 的基础上，OpenCode 没有真实窗口、
-// 但看板有撞墙日均值时，补上估算的「日」窗口并标 Estimated（n056，owner 要求按看板的均值逻辑显示）。
-// 额度门不要用它，用 Tool。
+// DisplayTools 是额度面板显示的来源与顺序（owner 2026-10-14）：加上 Antigravity；Kimi 是 owner 公司的，暂时隐藏
+// （要恢复就把 "kimi" 加回来）。
+var DisplayTools = []string{"claude", "codex", "grok", "antigravity", "opencode"}
+
+// Display 是给额度面板看的额度（deckd 的 /v1/quota），按 DisplayTools。在 Tool 的基础上补几个面板专用的来源（n056）：
+//   - OpenCode 没有真实窗口、但看板有撞墙日均值：补估算的「日」窗口，标 Estimated（owner 要求按看板的均值逻辑显示）；
+//   - Claude 看板里没有窗口：读 owner 的 Claude Code 状态栏脚本缓存的官方用量（5 小时、7 天），标 Source；
+//   - Antigravity：看板顶层 quota.antigravity 的各额度池（Gemini、Claude），各成一条。
+// 这些都不进 Tool：deckd 的额度门照旧只认看板的真实窗口（n056 自查）。
 func (c *Client) Display(ctx context.Context) []ToolQuota {
-	out := c.All(ctx)
-	for i, q := range out {
-		if q.Tool != "opencode" || q.Status != Unknown || q.Generated.IsZero() {
-			continue // 取不到、过期、没有生成时间的不补：面板照样不显示
-		}
-		p, err := c.fetch(ctx)
-		if err != nil {
+	var out []ToolQuota
+	for _, tool := range DisplayTools {
+		if tool == "antigravity" {
+			out = append(out, c.antigravity(ctx)...)
 			continue
 		}
-		if w, ok := zenWindow(p, c.now()); ok {
-			out[i].Windows, out[i].Status, out[i].Estimated = []Window{w}, c.statusOf([]Window{w}), true
-			out[i].Reason = "估算：看板撞墙日均值（不作额度门依据）"
+		q := c.Tool(ctx, tool)
+		switch {
+		case tool == "opencode" && q.Status == Unknown && !q.Generated.IsZero():
+			if p, err := c.fetch(ctx); err == nil {
+				if w, ok := zenWindow(p, c.now()); ok {
+					q.Windows, q.Status, q.Estimated = []Window{w}, c.statusOf([]Window{w}), true
+					q.Reason = "估算：看板撞墙日均值（不作额度门依据）"
+				}
+			}
+		case tool == "claude" && q.Status == Unknown:
+			if wins, ok := c.claudeStatusline(); ok {
+				q.Windows, q.Status, q.Reason = wins, c.statusOf(wins), ""
+				q.Source = "Claude 状态栏缓存"
+			}
 		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// ClaudeUsagePath 是 owner 的 Claude Code 状态栏脚本（~/.claude/statusline.py）缓存官方用量的文件：
+// /tmp/claude/<CLAUDE_CONFIG_DIR 的目录名>/statusline-usage-cache.json，脚本最多 5 分钟刷新一次。只读，不碰凭据。
+func ClaudeUsagePath() string {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		dir = ".claude"
+	}
+	return filepath.Join("/tmp/claude", filepath.Base(dir), "statusline-usage-cache.json")
+}
+
+// claudeStatusline 读状态栏缓存里的 five_hour、seven_day（utilization 是已用百分比，resets_at 是重置时间）。
+// 文件超过一天没更新就不用（说明 Claude Code 好久没开，数字不可信）。
+func (c *Client) claudeStatusline() ([]Window, bool) {
+	path := c.ClaudeUsagePath
+	if path == "" {
+		path = ClaudeUsagePath()
+	}
+	st, err := os.Stat(path)
+	if err != nil || c.now().Sub(st.ModTime()) > 24*time.Hour {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	// 缓存里还有许多别的字段（类型各异）：只解出要的两项，别的不管（真实缓存整体按对象解会失败）
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(data, &raw) != nil {
+		return nil, false
+	}
+	var wins []Window
+	for _, k := range [][2]string{{"five_hour", "5h"}, {"seven_day", "week"}} {
+		var x *struct {
+			Utilization *float64 `json:"utilization"`
+			ResetsAt    string   `json:"resets_at"`
+		}
+		if json.Unmarshal(raw[k[0]], &x) != nil || x == nil || x.Utilization == nil {
+			continue
+		}
+		w := Window{Key: k[1], Pct: int(math.Round(*x.Utilization))}
+		if t, err := time.Parse(time.RFC3339, x.ResetsAt); err == nil {
+			w.Reset = t
+		}
+		wins = append(wins, w)
+	}
+	return wins, len(wins) > 0
+}
+
+// antigravity 取看板顶层 quota.antigravity 的各额度池（rows），每个池一条，名字是「Antigravity <池名>」。
+// 看板取不到、过期或没有这项时返回空（面板不显示）。
+func (c *Client) antigravity(ctx context.Context) []ToolQuota {
+	p, err := c.fetch(ctx)
+	if err != nil {
+		return nil
+	}
+	gen, err := time.Parse(time.RFC3339, p.Generated)
+	maxAge := c.MaxAge
+	if maxAge == 0 {
+		maxAge = 10 * time.Minute
+	}
+	if err != nil || c.now().Sub(gen) > maxAge {
+		return nil
+	}
+	raw, ok := p.Quota["antigravity"]
+	if !ok {
+		return nil
+	}
+	var ag struct {
+		Rows []struct {
+			Name string `json:"name"`
+			winsJSON
+		} `json:"rows"`
+	}
+	if json.Unmarshal(raw, &ag) != nil {
+		return nil
+	}
+	var out []ToolQuota
+	for _, r := range ag.Rows {
+		var wins []Window
+		for _, x := range r.Windows {
+			if x.Pct == nil {
+				continue
+			}
+			w := Window{Key: x.Key, Pct: *x.Pct}
+			if t, err := time.Parse(time.RFC3339, x.Reset); err == nil {
+				w.Reset = t
+			}
+			wins = append(wins, w)
+		}
+		if len(wins) == 0 {
+			continue
+		}
+		out = append(out, ToolQuota{Tool: "antigravity", Profile: "antigravity", Label: strings.TrimSpace("Antigravity " + r.Name),
+			Status: c.statusOf(wins), Windows: wins, Generated: gen})
 	}
 	return out
 }

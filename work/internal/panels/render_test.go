@@ -30,7 +30,8 @@ func TestQuotaPanelHidesUnknownAndShowsReset(t *testing.T) {
 	}
 	lines, logos := QuotaLines(qs, 44, "none")
 	out := plain(strings.Join(lines, "\n"))
-	for _, want := range []string{"Codex 用尽", "↻ 16:54", "↻ 10/20 14:54", "OpenCode", "日", "50%", "↻ 10/15 00:00", "Kimi Code", " O   Codex 用尽", " O   OpenCode", " K   Kimi Code"} {
+	// 字母徽章在这一块的中间行：codex 三行（名字、5h、周）在 5h 那行，opencode、kimi 两行在名字那行
+	for _, want := range []string{"Codex 用尽", "↻ 16:54", "↻ 10/20 14:54", "OpenCode", "日", "50%", "↻ 10/15 00:00", "Kimi Code", "      Codex 用尽", " O   5h", " O   OpenCode", " K   Kimi Code"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("额度面板缺 %q：\n%s", want, out)
 		}
@@ -46,7 +47,7 @@ func TestQuotaPanelHidesUnknownAndShowsReset(t *testing.T) {
 	// 各窗口的条子起点对齐（全角「周」「日」按两格算），每行不超过面板宽
 	var starts []int
 	for _, line := range strings.Split(out, "\n") {
-		if i := strings.IndexAny(line, "█░"); i >= 0 {
+		if i := strings.Index(line, "━"); i >= 0 {
 			starts = append(starts, ansi.StringWidth(line[:i]))
 		}
 		if ansi.StringWidth(line) > 44 {
@@ -147,5 +148,17 @@ func TestQuotaResetPastAndNarrow(t *testing.T) {
 				t.Errorf("宽 %d 超出：%q", w, l)
 			}
 		}
+	}
+}
+
+// n056（owner 2026-10-14 第二轮）：额度条用细横线（上下两根条之间有间隙）；Label 优先于工具名（Antigravity 的各额度池）。
+func TestQuotaBarsAndLabels(t *testing.T) {
+	qs := []dashquota.ToolQuota{
+		{Tool: "antigravity", Label: "Antigravity Gemini", Status: dashquota.Available, Windows: []dashquota.Window{{Key: "5h", Pct: 50}, {Key: "week", Pct: 5}}},
+	}
+	lines, _ := QuotaLines(qs, 44, "none")
+	out := plain(strings.Join(lines, "\n"))
+	if !strings.Contains(out, "Antigravity Gemini") || strings.ContainsAny(out, "█░") || !strings.Contains(out, "━") {
+		t.Fatalf("%s", out)
 	}
 }

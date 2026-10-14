@@ -109,7 +109,7 @@ func TestOpenCodeZenDailyWindow(t *testing.T) {
  ]}`, now.Add(-time.Minute).Format(time.RFC3339))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 	defer srv.Close()
-	c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
+	c := &Client{URL: srv.URL, Now: func() time.Time { return now }, ClaudeUsagePath: "/nonexistent"}
 	// 额度门用的 Tool 不返回估算窗口：照旧未知
 	if q := c.Tool(context.Background(), "opencode"); q.Status != Unknown || len(q.Windows) != 0 || q.Estimated {
 		t.Fatalf("Tool 不该给估算：%+v", q)
@@ -144,7 +144,7 @@ func TestOpenCodeZenCapsAndMissingModel(t *testing.T) {
 		body := fmt.Sprintf(`{"generated":%q,"profiles":[{"key":"oc","zen_limit":%s}],"models":[{"date":"2026-10-14","profile":"oc","model":"m","incr":250}]}`,
 			now.Format(time.RFC3339), tc.zen)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
-		c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
+		c := &Client{URL: srv.URL, Now: func() time.Time { return now }, ClaudeUsagePath: "/nonexistent"}
 		var q ToolQuota
 		for _, x := range c.Display(context.Background()) {
 			if x.Tool == "opencode" {

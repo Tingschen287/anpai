@@ -27,7 +27,16 @@ var (
 	picked = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("221"))
 )
 
-var toolName = map[string]string{"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "opencode": "OpenCode", "kimi": "Kimi Code"}
+var toolName = map[string]string{"claude": "Claude Code", "codex": "Codex", "grok": "Grok Build", "opencode": "OpenCode", "kimi": "Kimi Code", "antigravity": "Antigravity"}
+
+// thinBar 画额度条：细横线，已用部分用状态色、未用部分暗灰。上下两根条之间留出间隙（n056，owner：「额度条不粘在一起，要有间隙」）。
+func thinBar(pct, n int, used lipgloss.Style) string {
+	pct = max(0, min(100, pct))
+	full := pct * n / 100
+	return used.Render(strings.Repeat("━", full)) + barRest.Render(strings.Repeat("━", n-full))
+}
+
+var barRest = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 
 // bar 画一条长度为 n 的进度条。
 func bar(pct, n int) string {
@@ -41,9 +50,11 @@ func bar(pct, n int) string {
 	return strings.Repeat("█", full) + strings.Repeat("░", n-full)
 }
 
-// QuotaLogo 是额度面板里一个来源的 logo 位置：从第 Row 行起两行高、从第 1 列起 4 格宽（n056）。
+// QuotaLogo 是额度面板里一个来源的 logo 位置：这一块从第 Row 行起共 Rows 行、从第 1 列起 4 格宽；
+// logo 本身两行高，画在这一块的垂直中间（n056，owner：「logo和旁边的额度区域没有水平居中」）。
 type QuotaLogo struct {
 	Row  int
+	Rows int
 	Tool string
 }
 
@@ -71,21 +82,30 @@ func resetText(r, now time.Time) string {
 	return "↻ " + l.Format("1/2 15:04")
 }
 
-// quotaBadge 是没有 sixel 时 logo 位置上的字：品牌色字母徽章（none）或半格色块（blocks）。两行，各 4 格宽。
-func quotaBadge(tool, mode string) [2]string {
+// quotaBadge 是没有 sixel 时 logo 位置上的字（rows 行，各 4 格宽）：品牌色字母徽章（none，字母在中间那一行）
+// 或半格色块（blocks，两行，居中）。sixel 时全留空，图另画。
+func quotaBadge(tool, mode string, rows int) []string {
+	out := make([]string, rows)
+	for i := range out {
+		out[i] = "    "
+	}
+	if mode == "sixel" && logo.For(tool) != nil {
+		return out
+	}
 	if mode == "blocks" {
 		if im := logo.For(tool); im != nil {
 			b := logo.Blocks(im, QuotaLogoCols, QuotaLogoRows)
-			return [2]string{b[0], b[1]}
+			top := max(0, (rows-QuotaLogoRows)/2)
+			for i := 0; i < QuotaLogoRows && top+i < rows; i++ {
+				out[top+i] = b[i]
+			}
+			return out
 		}
 	}
-	if mode == "sixel" && logo.For(tool) != nil {
-		return [2]string{"    ", "    "} // 留出位置，图另画
-	}
 	if br, ok := logo.Brand[tool]; ok {
-		return [2]string{fmt.Sprintf(" \x1b[1;38;2;%d;%d;%dm%s\x1b[0m  ", br.Color.R, br.Color.G, br.Color.B, br.Letter), "    "}
+		out[(rows-1)/2] = fmt.Sprintf(" \x1b[1;38;2;%d;%d;%dm%s\x1b[0m  ", br.Color.R, br.Color.G, br.Color.B, br.Letter)
 	}
-	return [2]string{"    ", "    "}
+	return out
 }
 
 // QuotaLines 画额度面板（n056 按 owner 2026-10-14 的要求）：每个来源前有它的 logo；每个窗口带重置时间；
@@ -120,7 +140,10 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		n = 6
 	}
 	for _, q := range shown {
-		name := toolName[q.Tool]
+		name := q.Label
+		if name == "" {
+			name = toolName[q.Tool]
+		}
 		if name == "" {
 			name = q.Tool
 		}
@@ -132,9 +155,10 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		case dashquota.Warn:
 			head, style = warn.Render(name+" 告急"), warn
 		}
-		badge := quotaBadge(q.Tool, mode)
+		rows := 1 + len(q.Windows)
+		badge := quotaBadge(q.Tool, mode, rows)
 		if mode == "sixel" && logo.For(q.Tool) != nil {
-			logos = append(logos, QuotaLogo{Row: len(lines), Tool: q.Tool})
+			logos = append(logos, QuotaLogo{Row: len(lines), Rows: rows, Tool: q.Tool})
 		}
 		lines = append(lines, " "+badge[0]+" "+head)
 		for i, w := range q.Windows {
@@ -144,11 +168,8 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 			}
 			// 按显示宽度补齐：「周」「日」是全角，占两格，%-3s 按字节数补会错位
 			pad := max(0, 3-lipgloss.Width(label))
-			prefix := "      "
-			if i == 0 {
-				prefix = " " + badge[1] + " "
-			}
-			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), style.Render(bar(w.Pct, n)), w.Pct)
+			prefix := " " + badge[1+i] + " "
+			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), thinBar(w.Pct, n, style), w.Pct)
 			if r := resetText(w.Reset, now); r != "" && resetW > 0 {
 				line += "  " + dim.Render(r)
 			}

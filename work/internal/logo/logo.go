@@ -30,6 +30,8 @@ var toolAsset = map[string]string{
 	"grok":     "xai",
 	"opencode": "opencode",
 	"kimi":     "kimi",
+	// Antigravity 的 logo 取自 owner 的 Token 看板 brand.js（n056）
+	"antigravity": "antigravity",
 }
 
 // Brand 是没有素材时的品牌色与字母（色块徽章用）。
@@ -37,11 +39,12 @@ var Brand = map[string]struct {
 	Letter string
 	Color  color.RGBA
 }{
-	"claude":   {"A", color.RGBA{0xd9, 0x77, 0x57, 0xff}},
-	"codex":    {"O", color.RGBA{0x10, 0xa3, 0x7f, 0xff}},
-	"grok":     {"X", color.RGBA{0xe5, 0xe5, 0xe5, 0xff}},
-	"opencode": {"O", color.RGBA{0x8a, 0x8a, 0x8a, 0xff}},
-	"kimi":     {"K", color.RGBA{0x2b, 0x7f, 0xff, 0xff}},
+	"claude":      {"A", color.RGBA{0xd9, 0x77, 0x57, 0xff}},
+	"codex":       {"O", color.RGBA{0x10, 0xa3, 0x7f, 0xff}},
+	"grok":        {"X", color.RGBA{0xe5, 0xe5, 0xe5, 0xff}},
+	"opencode":    {"O", color.RGBA{0x8a, 0x8a, 0x8a, 0xff}},
+	"kimi":        {"K", color.RGBA{0x2b, 0x7f, 0xff, 0xff}},
+	"antigravity": {"A", color.RGBA{0x30, 0x80, 0xf0, 0xff}},
 }
 
 var (
@@ -49,8 +52,8 @@ var (
 	cache   = map[string]image.Image{}
 )
 
-// AccentRGB 是 deck 的品牌色青柠 #cdf545（adr_031，取自 owner 个人网站），用于终端真彩色转义。
-const AccentRGB = "205;245;69"
+// AccentRGB 是 deck 的品牌色青柠 #b4f546（adr_031；原取 owner 个人网站的 #cdf545，2026-10-14 owner 要「再绿点」），用于终端真彩色转义。
+const AccentRGB = "180;245;70"
 
 // Accent 是品牌色的前景转义。
 const Accent = "\x1b[38;2;" + AccentRGB + "m"
