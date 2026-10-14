@@ -136,8 +136,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		resetW = 0
 		n = width - 6 - 4 - 5
 	}
-	if n < 6 {
-		n = 6
+	if n < 3 {
+		// 再窄就不画条：先保住完整的百分比（n056 评审 1 B3：原先条至少 6 格，19 列时 100% 被截成「10」）
+		n = 0
 	}
 	for _, q := range shown {
 		// Label 来自看板 JSON（Antigravity 的池名）：显示前清洗、压成一行（同 n050 评审 B7；n056 自查）
@@ -171,6 +172,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 			pad := max(0, 3-lipgloss.Width(label))
 			prefix := " " + badge[1+i] + " "
 			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), thinBar(w.Pct, n, style), w.Pct)
+			if n == 0 {
+				line = fmt.Sprintf("%s%s%s %s", prefix, label, strings.Repeat(" ", pad), style.Render(fmt.Sprintf("%3d%%", w.Pct)))
+			}
 			if r := resetText(w.Reset, now); r != "" && resetW > 0 {
 				line += "  " + dim.Render(r)
 			}

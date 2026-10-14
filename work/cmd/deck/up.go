@@ -120,6 +120,10 @@ func up(dirs deckstore.Dirs, args []string) {
 	if err := ensureDeckd(dirs, spec, *upstream); err != nil {
 		fail("%v", err)
 	}
+	// 记下本次画法：已在运行的侧栏、额度面板据此切换（复用布局时也跟着本次探测走；n056 评审 1 B2）
+	if err := logo.WriteMode(dirs.State, mode); err != nil {
+		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
+	}
 	if mode == "sixel" {
 		// 复用的布局可能是用别的画法起的：先让布局 server 认 sixel，再接上（只对之后接上的客户端生效）
 		if err := agentdeck.LayoutEnsureSixel(ctx, *layoutSock); err != nil {

@@ -256,13 +256,17 @@ type startedMain struct {
 }
 
 // RunSidebar 跑左侧会话栏。
-func RunSidebar(api API, layoutSock string) error {
+// RunSidebar 跑侧栏。modeOf 给出布局当前的 logo 画法（每秒读一次，变了就切换，n056 评审 1 B2）；nil 时按 logo.Mode()。
+func RunSidebar(api API, layoutSock string, modeOf func() string) error {
+	if modeOf == nil {
+		modeOf = logo.Mode
+	}
 	d, err := openTerm()
 	if err != nil {
 		return err
 	}
 	defer d.close()
-	sb := &Sidebar{Mode: logo.Mode()}
+	sb := &Sidebar{Mode: modeOf()}
 	sb.CellW, sb.CellH = cellSize()
 	l := newLoop(api)
 	var raw Data
@@ -314,6 +318,9 @@ func RunSidebar(api API, layoutSock string) error {
 			sb.CellW, sb.CellH = cellSize()
 			last = ""
 		case <-tick.C:
+			if m := modeOf(); m != sb.Mode {
+				sb.Mode, sb.cache, last = m, nil, ""
+			}
 		case r := <-started:
 			delete(starting, r.project)
 			text, ok := startMainText(r.project, r.res, r.err)

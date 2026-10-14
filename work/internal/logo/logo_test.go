@@ -183,3 +183,23 @@ func TestDeckLogoEmbedded(t *testing.T) {
 		t.Fatal("deck logo 素材")
 	}
 }
+
+// n056 评审 1 B2：布局当前画法写在状态目录的文件里，已在运行的窗格据此切换；文件没有或内容不认识时按环境变量。
+func TestCurrentModeFollowsFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DECK_GRAPHICS", "blocks")
+	if CurrentMode(dir) != "blocks" {
+		t.Fatal("没有文件：按环境变量")
+	}
+	if err := WriteMode(dir, "sixel"); err != nil || CurrentMode(dir) != "sixel" {
+		t.Fatal("文件：sixel", err)
+	}
+	WriteMode(dir, "none")
+	if CurrentMode(dir) != "none" {
+		t.Fatal("文件：none")
+	}
+	WriteMode(dir, "bogus")
+	if CurrentMode(dir) != "blocks" {
+		t.Fatal("不认识的内容：按环境变量")
+	}
+}

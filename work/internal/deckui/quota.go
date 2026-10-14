@@ -37,13 +37,17 @@ func QuotaFrame(qs []dashquota.ToolQuota, err error, w, h int, mode string, sixe
 }
 
 // RunQuota 跑额度面板：整屏帧加图（与侧栏同一画法，bubbletea 画不了 sixel），每 2 秒向 deckd 取一次；q 或 Ctrl-C 退出。
-func RunQuota(c *deckclient.Client) error {
+// modeOf 给出布局当前的 logo 画法（每次取数时读，变了就切换，n056 评审 1 B2）；nil 时按 logo.Mode()。
+func RunQuota(c *deckclient.Client, modeOf func() string) error {
+	if modeOf == nil {
+		modeOf = logo.Mode
+	}
 	d, err := openTerm()
 	if err != nil {
 		return err
 	}
 	defer d.close()
-	mode := logo.Mode()
+	mode := modeOf()
 	cw, ch := cellSize()
 	cache := map[string]string{}
 	sixelOf := func(tool string, rows int) string {
@@ -115,6 +119,10 @@ func RunQuota(c *deckclient.Client) error {
 			}
 			draw()
 		case <-tick.C:
+			if m := modeOf(); m != mode {
+				mode, last = m, ""
+				draw()
+			}
 			fetch()
 		}
 	}

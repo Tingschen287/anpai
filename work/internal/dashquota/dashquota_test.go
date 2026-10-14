@@ -157,3 +157,21 @@ func TestOpenCodeZenCapsAndMissingModel(t *testing.T) {
 		}
 	}
 }
+
+// n056 评审 1 B1：看板过期（采集停了、机器休眠后返回旧快照）时，OpenCode 不补估算窗口，和其他来源一样不显示。
+func TestOpenCodeZenNotFromStaleDashboard(t *testing.T) {
+	now := time.Date(2026, 10, 14, 15, 0, 0, 0, time.Local)
+	for _, age := range []time.Duration{11 * time.Minute, 25 * time.Hour} {
+		gen := now.Add(-age)
+		body := fmt.Sprintf(`{"generated":%q,"profiles":[{"key":"oc","zen_limit":{"model":"m","avg_tokens":100}}],
+ "models":[{"date":%q,"profile":"oc","model":"m","incr":50}]}`, gen.Format(time.RFC3339), gen.Format("2006-01-02"))
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		c := &Client{URL: srv.URL, Now: func() time.Time { return now }, ClaudeUsagePath: "/nonexistent"}
+		for _, q := range c.Display(context.Background()) {
+			if q.Tool == "opencode" && (q.Status != Unknown || len(q.Windows) != 0 || q.Estimated) {
+				t.Errorf("看板已 %v 没更新：OpenCode 不该显示：%+v", age, q)
+			}
+		}
+		srv.Close()
+	}
+}

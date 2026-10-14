@@ -169,3 +169,20 @@ func TestQuotaBarsAndLabels(t *testing.T) {
 		t.Fatalf("Label 未清洗：%q", raw)
 	}
 }
+
+// n056 评审 1 B3：一直窄到 14 列，百分比都完整（条先缩、再不画）；没有超出宽度的行。
+func TestQuotaPercentWholeWhenNarrow(t *testing.T) {
+	qs := []dashquota.ToolQuota{{Tool: "codex", Status: dashquota.Exhausted, Windows: []dashquota.Window{{Key: "5h", Pct: 100}, {Key: "week", Pct: 8}}}}
+	for w := 14; w <= 24; w++ {
+		lines, _ := QuotaLines(qs, w, "none")
+		out := plain(strings.Join(lines, "\n"))
+		if !strings.Contains(out, "100%") || !strings.Contains(out, "  8%") {
+			t.Errorf("宽 %d：百分比不完整：\n%s", w, out)
+		}
+		for _, l := range strings.Split(out, "\n")[2:] { // 窗口行
+			if ansi.StringWidth(l) > w {
+				t.Errorf("宽 %d 超出：%q", w, l)
+			}
+		}
+	}
+}

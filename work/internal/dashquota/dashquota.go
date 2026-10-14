@@ -238,6 +238,15 @@ func (c *Client) statusOf(wins []Window) string {
 	return status
 }
 
+// fresh 说明看板数据的生成时间在 MaxAge 之内（与 Tool 判过期同一标准）。
+func (c *Client) fresh(gen time.Time) bool {
+	maxAge := c.MaxAge
+	if maxAge == 0 {
+		maxAge = 10 * time.Minute
+	}
+	return !gen.IsZero() && c.now().Sub(gen) <= maxAge
+}
+
 // DisplayTools 是额度面板显示的来源与顺序（owner 2026-10-14）：加上 Antigravity；Kimi 是 owner 公司的，暂时隐藏
 // （要恢复就把 "kimi" 加回来）。
 var DisplayTools = []string{"claude", "codex", "grok", "antigravity", "opencode"}
@@ -256,7 +265,8 @@ func (c *Client) Display(ctx context.Context) []ToolQuota {
 		}
 		q := c.Tool(ctx, tool)
 		switch {
-		case tool == "opencode" && q.Status == Unknown && !q.Generated.IsZero():
+		case tool == "opencode" && q.Status == Unknown && c.fresh(q.Generated):
+			// 只在看板新鲜时补：Tool 在判过期之前就写了 Generated，过期或跨日的旧快照不能拿来估算（n056 评审 1 B1）
 			if p, err := c.fetch(ctx); err == nil {
 				if w, ok := zenWindow(p, c.now()); ok {
 					q.Windows, q.Status, q.Estimated = []Window{w}, c.statusOf([]Window{w}), true

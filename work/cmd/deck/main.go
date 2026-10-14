@@ -27,6 +27,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
+	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 )
@@ -115,7 +116,7 @@ func panel(dirs deckstore.Dirs, args []string) {
 	c := deckclient.New(deckd.SocketPath(dirs))
 	if args[0] == "quota" {
 		// 额度面板要在每个来源前贴 logo（sixel），用与侧栏同一套整屏帧画法（n056）
-		if err := deckui.RunQuota(c); err != nil {
+		if err := deckui.RunQuota(c, func() string { return logo.CurrentMode(dirs.State) }); err != nil {
 			fail("%v", err)
 		}
 		return
@@ -147,7 +148,7 @@ func ui(dirs deckstore.Dirs, which string, args []string) {
 	api := deckui.DeckAPI{C: deckclient.New(deckd.SocketPath(dirs))}
 	var err error
 	if which == "sidebar" {
-		err = deckui.RunSidebar(api, *layoutSock)
+		err = deckui.RunSidebar(api, *layoutSock, func() string { return logo.CurrentMode(dirs.State) })
 	} else {
 		err = deckui.RunTabs(api, *layoutSock)
 	}

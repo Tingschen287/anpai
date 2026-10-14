@@ -16,6 +16,7 @@ import (
 	"image/color"
 	_ "image/png"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -86,6 +87,29 @@ func load(name string) image.Image {
 	}
 	cache[name] = im
 	return im
+}
+
+// ModeFile 是布局当前画法的文件（deck 状态目录下）：deck up 每次接上前写入本次判出的画法，
+// 侧栏、额度面板等已在运行的窗格据此切换（n056 评审 1 B2：复用布局时画法要跟着本次探测走）。
+func ModeFile(stateDir string) string { return filepath.Join(stateDir, "graphics") }
+
+// WriteMode 记下布局当前的画法。
+func WriteMode(stateDir, mode string) error {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(ModeFile(stateDir), []byte(mode+"\n"), 0o600)
+}
+
+// CurrentMode 读布局当前的画法；文件没有或内容不认识时按 Mode()（DECK_GRAPHICS 环境变量）。
+func CurrentMode(stateDir string) string {
+	if b, err := os.ReadFile(ModeFile(stateDir)); err == nil {
+		switch v := strings.TrimSpace(string(b)); v {
+		case "sixel", "blocks", "none":
+			return v
+		}
+	}
+	return Mode()
 }
 
 // Mode 是画法：sixel、blocks、none。
