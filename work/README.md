@@ -188,7 +188,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
   - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`（没有 `.prev` 说明它是第一次写，删掉即回到默认），或核对后把两份的 generation 改成一样。第一次保存时 `projects.yaml` 还不存在，缺的那份按第 0 代算，同样能识别。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
   - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
-- **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口的来源在面板上不显示（deckd 内部仍按「未知」处理，不编数字）。每个来源前有它的 logo，窗口后写重置时间（今天之内只写时刻）。OpenCode 免费模型没有限额接口，按看板的撞墙日均值算当天用量百分比（与看板 `calendar.js` 同口径：今天该模型的增量 + 缓存读 + reasoning ÷ 均值），标「日」，次日 0 点重置。
+- **额度**：deckd 的额度门只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口的来源按「未知」处理，不编数字。额度面板（`/v1/quota`）在此之外补几个只供显示的来源：Claude 读 owner 的 Claude Code 状态栏脚本缓存的官方用量（`/tmp/claude/<CLAUDE_CONFIG_DIR 目录名>/statusline-usage-cache.json`，超过一天或已过重置时刻的不用）；Antigravity 按看板的各额度池各一条；Kimi 暂时隐藏（`dashquota.DisplayTools`）。取不到的来源在面板上不显示。每个来源前有它的 logo，窗口后写重置时间（今天之内只写时刻）。OpenCode 免费模型没有限额接口，按看板的撞墙日均值算当天用量百分比（与看板 `calendar.js` 同口径：今天该模型的增量 + 缓存读 + reasoning ÷ 均值），标「日」，次日 0 点重置。
 - 主 agent 工具（`deck agent`）在 n051。
 - **额外参数**（`agents.yaml` 的 `extra_args`）：只能声明白名单里的参数（`agentdeck.declaredAllow`）。n055 起随启动真正传给 CLI
   （claude 经上游 `launch --extra-arg`，codex 经 `-c "codex 参数…"`），启动后照旧按白名单核对实际命令行。claude 的「参数=取值」写法

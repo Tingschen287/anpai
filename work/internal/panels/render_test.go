@@ -161,4 +161,11 @@ func TestQuotaBarsAndLabels(t *testing.T) {
 	if !strings.Contains(out, "Antigravity Gemini") || strings.ContainsAny(out, "█░") || !strings.Contains(out, "━") {
 		t.Fatalf("%s", out)
 	}
+	// 池名来自看板：控制序列与换行不进终端（n056 自查）
+	qs[0].Label = "Antigravity \x1b]0;PWNED\x07Gem\nini"
+	lines, _ = QuotaLines(qs, 44, "none")
+	raw := strings.Join(lines, "\n")
+	if strings.Contains(raw, "\x1b]0;") || strings.Contains(raw, "\x07") || len(lines) != 4 {
+		t.Fatalf("Label 未清洗：%q", raw)
+	}
 }

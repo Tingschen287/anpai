@@ -140,7 +140,8 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		n = 6
 	}
 	for _, q := range shown {
-		name := q.Label
+		// Label 来自看板 JSON（Antigravity 的池名）：显示前清洗、压成一行（同 n050 评审 B7；n056 自查）
+		name := strings.Join(strings.Fields(deckstore.Clean(q.Label, 40)), " ")
 		if name == "" {
 			name = toolName[q.Tool]
 		}

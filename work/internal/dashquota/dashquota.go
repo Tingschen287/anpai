@@ -317,6 +317,10 @@ func (c *Client) claudeStatusline() ([]Window, bool) {
 		if t, err := time.Parse(time.RFC3339, x.ResetsAt); err == nil {
 			w.Reset = t
 		}
+		if !w.Reset.IsZero() && !w.Reset.After(c.now()) {
+			// 已过重置时刻：缓存里的是上个周期的数，不显示（状态栏脚本此时也会重取；n056 自查）
+			continue
+		}
 		wins = append(wins, w)
 	}
 	return wins, len(wins) > 0

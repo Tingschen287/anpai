@@ -56,6 +56,14 @@ func TestDisplaySourcesAndOrder(t *testing.T) {
 	if q := c.Tool(context.Background(), "claude"); q.Status != Unknown || len(q.Windows) != 0 {
 		t.Fatalf("Tool 不读状态栏缓存：%+v", q)
 	}
+	// 已过重置时刻的窗口：不显示上个周期的数
+	os.WriteFile(cache, []byte(`{"five_hour":{"utilization":97,"resets_at":"2026-10-14T07:00:00+00:00"},"seven_day":{"utilization":64,"resets_at":"2026-10-17T09:59:59+00:00"}}`), 0o600)
+	os.Chtimes(cache, now, now)
+	for _, q := range c.Display(context.Background()) {
+		if q.Tool == "claude" && (len(q.Windows) != 1 || q.Windows[0].Key != "week" || q.Status != Available) {
+			t.Fatalf("已过重置时刻的 5h 不显示、不按旧数判用尽：%+v", q)
+		}
+	}
 	// 缓存超过一天：不用
 	old := now.Add(-25 * time.Hour)
 	os.Chtimes(cache, old, old)
