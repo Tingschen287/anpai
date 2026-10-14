@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -78,11 +79,30 @@ type payload struct {
 	Generated string                     `json:"generated"`
 	Profiles  []profile                  `json:"profiles"`
 	Quota     map[string]json.RawMessage `json:"quota"`
+	Models    []modelDay                 `json:"models"`
 }
 
 type profile struct {
-	Key   string    `json:"key"`
-	Quota *winsJSON `json:"quota"`
+	Key      string    `json:"key"`
+	Quota    *winsJSON `json:"quota"`
+	ZenLimit *zenLimit `json:"zen_limit"`
+}
+
+// zenLimit 是看板对 OpenCode 免费模型估出的日限额：几个撞墙日的全 token 用量取均值（看板 collect.py zen_hit_days）。
+type zenLimit struct {
+	Model     string  `json:"model"`
+	AvgTokens float64 `json:"avg_tokens"`
+	Samples   int     `json:"samples"`
+}
+
+// modelDay 是看板按日、按模型的用量。
+type modelDay struct {
+	Date      string  `json:"date"`
+	Profile   string  `json:"profile"`
+	Model     string  `json:"model"`
+	Incr      float64 `json:"incr"`
+	CacheRead float64 `json:"cache_read"`
+	Reasoning float64 `json:"reasoning"`
 }
 
 type winsJSON struct {
@@ -180,6 +200,11 @@ func (c *Client) Tool(ctx context.Context, tool string) ToolQuota {
 		return q
 	}
 	wins, found := windowsFor(p, prof)
+	if (!found || len(wins) == 0) && tool == "opencode" {
+		if w, ok := zenWindow(p, c.now()); ok {
+			wins, found = []Window{w}, true
+		}
+	}
 	if !found || len(wins) == 0 {
 		q.Reason = "看板没有这个来源的额度窗口（例如 OpenCode 免费席位只有估算）"
 		return q
@@ -199,6 +224,35 @@ func (c *Client) Tool(ctx context.Context, tool string) ToolQuota {
 		}
 	}
 	return q
+}
+
+// zenWindow 按看板前端（calendar.js）的同一口径算 OpenCode 当天额度（n056，owner：「opencode需要你去看我的token Dashboard
+// 其实关于这个的额度我是有一份取平均值的逻辑的」）：分子是本地今天该免费模型的全 token 用量（增量 + 缓存读 + reasoning），
+// 分母是撞墙日均值；按自然日，重置在本地次日 0 点。窗口键 "day"。缺模型名或均值时不算。
+func zenWindow(p *payload, now time.Time) (Window, bool) {
+	var z *zenLimit
+	for _, pr := range p.Profiles {
+		if pr.Key == "oc" && pr.ZenLimit != nil {
+			z = pr.ZenLimit
+		}
+	}
+	if z == nil || z.Model == "" || z.AvgTokens <= 0 {
+		return Window{}, false
+	}
+	local := now.Local()
+	today := local.Format("2006-01-02")
+	used := 0.0
+	for _, m := range p.Models {
+		if m.Date == today && m.Profile == "oc" && m.Model == z.Model {
+			used += m.Incr + m.CacheRead + m.Reasoning
+		}
+	}
+	pct := int(math.Round(used / z.AvgTokens * 100))
+	if pct > 100 {
+		pct = 100
+	}
+	y, mo, d := local.Date()
+	return Window{Key: "day", Pct: pct, Reset: time.Date(y, mo, d+1, 0, 0, 0, 0, time.Local)}, true
 }
 
 // windowsFor：先看顶层 quota（cco、kimi、grok），再看 profiles 里的 quota（codex）。

@@ -94,3 +94,52 @@ func TestResultsAreCached(t *testing.T) {
 		t.Fatalf("60 秒内应只取一次，取了 %d 次", hits)
 	}
 }
+
+// n056：OpenCode 按看板的撞墙均值算当天额度（与 calendar.js 同口径：今天该模型的增量 + 缓存读 + reasoning ÷ 均值）。
+func TestOpenCodeZenDailyWindow(t *testing.T) {
+	now := time.Date(2026, 10, 14, 15, 0, 0, 0, time.Local)
+	body := fmt.Sprintf(`{"generated":%q,
+ "profiles":[{"key":"oc","zen_limit":{"model":"muse-free","avg_tokens":63337176,"samples":7}}],
+ "quota":{},
+ "models":[
+  {"date":"2026-10-14","profile":"oc","model":"muse-free","incr":1000000,"cache_read":30000000,"reasoning":668588,"output":999},
+  {"date":"2026-10-14","profile":"oc","model":"other","incr":50000000},
+  {"date":"2026-10-13","profile":"oc","model":"muse-free","incr":60000000},
+  {"date":"2026-10-14","profile":"codex","model":"muse-free","incr":60000000}
+ ]}`, now.Add(-time.Minute).Format(time.RFC3339))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+	defer srv.Close()
+	c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
+	q := c.Tool(context.Background(), "opencode")
+	if q.Status != Available || len(q.Windows) != 1 {
+		t.Fatalf("%+v", q)
+	}
+	w := q.Windows[0]
+	// (1000000+30000000+668588)/63337176 = 50%（output 不计；别的模型、别的日子、别的来源不计）
+	if w.Key != "day" || w.Pct != 50 || !w.Reset.Equal(time.Date(2026, 10, 15, 0, 0, 0, 0, time.Local)) {
+		t.Fatalf("%+v", w)
+	}
+}
+
+func TestOpenCodeZenCapsAndMissingModel(t *testing.T) {
+	now := time.Date(2026, 10, 14, 15, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		zen    string
+		status string
+		pct    int
+	}{
+		{`{"model":"m","avg_tokens":100}`, Exhausted, 100}, // 超过均值：封顶 100
+		{`{"avg_tokens":100}`, Unknown, 0},                 // 没有模型名：不算
+		{`{"model":"m","avg_tokens":0}`, Unknown, 0},       // 没有均值：不算
+	} {
+		body := fmt.Sprintf(`{"generated":%q,"profiles":[{"key":"oc","zen_limit":%s}],"models":[{"date":"2026-10-14","profile":"oc","model":"m","incr":250}]}`,
+			now.Format(time.RFC3339), tc.zen)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
+		q := c.Tool(context.Background(), "opencode")
+		srv.Close()
+		if q.Status != tc.status || tc.status != Unknown && q.Windows[0].Pct != tc.pct {
+			t.Errorf("%s：%+v", tc.zen, q)
+		}
+	}
+}

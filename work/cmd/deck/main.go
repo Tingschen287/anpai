@@ -112,7 +112,15 @@ func panel(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("panel", flag.ExitOnError)
 	project := fs.String("project", "", "只看这个项目")
 	fs.Parse(args[1:])
-	if err := panels.Run(args[0], *project, deckclient.New(deckd.SocketPath(dirs))); err != nil {
+	c := deckclient.New(deckd.SocketPath(dirs))
+	if args[0] == "quota" {
+		// 额度面板要在每个来源前贴 logo（sixel），用与侧栏同一套整屏帧画法（n056）
+		if err := deckui.RunQuota(c); err != nil {
+			fail("%v", err)
+		}
+		return
+	}
+	if err := panels.Run(args[0], *project, c); err != nil {
 		fail("%v", err)
 	}
 }

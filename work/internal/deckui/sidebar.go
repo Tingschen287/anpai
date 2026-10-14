@@ -283,12 +283,40 @@ func (s *Sidebar) sixel(tool string) string {
 	return v
 }
 
+// deckIcon 是标题前 deck logo 的 sixel（1 行高、2 格宽的正方形）；不是 sixel 模式返回空。
+func (s *Sidebar) deckIcon() string {
+	if s.Mode != "sixel" || logo.Deck() == nil {
+		return ""
+	}
+	cw, ch := s.CellW, s.CellH
+	if cw <= 0 || ch <= 0 {
+		cw, ch = 10, 20
+	}
+	key := fmt.Sprintf("deck/%dx%d", cw, ch)
+	if s.cache == nil {
+		s.cache = map[string]string{}
+	}
+	if v, ok := s.cache[key]; ok {
+		return v
+	}
+	side := min(ch, 2*cw)
+	v := logo.Sixel(logo.Deck(), side, side)
+	s.cache[key] = v
+	return v
+}
+
 // Render 画一整屏（宽 w、高 h）。
 func (s *Sidebar) Render(w, h int) Frame {
 	s.hits = map[int]hit{}
 	var lines []string
 	var images []Image
-	lines = append(lines, Fit("\x1b[1;38;5;39m Agent Deck\x1b[0m", w), "")
+	// 标题：能画 sixel 时前面放 deck 自己的 logo（1 行 × 2 格），否则只有品牌色文字（n056，adr_031）
+	if im := s.deckIcon(); im != "" {
+		lines = append(lines, Fit("    \x1b[1;38;2;205;245;69mAgent Deck\x1b[0m", w), "")
+		images = append(images, Image{Row: 0, Col: 1, Data: im})
+	} else {
+		lines = append(lines, Fit("\x1b[1;38;2;205;245;69m Agent Deck\x1b[0m", w), "")
+	}
 	s.normalize()
 	ordered := s.Data.Ordered()
 	if s.Sel >= len(ordered) {
@@ -316,7 +344,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 			dot, st := status(x)
 			bar, bg := " ", ""
 			if s.Data.IsFocus(x) {
-				bar = "\x1b[38;5;39m▌\x1b[0m"
+				bar = "\x1b[38;2;205;245;69m▌\x1b[0m"
 			}
 			if s.Proj == "" && idx == s.Sel {
 				bg = "\x1b[48;5;236m"
@@ -331,7 +359,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 			}
 			eye := "\x1b[38;5;242m○\x1b[0m"
 			if s.Data.IsOpen(x) {
-				eye = "\x1b[38;5;39m◉\x1b[0m"
+				eye = "\x1b[38;2;205;245;69m◉\x1b[0m"
 			}
 			sub := sanitize(x.Tool) + " · " + st
 			switch {

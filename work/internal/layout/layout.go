@@ -127,7 +127,7 @@ func BaseConf(s Spec) string {
 		"set -g default-terminal tmux-256color",
 		"set -as terminal-overrides ',*:RGB'",
 		"set -g pane-border-lines heavy",
-		"set -g pane-active-border-style fg=colour39",
+		"set -g pane-active-border-style fg=#cdf545", // 品牌色青柠（adr_031）
 		"set -g pane-border-style fg=colour238",
 		"set -g window-size latest",
 		// 中间嵌套 client 复制时，内层 tmux 用 OSC 52 交给它的终端（也就是这台布局 server）；默认 external 不收窗格里

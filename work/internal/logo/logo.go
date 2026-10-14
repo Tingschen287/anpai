@@ -49,12 +49,25 @@ var (
 	cache   = map[string]image.Image{}
 )
 
+// AccentRGB 是 deck 的品牌色青柠 #cdf545（adr_031，取自 owner 个人网站），用于终端真彩色转义。
+const AccentRGB = "205;245;69"
+
+// Accent 是品牌色的前景转义。
+const Accent = "\x1b[38;2;" + AccentRGB + "m"
+
+// Deck 返回 deck 自己的 logo（暂用 A4「横梁接光标」，透明底青柠，1.design/brand/agent-deck-logo）。
+func Deck() image.Image { return load("deck") }
+
 // For 返回某个工具的 logo，没有素材返回 nil。
 func For(tool string) image.Image {
 	name, ok := toolAsset[tool]
 	if !ok {
 		return nil
 	}
+	return load(name)
+}
+
+func load(name string) image.Image {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if im, ok := cache[name]; ok {
@@ -75,10 +88,10 @@ func For(tool string) image.Image {
 // Mode 是画法：sixel、blocks、none。
 func Mode() string {
 	switch v := strings.ToLower(os.Getenv("DECK_GRAPHICS")); v {
-	case "sixel", "none":
+	case "sixel", "blocks":
 		return v
 	}
-	return "blocks"
+	return "none" // 默认品牌色字母徽章：4×2 格的半格色块只有 4×4 像素，认不出（n056，n052 owner 反馈）
 }
 
 // sample 把 img 缩到 w×h（按区域平均，带透明度）。

@@ -242,7 +242,7 @@ func (m *Settings) formView() string {
 	f := m.form
 	var b strings.Builder
 	if f.chosen == "" {
-		b.WriteString("\x1b[1;38;5;39m 新建项目 · 选目录\x1b[0m\x1b[38;5;242m   ↑↓ 选  → 或 ⏎ 进入  ← 上一级  在「用这个目录」上按 ⏎ 选定  esc 取消\x1b[0m\n\n")
+		b.WriteString("\x1b[1;38;2;205;245;69m 新建项目 · 选目录\x1b[0m\x1b[38;5;242m   ↑↓ 选  → 或 ⏎ 进入  ← 上一级  在「用这个目录」上按 ⏎ 选定  esc 取消\x1b[0m\n\n")
 		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitize(f.dir))
 		rows := []string{"\x1b[38;5;42m[用这个目录]\x1b[0m"}
 		for _, s := range f.subdirs {
@@ -261,7 +261,7 @@ func (m *Settings) formView() string {
 		for i := f.scroll; i < len(rows) && i < f.scroll+room; i++ {
 			mark := " "
 			if i == f.cur {
-				mark = "\x1b[38;5;39m›\x1b[0m"
+				mark = "\x1b[38;2;205;245;69m›\x1b[0m"
 			}
 			fmt.Fprintf(&b, " %s %s\n", mark, rows[i])
 		}
@@ -269,7 +269,7 @@ func (m *Settings) formView() string {
 			b.WriteString("\x1b[38;5;242m   （没有子目录）\x1b[0m\n")
 		}
 	} else {
-		b.WriteString("\x1b[1;38;5;39m 新建项目 · 确认\x1b[0m\x1b[38;5;242m   输入改项目 id  ⏎ 建好并保存  esc 回到选目录\x1b[0m\n\n")
+		b.WriteString("\x1b[1;38;2;205;245;69m 新建项目 · 确认\x1b[0m\x1b[38;5;242m   输入改项目 id  ⏎ 建好并保存  esc 回到选目录\x1b[0m\n\n")
 		fmt.Fprintf(&b, "   目录     %s\n", sanitize(f.chosen))
 		fmt.Fprintf(&b, "   项目 id  \x1b[4m%s\x1b[0m▏\n", sanitize(f.id))
 		p := m.defaultProject(f.id, f.chosen)

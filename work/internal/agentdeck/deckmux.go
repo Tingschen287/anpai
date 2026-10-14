@@ -221,6 +221,28 @@ func LayoutNewWindow(ctx context.Context, socket, session, name, command string)
 	return err
 }
 
+// LayoutEnsureSixel 让布局 server 认为外层终端支持 sixel（n056）：deck up 判定用 sixel 时调。
+// 布局可能是早先用别的画法起的（BaseConf 只在 sixel 时带这项），没有这项时 tmux 对所有客户端一律画占位文字。
+// 只对之后接上的客户端生效，所以要在 attach 之前调。已经有了就不再追加。
+func LayoutEnsureSixel(ctx context.Context, socket string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "show-options", "-s", "terminal-features"))
+	if err == nil && strings.Contains(string(out), "sixel") {
+		return nil
+	}
+	_, err = runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "set-option", "-s", "-a", "terminal-features", ",*:sixel"))
+	return err
+}
+
+// LayoutRefreshClient 让布局 server 把某个客户端整屏重画（n056：补上像素尺寸后，把之前画成占位的图换回来）。
+func LayoutRefreshClient(ctx context.Context, socket, tty string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "refresh-client", "-t", tty))
+	return err
+}
+
 // LayoutBackgroundWindow 在布局会话里开一个后台窗口跑 command，不切过去（deck up 用它跑 deckd）。
 func LayoutBackgroundWindow(ctx context.Context, socket, session, name, command string) error {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)

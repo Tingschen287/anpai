@@ -15,6 +15,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 )
 
 var (
@@ -40,54 +41,123 @@ func bar(pct, n int) string {
 	return strings.Repeat("█", full) + strings.Repeat("░", n-full)
 }
 
-// RenderQuota 画额度面板。
-func RenderQuota(qs []dashquota.ToolQuota, width int) string {
-	var b strings.Builder
-	b.WriteString(title.Render("额度") + dim.Render("  来自 Token 看板") + "\n")
-	n := width - 22
+// QuotaLogo 是额度面板里一个来源的 logo 位置：从第 Row 行起两行高、从第 1 列起 4 格宽（n056）。
+type QuotaLogo struct {
+	Row  int
+	Tool string
+}
+
+// QuotaLogoCols、QuotaLogoRows 是 logo 占的格子（与侧栏一致）。
+const (
+	QuotaLogoCols = 4
+	QuotaLogoRows = 2
+)
+
+// quotaNow 是额度面板判断「今天」用的时钟；测试换掉。
+var quotaNow = time.Now
+
+// resetText 是重置时间：今天之内只写时刻，否则写月/日加时刻；没有就空。
+func resetText(r, now time.Time) string {
+	if r.IsZero() {
+		return ""
+	}
+	l, n := r.Local(), now.Local()
+	if l.Year() == n.Year() && l.YearDay() == n.YearDay() {
+		return "↻ " + l.Format("15:04")
+	}
+	return "↻ " + l.Format("1/2 15:04")
+}
+
+// quotaBadge 是没有 sixel 时 logo 位置上的字：品牌色字母徽章（none）或半格色块（blocks）。两行，各 4 格宽。
+func quotaBadge(tool, mode string) [2]string {
+	if mode == "blocks" {
+		if im := logo.For(tool); im != nil {
+			b := logo.Blocks(im, QuotaLogoCols, QuotaLogoRows)
+			return [2]string{b[0], b[1]}
+		}
+	}
+	if mode == "sixel" && logo.For(tool) != nil {
+		return [2]string{"    ", "    "} // 留出位置，图另画
+	}
+	if br, ok := logo.Brand[tool]; ok {
+		return [2]string{fmt.Sprintf(" \x1b[1;38;2;%d;%d;%dm%s\x1b[0m  ", br.Color.R, br.Color.G, br.Color.B, br.Letter), "    "}
+	}
+	return [2]string{"    ", "    "}
+}
+
+// QuotaLines 画额度面板（n056 按 owner 2026-10-14 的要求）：每个来源前有它的 logo；每个窗口带重置时间；
+// 没有窗口或取不到来源（未知）的不显示；不再写「来自 Token 看板」。mode 是 logo 画法（sixel / blocks / none）；
+// sixel 时返回各 logo 的位置，图由调用方另画。
+func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []QuotaLogo) {
+	now := quotaNow()
+	lines := []string{title.Render("额度")}
+	var logos []QuotaLogo
+	var shown []dashquota.ToolQuota
+	resetW := 0
+	for _, q := range qs {
+		if q.Status == dashquota.Unknown || len(q.Windows) == 0 {
+			continue
+		}
+		shown = append(shown, q)
+		for _, w := range q.Windows {
+			resetW = max(resetW, lipgloss.Width(resetText(w.Reset, now)))
+		}
+	}
+	if len(shown) == 0 {
+		return append(lines, dim.Render("暂时没有可显示的额度")), nil
+	}
+	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 3 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
+	n := width - 6 - 4 - 5 - 2 - resetW
 	if n < 6 {
 		n = 6
 	}
-	for _, q := range qs {
+	for _, q := range shown {
 		name := toolName[q.Tool]
 		if name == "" {
 			name = q.Tool
 		}
-		head := name
+		head := title.Render(name)
+		style := good
 		switch q.Status {
 		case dashquota.Exhausted:
-			head = bad.Render(name + " 用尽")
+			head, style = bad.Render(name+" 用尽"), bad
 		case dashquota.Warn:
-			head = warn.Render(name + " 告急")
-		case dashquota.Unknown:
-			head = dim.Render(name + " 未知")
+			head, style = warn.Render(name+" 告急"), warn
 		}
-		b.WriteString(head + "\n")
-		if q.Status == dashquota.Unknown {
-			b.WriteString(dim.Render("  "+q.Reason) + "\n")
-			continue
+		badge := quotaBadge(q.Tool, mode)
+		if mode == "sixel" && logo.For(q.Tool) != nil {
+			logos = append(logos, QuotaLogo{Row: len(lines), Tool: q.Tool})
 		}
-		for _, w := range q.Windows {
-			label := map[string]string{"5h": "5h", "week": "周"}[w.Key]
+		lines = append(lines, " "+badge[0]+" "+head)
+		for i, w := range q.Windows {
+			label := map[string]string{"5h": "5h", "week": "周", "day": "日"}[w.Key]
 			if label == "" {
 				label = w.Key
 			}
-			style := good
-			switch q.Status {
-			case dashquota.Exhausted:
-				style = bad
-			case dashquota.Warn:
-				style = warn
+			// 按显示宽度补齐：「周」「日」是全角，占两格，%-3s 按字节数补会错位
+			pad := max(0, 3-lipgloss.Width(label))
+			prefix := "      "
+			if i == 0 {
+				prefix = " " + badge[1] + " "
 			}
-			// 按显示宽度补齐：「周」是全角，占两格，%-3s 按字节数补会错位
-			pad := 3 - lipgloss.Width(label)
-			if pad < 0 {
-				pad = 0
+			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), style.Render(bar(w.Pct, n)), w.Pct)
+			if r := resetText(w.Reset, now); r != "" {
+				line += "  " + dim.Render(r)
 			}
-			b.WriteString(fmt.Sprintf("  %s%s %s %3d%%\n", label, strings.Repeat(" ", pad), style.Render(bar(w.Pct, n)), w.Pct))
+			lines = append(lines, line)
 		}
 	}
-	return b.String()
+	return lines, logos
+}
+
+// RenderQuota 画额度面板（字母徽章或色块画法，不画图；sixel 由 deckui.RunQuota 画）。
+func RenderQuota(qs []dashquota.ToolQuota, width int) string {
+	mode := logo.Mode()
+	if mode == "sixel" {
+		mode = "none"
+	}
+	lines, _ := QuotaLines(qs, width, mode)
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // OpenDecisions 只留还没答的决定，按创建时间。

@@ -15,22 +15,42 @@ import (
 
 func plain(s string) string { return ansi.Strip(s) }
 
-func TestQuotaPanelShowsReasonInsteadOfNumbersWhenUnknown(t *testing.T) {
-	out := plain(RenderQuota([]dashquota.ToolQuota{
-		{Tool: "claude", Status: dashquota.Available, Windows: []dashquota.Window{{Key: "5h", Pct: 9}, {Key: "week", Pct: 2}}},
-		{Tool: "codex", Status: dashquota.Exhausted, Windows: []dashquota.Window{{Key: "week", Pct: 92}}},
-		{Tool: "opencode", Status: dashquota.Unknown, Reason: "看板没有这个来源的额度窗口"},
-	}, 40))
-	for _, want := range []string{"Claude Code", "5h", "9%", "周", "Codex 用尽", "92%", "OpenCode 未知", "看板没有这个来源的额度窗口"} {
+// n056（owner 2026-10-14）：未知的来源不显示；不写「来自 Token 看板」；有窗口的带重置时间；OpenCode 的「日」窗口。
+func TestQuotaPanelHidesUnknownAndShowsReset(t *testing.T) {
+	now := time.Date(2026, 10, 14, 15, 0, 0, 0, time.Local)
+	quotaNow = func() time.Time { return now }
+	defer func() { quotaNow = time.Now }()
+	qs := []dashquota.ToolQuota{
+		{Tool: "claude", Status: dashquota.Unknown, Reason: "看板没有这个来源的额度窗口"},
+		{Tool: "codex", Status: dashquota.Exhausted, Windows: []dashquota.Window{
+			{Key: "5h", Pct: 92, Reset: time.Date(2026, 10, 14, 16, 54, 0, 0, time.Local)},
+			{Key: "week", Pct: 8, Reset: time.Date(2026, 10, 20, 14, 54, 0, 0, time.Local)}}},
+		{Tool: "opencode", Status: dashquota.Available, Windows: []dashquota.Window{{Key: "day", Pct: 50, Reset: time.Date(2026, 10, 15, 0, 0, 0, 0, time.Local)}}},
+		{Tool: "kimi", Status: dashquota.Available, Windows: []dashquota.Window{{Key: "5h", Pct: 0}}},
+	}
+	lines, logos := QuotaLines(qs, 44, "none")
+	out := plain(strings.Join(lines, "\n"))
+	for _, want := range []string{"Codex 用尽", "↻ 16:54", "↻ 10/20 14:54", "OpenCode", "日", "50%", "↻ 10/15 00:00", "Kimi Code", " O   Codex 用尽", " O   OpenCode", " K   Kimi Code"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("额度面板缺 %q：\n%s", want, out)
 		}
 	}
-	// 「5h」与「周」两行的条子起点要对齐（全角字按两格算）
+	for _, not := range []string{"Claude", "未知", "来自 Token 看板", "看板没有"} {
+		if strings.Contains(out, not) {
+			t.Errorf("不该出现 %q：\n%s", not, out)
+		}
+	}
+	if len(logos) != 0 {
+		t.Fatal("字母徽章模式不画图")
+	}
+	// 各窗口的条子起点对齐（全角「周」「日」按两格算），每行不超过面板宽
 	var starts []int
 	for _, line := range strings.Split(out, "\n") {
-		if i := strings.Index(line, "█"); i >= 0 && (strings.Contains(line, "5h") || strings.Contains(line, "周")) {
+		if i := strings.IndexAny(line, "█░"); i >= 0 {
 			starts = append(starts, ansi.StringWidth(line[:i]))
+		}
+		if ansi.StringWidth(line) > 44 {
+			t.Errorf("超宽：%q", line)
 		}
 	}
 	for _, s := range starts {
@@ -39,8 +59,15 @@ func TestQuotaPanelShowsReasonInsteadOfNumbersWhenUnknown(t *testing.T) {
 			break
 		}
 	}
-	if strings.Contains(strings.Split(out, "OpenCode")[1], "%") {
-		t.Errorf("未知的来源不该出现百分比：\n%s", out)
+	// sixel：logo 位置留空，返回位置（每个来源的名字那一行）
+	lines, logos = QuotaLines(qs, 44, "sixel")
+	if len(logos) != 3 || logos[0].Tool != "codex" || !strings.HasPrefix(plain(lines[logos[0].Row]), "      Codex") {
+		t.Fatalf("sixel 的 logo 位置：%+v\n%s", logos, plain(strings.Join(lines, "\n")))
+	}
+	// 全部未知：一行说明，不显示各家
+	lines, _ = QuotaLines(qs[:1], 44, "none")
+	if out := plain(strings.Join(lines, "\n")); !strings.Contains(out, "暂时没有可显示的额度") || strings.Contains(out, "Claude") {
+		t.Fatal(out)
 	}
 }
 

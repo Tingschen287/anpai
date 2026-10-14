@@ -172,18 +172,36 @@ func TestSidebarHitTesting(t *testing.T) {
 func TestSidebarSixelReservesSpaceAndPlacesImages(t *testing.T) {
 	sb := &Sidebar{Data: sample(), Mode: "sixel", CellW: 9, CellH: 18}
 	f := sb.Render(40, 30)
-	if len(f.Images) != 3 { // claude、codex、kimi 有素材；grok 也有——启动中的会话同样画
-		if len(f.Images) != 4 {
-			t.Fatalf("有素材的会话都应画图：%d", len(f.Images))
+	// n056：标题行前是 deck 自己的 logo（1 行高 × 2 格宽，18px 正方形），其余是会话的
+	var sess []Image
+	head := -1
+	for i, im := range f.Images {
+		if im.Row == 0 {
+			head = i
+			continue
+		}
+		sess = append(sess, im)
+	}
+	if head < 0 || f.Images[head].Col != 1 || !strings.HasPrefix(f.Images[head].Data, "\x1bP0;1;0q\"1;1;18;18") ||
+		!strings.HasPrefix(ansi.Strip(f.Lines[0]), "    Agent Deck") {
+		t.Fatalf("标题前应有 deck logo 并留出两格：%q", ansi.Strip(f.Lines[0]))
+	}
+	if len(sess) != 3 { // claude、codex、kimi 有素材；grok 也有——启动中的会话同样画
+		if len(sess) != 4 {
+			t.Fatalf("有素材的会话都应画图：%d", len(sess))
 		}
 	}
-	for _, im := range f.Images {
+	for _, im := range sess {
 		if im.Col != 1 || !strings.HasPrefix(im.Data, "\x1bP0;1;0q\"1;1;36;36") {
 			t.Fatalf("图应在第 1 列、按两行高（36px）的正方形：%+v", im.Data[:20])
 		}
 		if !strings.HasPrefix(string([]rune(ansi.Strip(f.Lines[im.Row]))[1:]), "    ") {
 			t.Fatalf("图的位置应留空：%q", ansi.Strip(f.Lines[im.Row]))
 		}
+	}
+	none := (&Sidebar{Data: sample(), Mode: "none"}).Render(40, 30)
+	if len(none.Images) != 0 || !strings.HasPrefix(ansi.Strip(none.Lines[0]), " Agent Deck") || !strings.Contains(none.Lines[0], "38;2;205;245;69") {
+		t.Fatalf("字母徽章模式：不画图，标题是品牌色文字：%q", none.Lines[0])
 	}
 	blocks := (&Sidebar{Data: sample(), Mode: "blocks"}).Render(40, 30)
 	if !strings.Contains(strings.Join(blocks.Lines, ""), "▀") || len(blocks.Images) != 0 {

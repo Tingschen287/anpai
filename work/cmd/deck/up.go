@@ -21,6 +21,8 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
+	"github.com/Tingschen287/terminal-deck/work/internal/logo"
+	"github.com/Tingschen287/terminal-deck/work/internal/termprobe"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
@@ -30,23 +32,62 @@ func socketFlags(fs *flag.FlagSet) (layoutSock, agentSock *string) {
 		fs.String("agent-socket", tmuxSocket("default"), "agent-deck tmux server 的 socket")
 }
 
-// graphicsMode 决定 logo 画法：DECK_GRAPHICS 强制；否则 Windows Terminal（1.22 起支持 Sixel）里用 sixel，其余用色块。
-func graphicsMode(flagValue string) string {
-	switch v := strings.ToLower(flagValue); v {
-	case "sixel", "blocks", "none":
-		return v
+// probeTerminal 问外层终端格子像素与 sixel 支持（n056）。不是终端时返回空结果。
+func probeTerminal() (termprobe.Result, bool) {
+	if !term.IsTerminal(os.Stdin.Fd()) {
+		return termprobe.Result{}, false
 	}
-	if os.Getenv("WT_SESSION") != "" {
-		return "sixel"
+	r := termprobe.Query(os.Stdin, 600*time.Millisecond)
+	native := false
+	if ws, err := termprobe.Winsize(int(os.Stdin.Fd())); err == nil && ws.Xpixel > 0 && ws.Ypixel > 0 {
+		native = true
 	}
-	return "blocks"
+	return r, native
+}
+
+// keepPixels 在 tmux 客户端接上后把格子像素补进自己的终端，窗口每次改大小（WSL 会清零）后再补，
+// 补上后请布局 server 整屏重画，把已画成占位的图换回来（n056）。返回停止函数。格子像素未知时什么都不做。
+func keepPixels(layoutSock string, cellW, cellH int) func() {
+	if cellW <= 0 || cellH <= 0 || !term.IsTerminal(os.Stdin.Fd()) {
+		return func() {}
+	}
+	fd := int(os.Stdin.Fd())
+	tty, _ := os.Readlink("/proc/self/fd/0")
+	winch := make(chan os.Signal, 4)
+	signal.Notify(winch, syscall.SIGWINCH)
+	done := make(chan struct{})
+	fix := func() {
+		if wrote, _ := termprobe.FixPixels(fd, cellW, cellH); wrote && tty != "" {
+			// 写入后 tmux 客户端收到 SIGWINCH 才去重读；稍等再请重画，免得 server 还按旧尺寸画
+			time.Sleep(250 * time.Millisecond)
+			agentdeck.LayoutRefreshClient(context.Background(), layoutSock, tty)
+		}
+	}
+	go func() {
+		// 刚接上时客户端可能还没读尺寸：前几秒多补几次（已有像素就什么都不做）
+		retry := time.NewTicker(400 * time.Millisecond)
+		defer retry.Stop()
+		for n := 0; ; {
+			select {
+			case <-done:
+				return
+			case <-winch:
+				fix()
+			case <-retry.C:
+				if n++; n <= 8 {
+					fix()
+				}
+			}
+		}
+	}()
+	return func() { signal.Stop(winch); close(done) }
 }
 
 // up：一条命令打开四区布局（n049）。已经有布局就直接接上。
 func up(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	layoutSock, agentSock := socketFlags(fs)
-	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断")
+	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断（问终端：支持 sixel 且知道格子像素用 sixel，否则用字母徽章）")
 	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（会话运行状态）；留空则 deckd 用 agent-deck list --json 读（n055，默认）")
 	fs.Parse(args)
 	self, err := os.Executable()
@@ -54,7 +95,9 @@ func up(dirs deckstore.Dirs, args []string) {
 		fail("找不到 deck 自己的路径：%v", err)
 	}
 	ctx := context.Background()
-	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: graphicsMode(*graphics)}
+	probe, native := probeTerminal()
+	mode := termprobe.Mode(strings.ToLower(*graphics), probe, native)
+	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: mode}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
 	}
@@ -77,9 +120,24 @@ func up(dirs deckstore.Dirs, args []string) {
 	if err := ensureDeckd(dirs, spec, *upstream); err != nil {
 		fail("%v", err)
 	}
+	if mode == "sixel" {
+		// 复用的布局可能是用别的画法起的：先让布局 server 认 sixel，再接上（只对之后接上的客户端生效）
+		if err := agentdeck.LayoutEnsureSixel(ctx, *layoutSock); err != nil {
+			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败（logo 会显示成占位）：%v\n", err)
+		}
+	}
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		fail("接不上布局：%v", err)
+	}
+	stop := func() {}
+	if mode == "sixel" && !native {
+		stop = keepPixels(*layoutSock, probe.CellW, probe.CellH)
+	}
+	err = cmd.Wait()
+	stop()
+	if err != nil {
 		fail("接不上布局：%v", err)
 	}
 }
@@ -283,6 +341,11 @@ func idle() {
 		if err != nil {
 			w, h = 80, 24
 		}
+		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 用 16×8 格的半格色块（16×16 点）画在标题上方（n056）
+		var art []string
+		if im := logo.Deck(); im != nil {
+			art = logo.Blocks(im, 16, 8)
+		}
 		lines := []string{
 			"Agent Deck",
 			"",
@@ -293,12 +356,18 @@ func idle() {
 			lines = append(lines, fmt.Sprintf("%-6s %s", k.Key, k.What))
 		}
 		fmt.Print("\x1b[2J\x1b[?25l")
-		top := max(1, (h-len(lines))/2)
+		top := max(1, (h-len(lines)-len(art)-1)/2)
+		for i, l := range art {
+			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-16)/2), l)
+		}
+		if len(art) > 0 {
+			top += len(art) + 1
+		}
 		for i, l := range lines {
 			col := max(1, (w-displayWidth(l))/2)
 			style := "\x1b[2m"
 			if i == 0 {
-				style = "\x1b[1;38;5;39m"
+				style = "\x1b[1;38;2;205;245;69m"
 			}
 			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", top+i, col, style, l)
 		}
