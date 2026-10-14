@@ -161,7 +161,10 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 | m（左栏） | 为选中的项目起主 agent（项目标题行也能选；与 `deck agent start-main` 同一套准入） |
 | F10 | 键盘焦点回到中间窗格 |
 
-- logo：`DECK_GRAPHICS=sixel|blocks|none`；不设时按终端名推断：有 `WT_SESSION`（Windows Terminal，1.22 起支持 Sixel）用 Sixel，其余用半格色块。这不是能力探测：老版本 Windows Terminal 或经 ssh 等丢了这个变量时，用 `DECK_GRAPHICS` 指定。
+- logo：`DECK_GRAPHICS=sixel|blocks|none`（或 `deck up -graphics`）；不设时 `deck up` 问终端（CSI 16 t 与 DA1，n056）：声明支持 Sixel 且知道一格多少像素就用 Sixel，否则用品牌色字母徽章（不再自动用半格色块：4×2 格只有 4×4 点，认不出）。
+  - WSL 下 Windows Terminal 报给 Linux 的像素尺寸永远是 0，tmux 3.4 只认这个、为 0 就把 Sixel 画成「SIXEL IMAGE」占位。`deck up` 接上布局后把问到的格子像素（Windows Terminal 回答 10×20）补进自己的终端，窗口每次改大小（WSL 会清零）后再补，并请布局整屏重画。只对经 `deck up` 接上的客户端有效：直接 `tmux attach` 的不补。
+  - 复用一个用别的画法起的布局时，`deck up` 会给布局 server 补上 Sixel 特性；各窗格里程序的画法要关掉布局重开才换。
+  - deck 自己的 logo（暂用，adr_031）与品牌色青柠 `#cdf545`：侧栏标题前（Sixel 时）、中间空闲页（嵌套 tmux 里画不了 Sixel，用 16×8 格半格色块）。
 - 中间 client 断开（例如显示的会话被关掉）会以只读重连，并把断开时显示的会话放回后台；连续 3 次在 3 秒内断开就停下等你按回车。
   每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。重建的 client 与旧的共用中间窗格的终端，所以：deckd 的每个视图操作都绑定到开始时的那个 client，每条改动 client 的 tmux 命令执行后读回，落到了新 client 上就把它还原到起点（deck-idle、只读）；`deck center` 每次起 client 之前先等 deckd 确认没有进行中的视图操作（deckd 没在运行则不用等），deckd 在而没确认时中间显示原因、不起新 client。中途发现 client 被替换：还没写下任何东西就整体撤回；lease 交还已经落盘就按操作目标补齐焦点与打开集合（接口返回 409 与最新状态），由新 client 的重连通知收尾。
 - deckd 跑在布局的后台窗口里：关掉布局 server（例如 `tmux -S … kill-server`）deckd 随之停止，agent 会话照常在 agent-deck server 上跑，
@@ -185,7 +188,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
   - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`（没有 `.prev` 说明它是第一次写，删掉即回到默认），或核对后把两份的 generation 改成一样。第一次保存时 `projects.yaml` 还不存在，缺的那份按第 0 代算，同样能识别。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
   - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
-- **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口时显示「未知」与原因，不编数字。
+- **额度**：只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口的来源在面板上不显示（deckd 内部仍按「未知」处理，不编数字）。每个来源前有它的 logo，窗口后写重置时间（今天之内只写时刻）。OpenCode 免费模型没有限额接口，按看板的撞墙日均值算当天用量百分比（与看板 `calendar.js` 同口径：今天该模型的增量 + 缓存读 + reasoning ÷ 均值），标「日」，次日 0 点重置。
 - 主 agent 工具（`deck agent`）在 n051。
 - **额外参数**（`agents.yaml` 的 `extra_args`）：只能声明白名单里的参数（`agentdeck.declaredAllow`）。n055 起随启动真正传给 CLI
   （claude 经上游 `launch --extra-arg`，codex 经 `-c "codex 参数…"`），启动后照旧按白名单核对实际命令行。claude 的「参数=取值」写法

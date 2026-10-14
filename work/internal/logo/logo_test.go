@@ -159,3 +159,27 @@ func TestAllLogosLoad(t *testing.T) {
 		t.Fatal("透明的角落在色块里应是空格，不应画出方块")
 	}
 }
+
+// n056：没设 DECK_GRAPHICS 时默认品牌色字母徽章（none），不再默认 4×2 格的半格色块。
+func TestModeDefaultIsNone(t *testing.T) {
+	t.Setenv("DECK_GRAPHICS", "")
+	if m := Mode(); m != "none" {
+		t.Fatalf("默认画法：%q", m)
+	}
+	t.Setenv("DECK_GRAPHICS", "blocks")
+	if Mode() != "blocks" {
+		t.Fatal("显式指定 blocks 仍可用")
+	}
+	t.Setenv("DECK_GRAPHICS", "sixel")
+	if Mode() != "sixel" {
+		t.Fatal("sixel")
+	}
+}
+
+// n056：deck 自己的 logo 素材嵌在二进制里，能画成 sixel 与色块。
+func TestDeckLogoEmbedded(t *testing.T) {
+	im := Deck()
+	if im == nil || len(Sixel(im, 20, 20)) < 50 || len(Blocks(im, 16, 8)) != 8 {
+		t.Fatal("deck logo 素材")
+	}
+}
