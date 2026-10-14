@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
@@ -108,6 +109,14 @@ func quotaBadge(tool, mode string, rows int) []string {
 	return out
 }
 
+// windowLabel 是窗口在面板上的名字：认识的写中文，其余（看板给的键）清洗后原样。
+func windowLabel(key string) string {
+	if l, ok := map[string]string{"5h": "5h", "week": "周", "day": "日"}[key]; ok {
+		return l
+	}
+	return strings.Join(strings.Fields(deckstore.Clean(key, 12)), " ")
+}
+
 // QuotaLines 画额度面板（n056 按 owner 2026-10-14 的要求）：每个来源前有它的 logo；每个窗口带重置时间；
 // 没有窗口或取不到来源（未知）的不显示；不再写「来自 Token 看板」。mode 是 logo 画法（sixel / blocks / none）；
 // sixel 时返回各 logo 的位置，图由调用方另画。
@@ -129,12 +138,22 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 	if len(shown) == 0 {
 		return append(lines, dim.Render("暂时没有可显示的额度")), nil
 	}
-	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 3 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
-	n := width - 6 - 4 - 5 - 2 - resetW
+	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 labelW 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
+	labelW := 3
+	for _, q := range shown {
+		for _, w := range q.Windows {
+			labelW = max(labelW, lipgloss.Width(windowLabel(w.Key)))
+		}
+	}
+	gap := 0
+	if resetW > 0 {
+		gap = 2
+	}
+	n := width - 6 - (labelW + 1) - 5 - gap - resetW
 	if n < 6 && resetW > 0 {
 		// 太窄放不下重置时间：不写它，免得被硬截成错的数（n056 自查）
 		resetW = 0
-		n = width - 6 - 4 - 5
+		n = width - 6 - (labelW + 1) - 5
 	}
 	if n < 3 {
 		// 再窄就不画条：先保住完整的百分比（n056 评审 1 B3：原先条至少 6 格，19 列时 100% 被截成「10」）
@@ -149,13 +168,20 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		if name == "" {
 			name = q.Tool
 		}
-		head := title.Render(name)
-		style := good
+		style, mark := good, ""
 		switch q.Status {
 		case dashquota.Exhausted:
-			head, style = bad.Render(name+" 用尽"), bad
+			style, mark = bad, " 用尽"
 		case dashquota.Warn:
-			head, style = warn.Render(name+" 告急"), warn
+			style, mark = warn, " 告急"
+		}
+		// 太窄时截名字、保住「用尽」「告急」（n056 attempt 2 自查）
+		if room := width - 6 - lipgloss.Width(mark); room > 0 && lipgloss.Width(name) > room {
+			name = ansi.Truncate(name, room, "…")
+		}
+		head := title.Render(name)
+		if mark != "" {
+			head = style.Render(name + mark)
 		}
 		rows := 1 + len(q.Windows)
 		badge := quotaBadge(q.Tool, mode, rows)
@@ -164,12 +190,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		}
 		lines = append(lines, " "+badge[0]+" "+head)
 		for i, w := range q.Windows {
-			label := map[string]string{"5h": "5h", "week": "周", "day": "日"}[w.Key]
-			if label == "" {
-				label = w.Key
-			}
+			label := windowLabel(w.Key)
 			// 按显示宽度补齐：「周」「日」是全角，占两格，%-3s 按字节数补会错位
-			pad := max(0, 3-lipgloss.Width(label))
+			pad := max(0, labelW-lipgloss.Width(label))
 			prefix := " " + badge[1+i] + " "
 			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), thinBar(w.Pct, n, style), w.Pct)
 			if n == 0 {

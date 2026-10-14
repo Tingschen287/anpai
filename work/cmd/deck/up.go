@@ -98,6 +98,17 @@ func up(dirs deckstore.Dirs, args []string) {
 	probe, native := probeTerminal()
 	mode := termprobe.Mode(strings.ToLower(*graphics), probe, native)
 	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: mode}
+	// 记下本次画法（在建布局之前：新起的窗格一开始就读到这次的，不先读到上次留下的；n056 评审 1 B2、attempt 2 自查）。
+	// 接不上、或退出时画法仍是自己写的，就恢复原来的：别的客户端还接着时回到它的画法
+	prevMode := logo.CurrentMode(dirs.State)
+	if err := logo.WriteMode(dirs.State, mode); err != nil {
+		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
+	}
+	restoreMode := func() {
+		if logo.CurrentMode(dirs.State) == mode && prevMode != mode {
+			logo.WriteMode(dirs.State, prevMode)
+		}
+	}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
 	}
@@ -120,19 +131,19 @@ func up(dirs deckstore.Dirs, args []string) {
 	if err := ensureDeckd(dirs, spec, *upstream); err != nil {
 		fail("%v", err)
 	}
-	// 记下本次画法：已在运行的侧栏、额度面板据此切换（复用布局时也跟着本次探测走；n056 评审 1 B2）
-	if err := logo.WriteMode(dirs.State, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
-	}
 	if mode == "sixel" {
 		// 复用的布局可能是用别的画法起的：先让布局 server 认 sixel，再接上（只对之后接上的客户端生效）
 		if err := agentdeck.LayoutEnsureSixel(ctx, *layoutSock); err != nil {
-			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败（logo 会显示成占位）：%v\n", err)
+			// 打不开就退回字母徽章：sixel 特性不在时 tmux 对所有客户端画占位（n056 attempt 2 自查）
+			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败，改用字母徽章：%v\n", err)
+			mode = "none"
+			logo.WriteMode(dirs.State, mode)
 		}
 	}
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
+		restoreMode()
 		fail("接不上布局：%v", err)
 	}
 	stop := func() {}
@@ -143,6 +154,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	}
 	err = cmd.Wait()
 	stop()
+	restoreMode()
 	if err != nil {
 		fail("接不上布局：%v", err)
 	}

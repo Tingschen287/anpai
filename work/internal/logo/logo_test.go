@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -201,5 +202,19 @@ func TestCurrentModeFollowsFile(t *testing.T) {
 	WriteMode(dir, "bogus")
 	if CurrentMode(dir) != "blocks" {
 		t.Fatal("不认识的内容：按环境变量")
+	}
+}
+
+// n056 attempt 2 自查：画法文件先写临时文件再改名，不留临时文件。
+func TestWriteModeAtomic(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteMode(dir, "sixel"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ModeFile(dir) + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("临时文件应已改名")
+	}
+	if CurrentMode(dir) != "sixel" {
+		t.Fatal("sixel")
 	}
 }

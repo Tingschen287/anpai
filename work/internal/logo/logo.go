@@ -98,7 +98,12 @@ func WriteMode(stateDir, mode string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(ModeFile(stateDir), []byte(mode+"\n"), 0o600)
+	// 先写临时文件再改名：读的一方不会读到截断到一半的文件（n056 attempt 2 自查）
+	tmp := ModeFile(stateDir) + ".tmp"
+	if err := os.WriteFile(tmp, []byte(mode+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, ModeFile(stateDir))
 }
 
 // CurrentMode 读布局当前的画法；文件没有或内容不认识时按 Mode()（DECK_GRAPHICS 环境变量）。

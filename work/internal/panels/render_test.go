@@ -186,3 +186,22 @@ func TestQuotaPercentWholeWhenNarrow(t *testing.T) {
 		}
 	}
 }
+
+// n056 attempt 2 自查：窄时截名字保住「用尽」；看板给的长窗口键按实际宽度排、不挤掉百分比，并清洗控制字符。
+func TestQuotaKeepsStatusAndLongKeys(t *testing.T) {
+	qs := []dashquota.ToolQuota{{Tool: "antigravity", Label: "Antigravity Claude", Status: dashquota.Exhausted,
+		Windows: []dashquota.Window{{Key: "5h", Pct: 100}, {Key: "monthly\x1b[2J", Pct: 7}}}}
+	for _, w := range []int{22, 26, 30, 44} {
+		lines, _ := QuotaLines(qs, w, "none")
+		raw := strings.Join(lines, "\n")
+		out := plain(raw)
+		if !strings.Contains(out, "用尽") || !strings.Contains(out, "100%") || !strings.Contains(out, "  7%") || strings.Contains(raw, "\x1b[2J") {
+			t.Errorf("宽 %d：\n%s", w, out)
+		}
+		for _, l := range strings.Split(out, "\n") {
+			if ansi.StringWidth(l) > w {
+				t.Errorf("宽 %d 超出：%q", w, l)
+			}
+		}
+	}
+}
