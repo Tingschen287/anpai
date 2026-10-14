@@ -122,3 +122,30 @@ func TestPanelsCleanModelTextAndErrors(t *testing.T) {
 		t.Fatalf("错误文本应清洗：%q", v)
 	}
 }
+
+// n056 自查：重置时刻已过写「已重置」；窄到放不下重置时间时不写它，百分比不被截断。
+func TestQuotaResetPastAndNarrow(t *testing.T) {
+	now := time.Date(2026, 10, 14, 15, 25, 0, 0, time.Local)
+	quotaNow = func() time.Time { return now }
+	defer func() { quotaNow = time.Now }()
+	qs := []dashquota.ToolQuota{{Tool: "codex", Status: dashquota.Available, Windows: []dashquota.Window{
+		{Key: "5h", Pct: 100, Reset: time.Date(2026, 10, 14, 14, 54, 0, 0, time.Local)},
+		{Key: "week", Pct: 8, Reset: time.Date(2026, 10, 20, 14, 54, 0, 0, time.Local)}}}}
+	lines, _ := QuotaLines(qs, 44, "none")
+	out := plain(strings.Join(lines, "\n"))
+	if !strings.Contains(out, "↻ 已重置") || strings.Contains(out, "14:54\n") || !strings.Contains(out, "↻ 10/20 14:54") {
+		t.Fatalf("%s", out)
+	}
+	for _, w := range []int{30, 26, 22} {
+		lines, _ := QuotaLines(qs, w, "none")
+		out := plain(strings.Join(lines, "\n"))
+		if strings.Contains(out, "↻") || !strings.Contains(out, "100%") {
+			t.Errorf("宽 %d：不写重置时间、百分比完整：\n%s", w, out)
+		}
+		for _, l := range strings.Split(out, "\n") {
+			if ansi.StringWidth(l) > w {
+				t.Errorf("宽 %d 超出：%q", w, l)
+			}
+		}
+	}
+}

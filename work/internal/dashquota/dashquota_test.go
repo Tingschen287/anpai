@@ -110,8 +110,17 @@ func TestOpenCodeZenDailyWindow(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 	defer srv.Close()
 	c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
-	q := c.Tool(context.Background(), "opencode")
-	if q.Status != Available || len(q.Windows) != 1 {
+	// 额度门用的 Tool 不返回估算窗口：照旧未知
+	if q := c.Tool(context.Background(), "opencode"); q.Status != Unknown || len(q.Windows) != 0 || q.Estimated {
+		t.Fatalf("Tool 不该给估算：%+v", q)
+	}
+	var q ToolQuota
+	for _, x := range c.Display(context.Background()) {
+		if x.Tool == "opencode" {
+			q = x
+		}
+	}
+	if q.Status != Available || len(q.Windows) != 1 || !q.Estimated {
 		t.Fatalf("%+v", q)
 	}
 	w := q.Windows[0]
@@ -136,7 +145,12 @@ func TestOpenCodeZenCapsAndMissingModel(t *testing.T) {
 			now.Format(time.RFC3339), tc.zen)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 		c := &Client{URL: srv.URL, Now: func() time.Time { return now }}
-		q := c.Tool(context.Background(), "opencode")
+		var q ToolQuota
+		for _, x := range c.Display(context.Background()) {
+			if x.Tool == "opencode" {
+				q = x
+			}
+		}
 		srv.Close()
 		if q.Status != tc.status || tc.status != Unknown && q.Windows[0].Pct != tc.pct {
 			t.Errorf("%s：%+v", tc.zen, q)

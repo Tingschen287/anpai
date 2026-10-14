@@ -37,7 +37,7 @@ func probeTerminal() (termprobe.Result, bool) {
 	if !term.IsTerminal(os.Stdin.Fd()) {
 		return termprobe.Result{}, false
 	}
-	r := termprobe.Query(os.Stdin, 600*time.Millisecond)
+	r := termprobe.Query(os.Stdin, time.Second)
 	native := false
 	if ws, err := termprobe.Winsize(int(os.Stdin.Fd())); err == nil && ws.Xpixel > 0 && ws.Ypixel > 0 {
 		native = true
@@ -132,7 +132,9 @@ func up(dirs deckstore.Dirs, args []string) {
 		fail("接不上布局：%v", err)
 	}
 	stop := func() {}
-	if mode == "sixel" && !native {
+	if mode == "sixel" {
+		// 不看 native：同一个终端里第二次 deck up 时，读到的像素可能是上次自己补的（WSL 改大小会再清零）；
+		// 终端真自己报像素时 FixPixels 什么都不写（n056 自查）
 		stop = keepPixels(*layoutSock, probe.CellW, probe.CellH)
 	}
 	err = cmd.Wait()
@@ -343,8 +345,8 @@ func idle() {
 		}
 		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 用 16×8 格的半格色块（16×16 点）画在标题上方（n056）
 		var art []string
-		if im := logo.Deck(); im != nil {
-			art = logo.Blocks(im, 16, 8)
+		if im := logo.Deck(); im != nil && h >= 12+8+2 && w >= 20 {
+			art = logo.Blocks(im, 16, 8) // 高度放不下就不画，免得挤掉按键说明（n056 自查）
 		}
 		lines := []string{
 			"Agent Deck",

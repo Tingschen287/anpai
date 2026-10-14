@@ -62,6 +62,9 @@ func resetText(r, now time.Time) string {
 		return ""
 	}
 	l, n := r.Local(), now.Local()
+	if !l.After(n) {
+		return "↻ 已重置" // 看板的窗口数据停在上一个周期（例如 Codex 一阵没用）：时刻已过，旁边的百分比是旧的（n056 自查）
+	}
 	if l.Year() == n.Year() && l.YearDay() == n.YearDay() {
 		return "↻ " + l.Format("15:04")
 	}
@@ -108,6 +111,11 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 	}
 	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 3 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
 	n := width - 6 - 4 - 5 - 2 - resetW
+	if n < 6 && resetW > 0 {
+		// 太窄放不下重置时间：不写它，免得被硬截成错的数（n056 自查）
+		resetW = 0
+		n = width - 6 - 4 - 5
+	}
 	if n < 6 {
 		n = 6
 	}
@@ -141,7 +149,7 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 				prefix = " " + badge[1] + " "
 			}
 			line := fmt.Sprintf("%s%s%s %s %3d%%", prefix, label, strings.Repeat(" ", pad), style.Render(bar(w.Pct, n)), w.Pct)
-			if r := resetText(w.Reset, now); r != "" {
+			if r := resetText(w.Reset, now); r != "" && resetW > 0 {
 				line += "  " + dim.Render(r)
 			}
 			lines = append(lines, line)

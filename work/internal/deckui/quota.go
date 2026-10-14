@@ -63,13 +63,25 @@ func RunQuota(c *deckclient.Client) error {
 	}
 	var qs []dashquota.ToolQuota
 	var ferr error
+	type got struct {
+		qs  []dashquota.ToolQuota
+		err error
+	}
+	results := make(chan got, 1)
+	busy := false
+	// 取数放到后台：deckd 慢时按键与改大小照常响应（n056 自查：原先同步取数最多卡 10 秒）
 	fetch := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var x []dashquota.ToolQuota
-		if ferr = c.Get(ctx, "/v1/quota", &x); ferr == nil {
-			qs = x
+		if busy {
+			return
 		}
+		busy = true
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var x []dashquota.ToolQuota
+			err := c.Get(ctx, "/v1/quota", &x)
+			results <- got{x, err}
+		}()
 	}
 	last := ""
 	draw := func() {
@@ -93,9 +105,14 @@ func RunQuota(c *deckclient.Client) error {
 			cw, ch = cellSize()
 			last = ""
 			draw()
+		case r := <-results:
+			busy = false
+			if ferr = r.err; ferr == nil {
+				qs = r.qs
+			}
+			draw()
 		case <-tick.C:
 			fetch()
-			draw()
 		}
 	}
 }

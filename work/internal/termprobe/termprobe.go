@@ -102,6 +102,10 @@ func Query(tty *os.File, timeout time.Duration) Result {
 			break
 		}
 	}
+	if !da1Re.Match(buf) {
+		// 超时：终端的回答可能还在路上，清掉输入缓冲，免得迟到的回答被 tmux 当成按键送进窗格（n056 自查）
+		unix.IoctlSetInt(int(fd), unix.TCFLSH, unix.TCIFLUSH)
+	}
 	return Parse(string(buf))
 }
 

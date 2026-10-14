@@ -246,7 +246,7 @@ func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "没接 Token 看板")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.quota.All(r.Context()))
+	writeJSON(w, http.StatusOK, s.quota.Display(r.Context())) // 面板用：OpenCode 的估算窗口只在这里补（n056）
 }
 
 func (s *Server) getProjects(w http.ResponseWriter, r *http.Request) {

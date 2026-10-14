@@ -49,6 +49,9 @@ type ToolQuota struct {
 	Windows   []Window  `json:"windows"`
 	Reason    string    `json:"reason,omitempty"`
 	Generated time.Time `json:"generated,omitempty"`
+	// Estimated 为真表示窗口是估算的（OpenCode 免费模型的撞墙日均值），只给面板显示；
+	// Tool 永远不返回估算窗口，deckd 的额度门照旧把这类来源当「未知」（n056 自查：估算不能放开 frontier 子 agent 的门）。
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // Thresholds 是告急与用尽的阈值（百分比），可配。
@@ -200,30 +203,51 @@ func (c *Client) Tool(ctx context.Context, tool string) ToolQuota {
 		return q
 	}
 	wins, found := windowsFor(p, prof)
-	if (!found || len(wins) == 0) && tool == "opencode" {
-		if w, ok := zenWindow(p, c.now()); ok {
-			wins, found = []Window{w}, true
-		}
-	}
 	if !found || len(wins) == 0 {
 		q.Reason = "看板没有这个来源的额度窗口（例如 OpenCode 免费席位只有估算）"
 		return q
 	}
 	q.Windows = wins
+	q.Status = c.statusOf(wins)
+	return q
+}
+
+func (c *Client) statusOf(wins []Window) string {
 	th := c.Thresholds
 	if th.Warn == 0 && th.Exhausted == 0 {
 		th = DefaultThresholds
 	}
-	q.Status = Available
+	status := Available
 	for _, w := range wins {
 		switch {
 		case w.Pct >= th.Exhausted:
-			q.Status = Exhausted
-		case w.Pct >= th.Warn && q.Status != Exhausted:
-			q.Status = Warn
+			status = Exhausted
+		case w.Pct >= th.Warn && status != Exhausted:
+			status = Warn
 		}
 	}
-	return q
+	return status
+}
+
+// Display 是给额度面板看的全部工具额度（deckd 的 /v1/quota）：在 All 的基础上，OpenCode 没有真实窗口、
+// 但看板有撞墙日均值时，补上估算的「日」窗口并标 Estimated（n056，owner 要求按看板的均值逻辑显示）。
+// 额度门不要用它，用 Tool。
+func (c *Client) Display(ctx context.Context) []ToolQuota {
+	out := c.All(ctx)
+	for i, q := range out {
+		if q.Tool != "opencode" || q.Status != Unknown || q.Generated.IsZero() {
+			continue // 取不到、过期、没有生成时间的不补：面板照样不显示
+		}
+		p, err := c.fetch(ctx)
+		if err != nil {
+			continue
+		}
+		if w, ok := zenWindow(p, c.now()); ok {
+			out[i].Windows, out[i].Status, out[i].Estimated = []Window{w}, c.statusOf([]Window{w}), true
+			out[i].Reason = "估算：看板撞墙日均值（不作额度门依据）"
+		}
+	}
+	return out
 }
 
 // zenWindow 按看板前端（calendar.js）的同一口径算 OpenCode 当天额度（n056，owner：「opencode需要你去看我的token Dashboard
