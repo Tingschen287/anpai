@@ -718,7 +718,22 @@ func (m *Settings) fitWidth(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// sanitizePath 清理要显示的目录、路径：与 sanitize 一样去控制字符、打码，但不按 80 个字截短（折行显示全）。
+// fitLines 把底部的几行各自按窗口宽折行。
+func (m *Settings) fitLines(lines []string) []string {
+	if m.width <= 0 {
+		return lines
+	}
+	var out []string
+	for _, l := range lines {
+		out = append(out, strings.Split(m.fitWidth(l), "\n")...)
+	}
+	return out
+}
+
+// textCap 是报错、提示原样显示的长度上限：只防异常长的文字，平常的都显示全、折行（验收：80×24 及以上无截断）。
+const textCap = 1000
+
+// sanitizePath 清理要显示的目录、路径与拼起来的名字清单：与 sanitize 一样去控制字符、打码，但不按 80 个字截短（折行显示全）。
 func sanitizePath(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
 
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
@@ -788,12 +803,14 @@ func (m *Settings) tabBar() string {
 }
 
 func (m *Settings) View() string {
+	// 三个出口（新建项目表单、子视图、页面）都是：正文与底部各自按窗口宽折行，再按窗口高滚动（n059 自查 3：
+	// 一处一处折总有漏的——底部的输入框、表单的报错、折成多行的长目录——所以在出口统一兜底）
 	if m.form != nil {
-		return m.fitWidth(m.formView())
+		return fitHeight(m.fitWidth(m.formView()), m.fitLines(m.formFoot()), m.height)
 	}
 	if m.sub != nil {
 		body, foot := m.subView() // 模型、候选多时也看得见光标行、顶部按键提示与底部的输入框和提示（n057 评审 1、attempt 2 自查）
-		return fitHeight(m.fitWidth(body), foot, m.height)
+		return fitHeight(m.fitWidth(body), m.fitLines(foot), m.height)
 	}
 	var b strings.Builder
 	b.WriteString(m.tabBar())
@@ -826,7 +843,7 @@ func (m *Settings) View() string {
 	case pageTrust:
 		m.trustPage(&b, row, cont)
 	}
-	return fitHeight(m.fitWidth(b.String()), m.foot(), m.height)
+	return fitHeight(m.fitWidth(b.String()), m.fitLines(m.foot()), m.height)
 }
 
 func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string) {
@@ -999,12 +1016,12 @@ func (m *Settings) foot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, textCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.saved")+reset)
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, 240)))
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, textCap)))
 	}
 	if m.height <= 0 || m.height >= 13 {
 		if h := m.rowHelp(); h != "" {

@@ -2,6 +2,7 @@ package deckui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -348,5 +349,84 @@ func TestNewProjectHintSurvivesTransientFailure(t *testing.T) {
 	press(m, "s")
 	if !strings.Contains(m.msg, "按 m 起主 agent") {
 		t.Fatalf("重试存上后提示去侧栏：%q", m.msg)
+	}
+}
+
+// 长内容扫一遍（n059 自查 3）：很多长名字的项目在用同一个模型、很长的模型 id 与改名输入框、很长的授权目录与 CLI 路径、
+// 很长的新建目录与很多子目录、表单报错——80×24 及以上每个画面都不超宽、不超高、不截短（「……」是省略号文字，不算），标题与关键内容都在。
+func TestLongContentSweepNothingTruncated(t *testing.T) {
+	longID := "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+	longDir := "/home/linux/ai/05.code/github/Tingschen287/terminal-deck/.claude/worktrees/n049-a1/work"
+	newDir := filepath.Join(t.TempDir(), "a-quite-long-directory-name-for-the-size-check", "terminal-deck-worktrees-n049-a1-and-more")
+	for i := 0; i < 20; i++ {
+		if err := os.MkdirAll(filepath.Join(newDir, fmt.Sprintf("subdirectory-with-a-long-name-%02d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names := []string{"finance-reconcile-ai", "hr-resume-screen", "contract-review-ai", "terminal-deck-main", "data-platform-ontology", "infra-visible-agent-orchestration"}
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {140, 40}} {
+		m, api := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		m.Start = newDir
+		for _, id := range names {
+			m.set.Projects = append(m.set.Projects, deckstore.ProjectDef{ID: id, Name: id, Path: "/tmp/" + id, Agents: []string{"claude"},
+				Models:    map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
+				MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope(id)})
+		}
+		m.set.Projects[len(m.set.Projects)-1].Path = newDir // 选这个目录会报「已经是项目」
+		c := m.agentPtr("claude")
+		c.Models = append([]deckstore.ModelDef{{ID: longID, Tier: deckstore.Balanced}}, c.Models...)
+		m.trust = []deckstore.TrustGrant{{Project: "infra-visible-agent-orchestration", Tool: "codex", Dir: longDir, ApprovedAt: time.Now()}}
+		for i := range api.tools {
+			api.tools[i].Path = "/home/linux/.local/share/some-very-long-install-prefix/with-another-level/bin/" + api.tools[i].Binary
+		}
+		check := func(what, head string, must ...string) {
+			t.Helper()
+			v := plainView(m)
+			ls := strings.Split(v, "\n")
+			if len(ls) > size[1] {
+				t.Fatalf("%dx%d %s：超高 %d 行：\n%s", size[0], size[1], what, len(ls), v)
+			}
+			if !strings.Contains(ls[0], head) {
+				t.Fatalf("%dx%d %s：第一行不是标题 %q：\n%s", size[0], size[1], what, head, v)
+			}
+			for _, l := range ls {
+				if ansi.StringWidth(l) > size[0] || strings.Contains(strings.ReplaceAll(l, "……", ""), "…") {
+					t.Fatalf("%dx%d %s：超宽或截短：%q\n%s", size[0], size[1], what, l, v)
+				}
+			}
+			flat := strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "")
+			for _, w := range must {
+				if !strings.Contains(flat, strings.ReplaceAll(w, " ", "")) {
+					t.Fatalf("%dx%d %s：缺 %q：\n%s", size[0], size[1], what, w, v)
+				}
+			}
+		}
+		check("项目页", "设置", "q 关闭")
+		press(m, "3")
+		check("授权页", "设置", longDir)
+		press(m, "2", "enter")
+		check("agent 编辑", "Claude Code", "esc 返回", longID, "项目在用：ai、contract-review-ai、data-platform-ontology、finance-reconcile-ai、hr-resume-screen、infra-visible-agent-orchestration、terminal-deck-main")
+		press(m, "e")
+		check("改长模型 id", "Claude Code", "esc 返回", "改 "+longID+" 的 id："+longID+"▏", "esc 取消")
+		press(m, "esc", "+")
+		m.sub.input.all = names
+		check("加模型", "Claude Code", "esc 返回", "esc 取消")
+		press(m, "esc", "esc", "a")
+		check("加入", "加入本机的 agent", "with-another-level/bin/grok", "esc 返回")
+		press(m, "esc", "1")
+		goRow(t, m, rowTier, "", deckstore.Balanced)
+		press(m, "enter")
+		check("档位多选", "日常", "esc 返回")
+		press(m, "esc", "n")
+		check("新建项目 · 选目录", "新建项目", newDir, "subdirectory-with-a-long-name-00/")
+		press(m, "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down", "down")
+		check("新建项目 · 选目录（滚到下面）", "新建项目", "subdirectory-with-a-long-name-17/")
+		press(m, "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "enter")
+		check("新建项目 · 已是项目", "新建项目", newDir, "infra-visible-agent-orchestration")
+		m.form.err = "读不了 " + newDir + "/subdirectory-with-a-long-name-03：open " + newDir + "/subdirectory-with-a-long-name-03: permission denied"
+		check("新建项目 · 读不了", "新建项目", "permission denied")
+		m.form.err = ""
+		press(m, "esc")
 	}
 }

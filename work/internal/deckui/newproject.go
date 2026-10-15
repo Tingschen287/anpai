@@ -289,11 +289,16 @@ func (m *Settings) formView() string {
 		for _, id := range p.Agents {
 			names = append(names, m.agentName(id))
 		}
-		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitize(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
+		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitizePath(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
 		b.WriteString(" " + m.note(T("form.later")))
 	}
-	if f.err != "" {
-		b.WriteString("\n\x1b[38;5;196m " + oneLine(deckstore.Clean(f.err, 240)) + "\x1b[0m\n")
-	}
 	return b.String()
+}
+
+// formFoot 是表单底部的报错：放在底部固定，目录长、子目录多要滚动时也看得见（n059 自查 3）。
+func (m *Settings) formFoot() []string {
+	if m.form.err == "" {
+		return nil
+	}
+	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Clean(m.form.err, textCap)) + "\x1b[0m"}
 }

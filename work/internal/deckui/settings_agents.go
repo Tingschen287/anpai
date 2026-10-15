@@ -104,7 +104,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		in := m.sub.input
 		in.loading = false
 		if msg.err != nil {
-			in.note = T("input.listfail", oneLine(deckstore.Clean(errText(msg.err), 120)))
+			in.note = T("input.listfail", oneLine(deckstore.Clean(errText(msg.err), textCap)))
 			return nil
 		}
 		in.all = msg.models
@@ -364,7 +364,7 @@ func (m *Settings) agentView() (string, []string) {
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
-			parts = append(parts, sanitize(strings.Join(g, " ")))
+			parts = append(parts, sanitizePath(strings.Join(g, " ")))
 		}
 		b.WriteString(m.note(T("agent.extra", strings.Join(parts, T("sep.semi")))))
 	}
@@ -376,7 +376,7 @@ func (m *Settings) agentView() (string, []string) {
 	for i, md := range a.Models {
 		use := ""
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			use = dimOn + "  " + T("model.used", sanitize(strings.Join(users, T("sep.list")))) + reset
+			use = dimOn + "  " + T("model.used", sanitizePath(strings.Join(users, T("sep.list")))) + reset // 项目多时不截（n059 自查 3）
 		}
 		id := sanitize(md.ID)
 		if pad := 34 - ansi.StringWidth(id); pad > 0 {
@@ -420,12 +420,12 @@ func (m *Settings) msgFoot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, textCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, 240)))
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, textCap)))
 	}
 	return m.wrapFoot(out)
 }
@@ -553,7 +553,7 @@ func (m *Settings) inputView() string {
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitize(in.text) + reset + "▏\n")
 	if in.note != "" {
-		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, 160))))
+		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, textCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {
