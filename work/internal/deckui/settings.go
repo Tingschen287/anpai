@@ -133,14 +133,15 @@ type Settings struct {
 	cur       int            // 当前页里光标所在的行（rows 下标）
 	curs      [pageCount]int // 各页离开时的光标，回来时还在原处
 	// 自动保存（n059，owner 选「改完自动保存」）：每改一处就整份保存；同一时间只有一次在路上，路上又改了就回来再存。
-	dirty    bool   // 有改动还没存上
-	edits    int    // 每次改动加一：保存回来时据此判断保存期间有没有新改动
-	saving   bool   // 有一次保存在路上
-	pending  bool   // 保存在路上时又改了
-	conflict bool   // 别处改过（409）：不再自动保存，等 owner 按 R 重新读取
-	saveErr  string // 上一次保存没成的原因
-	saved    bool   // 存成过（底部显示「已保存」）
-	reloads  int    // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
+	dirty    bool        // 有改动还没存上
+	edits    int         // 每次改动加一：保存回来时据此判断保存期间有没有新改动
+	saving   bool        // 有一次保存在路上
+	pending  bool        // 保存在路上时又改了
+	conflict bool        // 别处改过（409）：不再自动保存，等 owner 按 R 重新读取
+	saveErr  string      // 上一次保存没成的原因
+	saved    bool        // 存成过（底部显示「已保存」）
+	scr      scrollState // 画面滚动（n059 attempt 2）
+	reloads  int         // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
 	// 再按一次确认：q（有没存上的改动时关闭）、R（丢掉没存上的改动重读）、d（撤销授权）各自确认（n057 自查：不能共用）
 	quitAsked   bool
 	reloadAsked bool
@@ -427,6 +428,33 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.msg = T("action.done", msg.what)
 		return m, m.loadTrust
 	case tea.KeyMsg:
+		switch k := msg.String(); k {
+		case "pgdown", "pgup":
+			// 翻页：窗口脱开光标上下翻一屏，放不下的内容（很长的报错、很高的块）都翻得到（n059 attempt 2，评审 1 B2、B3）
+			step := max(1, m.scr.show)
+			if k == "pgup" {
+				step = -step
+			}
+			m.scr.off += step
+			return m, nil
+		case "down", "j", "up", "k":
+			m.scr.off = 0
+			// 光标所在的块比一屏还高（例如一个 agent 的模型很多）：↑↓ 先在块里滚，滚到头再移光标（评审 1 B2）
+			if m.form == nil && (m.sub == nil || m.sub.input == nil) {
+				step := max(1, m.scr.show-1) // 一次翻大半屏（留一行接上），块里的内容几下就看完
+				if (k == "down" || k == "j") && m.scr.blockOff < m.scr.blockMax {
+					m.scr.blockOff = min(m.scr.blockOff+step, m.scr.blockMax)
+					return m, nil
+				}
+				if (k == "up" || k == "k") && m.scr.blockOff > 0 {
+					m.scr.blockOff = max(m.scr.blockOff-step, 0)
+					return m, nil
+				}
+			}
+			m.scr.blockOff = 0
+		default:
+			m.scr.off = 0
+		}
 		before := m.edits
 		var cmd tea.Cmd
 		switch {
@@ -680,7 +708,7 @@ func (m *Settings) fixMain(p *deckstore.ProjectDef) {
 	if opts := m.mainOptions(p); len(opts) > 0 {
 		p.MainAgent = opts[0]
 	}
-	m.msg = T("main.moved", m.agentName(old.Agent), tierName(old.Tier), m.mainText(p.MainAgent))
+	m.msg = T("main.moved", m.agentName(old.Agent), tierName(old.Tier), m.agentName(old.Agent), m.mainText(p.MainAgent))
 }
 
 // mainText 是「agent · 档位」的显示（未选时写明）。
@@ -709,13 +737,34 @@ func (m *Settings) fitWidth(s string) string {
 	if m.width <= 0 {
 		return s
 	}
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		if ansi.StringWidth(l) > m.width {
-			lines[i] = ansi.Wrap(l, max(1, m.width-1), "") // 留 1 列：行首空格加超长词时 ansi.Wrap 第一行会多 1 列（n059 自查 4）
+	lim := max(1, m.width-1) // 留 1 列：行首空格加超长词时 ansi.Wrap 第一行会多 1 列（n059 自查 4）
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if ansi.StringWidth(l) <= m.width {
+			out = append(out, l)
+			continue
+		}
+		// ansi.Wrap 遇到某些长度、带连字符的长词会折出空行而把长词整个留在一行（评审 1 B1）：
+		// 折完逐行再量，还超宽的按宽度硬折；折出来的空行不要（里面的颜色码接到下一行前面）
+		carry := ""
+		for _, p := range strings.Split(ansi.Wrap(l, lim, ""), "\n") {
+			p = carry + p
+			carry = ""
+			if strings.TrimSpace(ansi.Strip(p)) == "" {
+				carry = p
+				continue
+			}
+			if ansi.StringWidth(p) > lim {
+				out = append(out, strings.Split(ansi.Hardwrap(p, lim, true), "\n")...)
+				continue
+			}
+			out = append(out, p)
+		}
+		if carry != "" && len(out) > 0 {
+			out[len(out)-1] += carry
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // fitLines 把底部的几行各自按窗口宽折行。
@@ -810,17 +859,17 @@ func (m *Settings) View() string {
 	// 三个出口（新建项目表单、子视图、页面）都是：正文与底部各自按窗口宽折行，再按窗口高滚动（n059 自查 3：
 	// 一处一处折总有漏的——底部的输入框、表单的报错、折成多行的长目录——所以在出口统一兜底）
 	if m.form != nil {
-		return fitHeight(m.fitWidth(m.formView()), m.fitLines(m.formFoot()), m.height)
+		return m.fitScreen(m.fitWidth(m.formView()), m.fitLines(m.formFoot()), 1)
 	}
 	if m.sub != nil {
 		body, foot := m.subView() // 模型、候选多时也看得见光标行、顶部按键提示与底部的输入框和提示（n057 评审 1、attempt 2 自查）
-		return fitHeight(m.fitWidth(body), m.fitLines(foot), m.height)
+		return m.fitScreen(m.fitWidth(body), m.fitLines(foot), 1)
 	}
 	var b strings.Builder
 	b.WriteString(m.tabBar())
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
-		return fitHeight(m.fitWidth(b.String()), nil, m.height) // 读不到设置的报错也折行（n059 自查 4）
+		return m.fitScreen(m.fitWidth(b.String()), nil, 1) // 读不到设置的报错也折行（n059 自查 4）
 	}
 	line, lastSel := 0, false
 	// row 画一行能移光标的行：光标所在行前面是「›」并整行加底色
@@ -851,7 +900,7 @@ func (m *Settings) View() string {
 	if m.page == pageProject && m.project() != nil {
 		keep = 2 // 项目页：「项目 ‹ 名字 ›」一行也固定在顶部，滚动时看得见在改哪个项目（n059 自查 4）
 	}
-	return fitHeightKeep(m.fitWidth(b.String()), m.fitLines(m.foot()), m.height, keep)
+	return m.fitScreen(m.fitWidth(b.String()), m.fitLines(m.foot()), keep)
 }
 
 func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string) {
@@ -1113,16 +1162,29 @@ func wrapKeys(keys string, width int) []string {
 // fitHeight 让画面放得进窗口（n057 自查：矮窗口时顶部按键提示与光标行被裁掉）：顶部标题（到第一个空行为止）与底部提示固定，
 // 中间按光标所在行（「›」）滚动，上下还有内容时写明。
 func fitHeight(body string, foot []string, height int) string {
-	return fitHeightKeep(body, foot, height, 1)
+	var st scrollState
+	return fitHeightState(body, foot, height, 1, &st)
 }
 
-// fitHeightKeep 同 fitHeight，固定的标题到第 keep 个空行为止。
-func fitHeightKeep(body string, foot []string, height, keep int) string {
+// scrollState 是画面滚动的状态（n059 attempt 2，评审 1 B2、B3）。blockOff：光标所在的块比一屏还高时块内往下滚了几行
+// （↑↓ 先在块内滚，滚到头再移光标）；off：PgUp/PgDn 叠加的行数（按别的键清零）；show、blockMax：上一次画面量出来的，按键时用。
+type scrollState struct{ blockOff, blockMax, off, show int }
+
+// fitScreen 按窗口高画出来，滚动状态记在 m.scr。
+func (m *Settings) fitScreen(body string, foot []string, keep int) string {
+	return fitHeightState(body, foot, m.height, keep, &m.scr)
+}
+
+// fitHeightState 同 fitHeight：固定的标题到第 keep 个空行为止；底部固定不下时（例如很长的报错）底部也一起滚，
+// 默认从底部第一行（输入框或保存状态）看起，PgUp/PgDn 翻看其余（评审 1 B3）。
+func fitHeightState(body string, foot []string, height, keep int, st *scrollState) string {
+	st.blockMax, st.show = 0, 0
 	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
 	if len(foot) > 0 {
 		foot = append([]string{""}, foot...)
 	}
 	if height <= 0 || len(lines)+len(foot) <= height {
+		st.off, st.blockOff = 0, 0
 		return strings.Join(append(lines, foot...), "\n")
 	}
 	head := 0
@@ -1134,35 +1196,51 @@ func fitHeightKeep(body string, foot []string, height, keep int) string {
 		}
 	}
 	head = min(head+1, len(lines))
-	rest := lines[head:]
-	avail := height - head - len(foot)
-	if avail < 3 {
-		avail = 3
-	}
-	at := 0
-	for i, l := range rest {
-		if strings.Contains(l, "›") {
-			at = i
+	rest, pinned := lines[head:], foot
+	at, blockEnd := 0, 0
+	if head+len(foot)+3 > height {
+		// 底部固定不下：底部接在正文后面一起滚，从底部第一行起看（评审 1 B3：以前强留 3 行正文，总高超出窗口）
+		rest = append(append([]string{}, rest...), foot...)
+		pinned = nil
+		at = min(len(rest)-len(foot)+1, len(rest)-1)
+		blockEnd = len(rest) - 1
+	} else {
+		for i, l := range rest {
+			if strings.Contains(l, "›") {
+				at = i
+			}
+		}
+		// 光标所在的整块（「›」行与它折下来、同样带底色的续行）都要在窗口里（n059 自查 5）
+		blockEnd = at
+		for blockEnd+1 < len(rest) && strings.Contains(rest[blockEnd+1], selBg) {
+			blockEnd++
 		}
 	}
-	show := avail - 2 // 留两行写「上面 / 下面还有几行」
-	// 光标所在的整块（「›」行与它折下来、同样带底色的续行）都要在窗口里：只让「›」行居中的话，
-	// 最后一行折出很多续行时下面几行怎么也滚不出来（n059 自查 5）；块比窗口还长时先保住「›」行
-	blockEnd := at
-	for blockEnd+1 < len(rest) && strings.Contains(rest[blockEnd+1], selBg) {
-		blockEnd++
-	}
+	show := max(1, height-head-len(pinned)-2) // 留两行写「上面 / 下面还有几行」
+	st.show = show
 	start := at - show/2
 	if blockEnd-start+1 > show {
 		start = blockEnd - show + 1
 	}
-	start = max(0, min(start, at, len(rest)-show))
+	start = min(start, at)
+	if n := blockEnd - at + 1; n > show {
+		// 块比一屏还高：从块顶起，↑↓ 在块内滚（评审 1 B2）
+		st.blockMax = n - show
+		st.blockOff = max(0, min(st.blockOff, st.blockMax))
+		start = at + st.blockOff
+	} else {
+		st.blockOff = 0
+	}
+	maxStart := max(0, len(rest)-show)
+	base := max(0, min(start, maxStart))
+	start = max(0, min(base+st.off, maxStart)) // PgUp/PgDn
+	st.off = start - base
 	end := min(len(rest), start+show)
 	out := append([]string{}, lines[:head]...)
 	out = append(out, dimOn+"   "+T("scroll.up", start)+reset)
 	out = append(out, rest[start:end]...)
 	out = append(out, dimOn+"   "+T("scroll.down", len(rest)-end)+reset)
-	return strings.Join(append(out, foot...), "\n")
+	return strings.Join(append(out, pinned...), "\n")
 }
 
 // RunSettings 跑设置界面（布局里按 F9 开的窗口，关掉就回到布局）。

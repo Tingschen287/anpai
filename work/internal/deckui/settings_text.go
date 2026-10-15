@@ -75,8 +75,8 @@ var textZH = map[string]string{
 	"reload.confirm":    "重新读取会丢掉没存上的改动：再按一次 R 确认",
 	"quit.saving":       "正在保存",
 	"quit.unsaved":      "有改动还没存上（%s）：再按一次 q 放弃并关闭",
-	"scroll.up":         "↑ 上面还有 %d 行",
-	"scroll.down":       "↓ 下面还有 %d 行",
+	"scroll.up":         "↑ 上面还有 %d 行（PgUp 翻页）",
+	"scroll.down":       "↓ 下面还有 %d 行（PgDn 翻页）",
 
 	// 随光标变化的一行说明（n059：代替以前固定的大段灰字）
 	"help.pick":      "空格 勾选或取消：勾选的 agent 的模型都能点名用",
