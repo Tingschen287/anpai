@@ -1146,7 +1146,17 @@ func fitHeightKeep(body string, foot []string, height, keep int) string {
 		}
 	}
 	show := avail - 2 // 留两行写「上面 / 下面还有几行」
-	start := max(0, min(at-show/2, len(rest)-show))
+	// 光标所在的整块（「›」行与它折下来、同样带底色的续行）都要在窗口里：只让「›」行居中的话，
+	// 最后一行折出很多续行时下面几行怎么也滚不出来（n059 自查 5）；块比窗口还长时先保住「›」行
+	blockEnd := at
+	for blockEnd+1 < len(rest) && strings.Contains(rest[blockEnd+1], selBg) {
+		blockEnd++
+	}
+	start := at - show/2
+	if blockEnd-start+1 > show {
+		start = blockEnd - show + 1
+	}
+	start = max(0, min(start, at, len(rest)-show))
 	end := min(len(rest), start+show)
 	out := append([]string{}, lines[:head]...)
 	out = append(out, dimOn+"   "+T("scroll.up", start)+reset)

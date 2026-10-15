@@ -520,3 +520,68 @@ func TestLongContentSweepMore(t *testing.T) {
 		press(m, "esc")
 	}
 }
+
+// 每一行都滚得到（n059 自查 5）：光标在最后一行、这一行折出很多续行时，续行也要在窗口里——
+// 便宜档放 9 个长 id、某个模型被 13 个项目在用，80×24 与 100×30 下从上到下移一遍光标，每个 id、每个项目名都出现过，且不超高。
+func TestEveryWrappedLineReachable(t *testing.T) {
+	var ids []string
+	for i := 0; i < 9; i++ {
+		ids = append(ids, fmt.Sprintf("us.anthropic.claude-haiku-4-5-202510%02d-v1:0", i))
+	}
+	var projects []string
+	for i := 0; i < 13; i++ {
+		projects = append(projects, fmt.Sprintf("project-with-a-longer-name-%02d", i))
+	}
+	for _, size := range [][2]int{{80, 24}, {100, 30}} {
+		m, _ := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		m.set.Agents = deckstore.DefaultAgents()
+		c := m.agentPtr("claude")
+		for _, id := range ids {
+			c.Models = append(c.Models, deckstore.ModelDef{ID: id, Tier: deckstore.Economy})
+		}
+		last := c.Models[len(c.Models)-1].ID
+		for _, id := range projects {
+			m.set.Projects = append(m.set.Projects, deckstore.ProjectDef{ID: id, Name: id, Path: "/tmp/" + id, Agents: []string{"claude"},
+				Models:    map[deckstore.Tier]deckstore.ModelList{deckstore.Economy: {last}},
+				MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Economy}, Envelope: deckstore.DefaultEnvelope(id)})
+		}
+		p := m.project()
+		for _, a := range m.set.Agents {
+			p.Agents = append(p.Agents, a.ID)
+		}
+		p.Agents = p.Agents[1:] // n057Fixture 已勾 claude
+		p.Agents = append([]string{"claude"}, p.Agents...)
+		p.Models[deckstore.Economy] = append(deckstore.ModelList{}, ids...)
+		m.saved = true
+		sweep := func(what string, steps int) string {
+			t.Helper()
+			seen := ""
+			for i := 0; i <= steps; i++ {
+				v := plainView(m)
+				if n := strings.Count(v, "\n") + 1; n > size[1] {
+					t.Fatalf("%dx%d %s：超高 %d 行", size[0], size[1], what, n)
+				}
+				seen += strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "") + "|"
+				press(m, "down")
+			}
+			return seen
+		}
+		seen := sweep("项目页", 20)
+		for _, id := range ids {
+			if !strings.Contains(seen, id) {
+				t.Fatalf("%dx%d 项目页：%s 哪个光标位置都看不到", size[0], size[1], id)
+			}
+		}
+		press(m, "2")
+		goRow(t, m, rowGlobal, "claude", "")
+		press(m, "enter")
+		seen = sweep("agent 编辑", len(c.Models)+2)
+		for _, id := range projects {
+			if !strings.Contains(seen, id) {
+				t.Fatalf("%dx%d agent 编辑：项目在用里的 %s 哪个光标位置都看不到", size[0], size[1], id)
+			}
+		}
+		press(m, "esc")
+	}
+}
