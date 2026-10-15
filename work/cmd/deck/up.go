@@ -393,14 +393,42 @@ func idle() {
 		}
 	}
 	draw()
+	// 换上新二进制后自己换成新的（n058：owner 重开布局后空闲页还是旧名字——deck-idle 在 agent-deck 的 server 上，
+	// 关掉布局 server 不会重起它，deck up 也只在没有时才建）。不从外面杀它重起：适配层禁止 kill、respawn（agentdeck 包的禁令）。
+	self, _ := os.Executable()
+	var started os.FileInfo
+	if self != "" {
+		started, _ = os.Stat(self)
+	}
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
-	for s := range sig {
-		if s != syscall.SIGWINCH {
-			return
+	for {
+		select {
+		case s := <-sig:
+			if s != syscall.SIGWINCH {
+				return
+			}
+			draw()
+		case <-tick.C:
+			if exeReplaced(self, started) {
+				signal.Stop(sig)
+				syscall.Exec(self, os.Args, os.Environ()) // 成功就不回来；失败（新文件还没写完等）照旧跑
+				signal.Notify(sig, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
+				started, _ = os.Stat(self) // 同一个文件不再反复试
+			}
 		}
-		draw()
 	}
+}
+
+// exeReplaced：启动时的二进制路径现在指向另一个文件（安装是写新文件再改名换上），且新文件是可执行的普通文件。
+func exeReplaced(path string, started os.FileInfo) bool {
+	if path == "" || started == nil {
+		return false
+	}
+	now, err := os.Stat(path)
+	return err == nil && now.Mode().IsRegular() && now.Mode().Perm()&0o111 != 0 && !os.SameFile(started, now)
 }
 
 // layoutCmd：deck layout toggle <left|right|bottom> | deck layout normalize（布局 server 的按键调用）。
