@@ -91,6 +91,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/notifications", s.getNotifications)
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
 	mux.HandleFunc("PUT /v1/settings", s.putSettings)
+	mux.HandleFunc("GET /v1/resolve", s.getResolve)
+	mux.HandleFunc("GET /v1/tools", s.getTools)
+	mux.HandleFunc("GET /v1/tools/models", s.getToolModels)
 	mux.HandleFunc("GET /v1/trust", s.getTrust)
 	mux.HandleFunc("DELETE /v1/trust", s.deleteTrust)
 	mux.HandleFunc("GET /v1/progress", s.getProgress)
@@ -515,9 +518,11 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// 整份替换：agents 与 projects 都必须显式给出（可以是空列表），缺字段不当成「清空」——
 	// 否则一个 {} 就把全部设置抹掉了（n050 第 3 次实现补权限矩阵时发现）
+	// generation：读到的代数，不是当前的就 409（n057：两个设置窗口、或界面与 deck project add 不互相覆盖）
 	var body struct {
-		Agents   *[]deckstore.AgentDef   `json:"agents"`
-		Projects *[]deckstore.ProjectDef `json:"projects"`
+		Agents     *[]deckstore.AgentDef   `json:"agents"`
+		Projects   *[]deckstore.ProjectDef `json:"projects"`
+		Generation *int                    `json:"generation"`
 	}
 	if err := readBody(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
@@ -527,8 +532,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "整份替换设置须同时给出 agents 与 projects")
 		return
 	}
+	if body.Generation == nil {
+		fail(w, http.StatusBadRequest, "整份替换设置须带上读到的 generation")
+		return
+	}
 	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
-	if err := s.store.ReplaceSettings(next); err != nil {
+	if err := checkAgentEdits(s.store.Settings(), next); err != nil {
+		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if err := next.CheckMainAgents(); err != nil {
+		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if err := s.store.ReplaceSettingsAt(next, *body.Generation); err != nil {
+		var changed *deckstore.ErrSettingsChanged
+		if errors.As(err, &changed) {
+			fail(w, http.StatusConflict, "%v", err)
+			return
+		}
 		storeErr(w, err)
 		return
 	}

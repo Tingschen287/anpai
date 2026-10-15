@@ -40,7 +40,7 @@ func newFixture(t *testing.T) *fixture {
 	set := st.Settings()
 	for _, id := range []string{"alpha", "beta"} {
 		set.Projects = append(set.Projects, deckstore.ProjectDef{ID: id, Name: id, Path: "/tmp/" + id,
-			Agents: []string{"claude"}, Models: map[deckstore.Tier]string{deckstore.Frontier: "claude-opus-5-5"},
+			Agents: []string{"claude"}, Models: map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
 			MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope(id)})
 	}
 	if err := st.ReplaceSettings(set); err != nil {

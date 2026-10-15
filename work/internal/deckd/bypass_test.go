@@ -14,7 +14,7 @@ func TestUpstreamConfigBypassRejectedBeforeLaunch(t *testing.T) {
 	w := newAgentWorld(t)
 	w.cfgBypass = map[string]error{"claude": errors.New("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions")}
 	before := w.store.Slots("alpha")
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c1", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 400 || !strings.Contains(b, "dangerously") {
 		t.Fatalf("上游配置会加绕过参数：硬拒绝：%d %s", code, b)
 	}
@@ -33,7 +33,7 @@ func TestUpstreamConfigBypassRejectedBeforeLaunch(t *testing.T) {
 func TestBypassChecksMissingRefuses(t *testing.T) {
 	w := newAgentWorld(t)
 	w.srv.WithBypassChecks(BypassChecks{})
-	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c2", "/tmp/alpha", "", "claude", "claude-sonnet-5")); code != 400 || !strings.Contains(b, "确认不了") {
+	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c2", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")); code != 400 || !strings.Contains(b, "确认不了") {
 		t.Fatalf("没接上绕过检查就不开：%d %s", code, b)
 	}
 }
@@ -42,7 +42,7 @@ func TestProcessBypassStopsSessionWithoutBrief(t *testing.T) {
 	w := newAgentWorld(t)
 	w.procBypass = errors.New("进程 42 的命令行带着绕过参数")
 	before := w.store.Slots("alpha")
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "带绕过", "t", "c3", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "带绕过", "t", "c3", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 502 || !strings.Contains(b, "已停掉") {
 		t.Fatalf("启动后发现绕过参数：停掉并报错：%d %s", code, b)
 	}
@@ -68,7 +68,7 @@ func TestProcessBypassStopFailsKeepsSlotUncertain(t *testing.T) {
 	w.procBypass = errors.New("核对不了")
 	w.up.stopErr = errors.New("上游停不了")
 	before := w.store.Slots("alpha")
-	w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "停不了", "t", "c4", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "停不了", "t", "c4", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	held := false
 	for _, x := range w.store.Sessions("alpha") {
 		if x.Title == "停不了" {

@@ -103,7 +103,7 @@ func TestOneOutstandingHintThenReplaced(t *testing.T) {
 // 账本提醒按 节点#attempt 去重：主 agent 之后发了新的话、子 agent 又被看成在跑，同一轮提交也不重报；新的一轮才报。
 func TestGraphSubmitOncePerAttempt(t *testing.T) {
 	w, _ := graphWorld(t)
-	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "ga1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "ga1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
 	}
@@ -138,7 +138,7 @@ func TestGraphSubmitOncePerAttempt(t *testing.T) {
 // 同一次完成的重复主动报告（第一次已送过）：不再转告，但子 agent 照样标 done、释放名额。
 func TestDuplicateActiveReportStillMarksDone(t *testing.T) {
 	w, _ := graphWorld(t)
-	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gd1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gd1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
 	}
@@ -238,7 +238,7 @@ func TestOldInferredRowsDoNotHoldCompletion(t *testing.T) {
 	})
 	t.Run("等送的旧推断", func(t *testing.T) {
 		w, _ := graphWorld(t)
-		code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "go1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+		code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "go1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 		if code != 201 {
 			t.Fatalf("开子 agent：%d %s", code, b)
 		}

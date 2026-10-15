@@ -35,6 +35,10 @@ var knownArgs = map[string]map[string]int{
 	"claude": {"--session-id": 1, "--resume": 1, "--add-dir": 1, "--model": 1, "--effort": 1, "--chrome": 0, "--teammate-mode": 1, "--channels": 1},
 	"codex":  {"--model": 1, "--config": 1, "resume": 1, "fork": 1},
 	"gemini": {"--resume": 1, "--model": 1},
+	// 在上游配置里登记的自定义工具（n057）：deck 经 -c "<工具> --model <m>" 传模型（ToolsModelViaCommand），
+	// 上游登记里不写 resume_flag、dangerous_flag，不会再加别的参数
+	"grok":        {"--model": 1},
+	"antigravity": {"--model": 1},
 }
 
 // knownValueOK 是个别已知参数对取值的限制。

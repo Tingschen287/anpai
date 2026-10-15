@@ -190,7 +190,7 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 	case b.Model != "":
 		res, err = set.ResolveModel(project, b.Model)
 	default:
-		res, err = set.ResolveTier(project, deckstore.Tier(b.Tier))
+		res, err = s.resolveTier(ctx, set, project, deckstore.Tier(b.Tier), b.Agent)
 	}
 	if err != nil {
 		return plan, err
@@ -256,7 +256,7 @@ func creatorOf(c Caller) string {
 func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, plan spawnPlan, exception, graphNode string) {
 	x, p := plan.x, plan.project
 	// Codex trust 门（§14.3）
-	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo {
+	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !agentdeck.CustomToolNotCodex(x.Tool) {
 		path, version, err := s.agents.toolInfo(ctx, plan.agent.Binary)
 		if err != nil {
 			fail(w, http.StatusBadRequest, "确认不了 %s 的可执行文件与版本（Codex trust 门要按它们记住授权）：%v", plan.agent.Binary, err)
@@ -379,6 +379,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if list, err := s.agents.upstream.ListSessions(ctx); err == nil {
 		tmux, _ = agentdeck.TmuxSessionOf(list, id)
 	}
+	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会按命令里的词把它认成别的工具起（n057），
+	// 那样起的不是 owner 选的 agent，停掉、不送任务
+	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
+		why := fmt.Sprintf("上游把 %s 起成了 %q：agent-deck 的配置里要先登记 [tools.%s]", x.Tool, out.Tool, x.Tool)
+		s.stopLaunched(ctx, key, id, x, "启动后核对："+why, false, "起成了别的工具")
+		fail(w, http.StatusBadGateway, "会话 %s %s，已停掉、不送任务", id, why)
+		return
+	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
 	if err := s.processesNoBypass(ctx, tmux, plan.agent); err != nil {
 		s.stopLaunched(ctx, key, id, x, "启动后核对："+err.Error(), false, "起来后带着跳过权限的参数（或核对不了）")
@@ -489,14 +497,36 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 
 // quotaUnsure：这个工具的额度是否未知或已用尽（取不到看板也算未知）。
 func (s *Server) quotaUnsure(ctx context.Context, tool string) bool {
-	status := dashquota.Unknown
+	status := s.quotaStatus(ctx, tool)
+	return status == dashquota.Unknown || status == dashquota.Exhausted
+}
+
+func (s *Server) quotaStatus(ctx context.Context, tool string) string {
 	switch {
 	case s.agents.quotaOf != nil:
-		status = s.agents.quotaOf(ctx, tool)
+		return s.agents.quotaOf(ctx, tool)
 	case s.quota != nil:
-		status = s.quota.Tool(ctx, tool).Status
+		return s.quota.Tool(ctx, tool).Status
 	}
-	return status == dashquota.Unknown || status == dashquota.Exhausted
+	return dashquota.Unknown
+}
+
+// resolveTier 是派子 agent 时按档位挑模型（GET /v1/resolve 用同一个，算出的 args_sha256 才对得上）：
+// 清单顺序、跳过看板确知用尽的（n057）；点了 agent 就只在它的模型里挑。全都用尽时：frontier 照用第一个，
+// 交给原有的额度门上报 owner（不回退 n051 的语义）；其余档位说明原因、不派。
+func (s *Server) resolveTier(ctx context.Context, set deckstore.Settings, project string, tier deckstore.Tier, agent string) (deckstore.Resolved, error) {
+	res, err := set.ResolveTierFor(project, tier, agent, s.exhaustedFor(ctx))
+	var all *deckstore.ErrAllExhausted
+	if errors.As(err, &all) && tier == deckstore.Frontier {
+		return all.First, nil
+	}
+	return res, err
+}
+
+// exhaustedFor：按档位挑模型时，看板确知额度用尽的 agent 跳过，取清单里的下一个（n057，owner：「排第一的优先，额度用尽就换下一个」）。
+// 额度未知不算用尽：照常按顺序取（frontier 子 agent 的额度门另外照旧把关）。用的是 Client.Tool（只认看板真实窗口），不是面板的估算。
+func (s *Server) exhaustedFor(ctx context.Context) func(deckstore.AgentDef) bool {
+	return func(a deckstore.AgentDef) bool { return s.quotaStatus(ctx, a.Tool) == dashquota.Exhausted }
 }
 
 // mainGone：旧主 agent 已经起来过（有 tmux 会话名），且那个 tmux 会话确实不在了。还在启动中、查不了、出错都按「还在」算。
@@ -630,7 +660,12 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "没有项目 %q", r.PathValue("id"))
 		return
 	}
-	res, err := set.ResolveTier(p.ID, p.MainAgent.Tier)
+	// 主 agent：在这一档清单里取它自己的、额度没确知用尽的第一个模型（n057）；全都用尽时 owner 亲自起，照用第一个
+	res, err := set.ResolveTierFor(p.ID, p.MainAgent.Tier, p.MainAgent.Agent, s.exhaustedFor(r.Context()))
+	var all *deckstore.ErrAllExhausted
+	if errors.As(err, &all) {
+		res, err = all.First, nil
+	}
 	if err != nil || res.Agent.ID != p.MainAgent.Agent {
 		fail(w, http.StatusBadRequest, "项目 %s 的主 agent 设置解析不出（%v）", p.ID, err)
 		return

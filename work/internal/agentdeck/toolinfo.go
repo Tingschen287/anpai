@@ -25,3 +25,12 @@ func ToolInfo(ctx context.Context, binary string) (path, version string, err err
 	version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
 	return path, strings.TrimSpace(version), nil
 }
+
+// ListModels 跑一个 CLI 列模型的子命令（grok models、agy models、opencode models），20 秒为限，返回标准输出（n057：设置界面加模型时
+// 给候选）。会用到该 CLI 自己的登录状态与网络，只在 owner 在设置界面里按键时跑；只读，不改任何配置。
+func ListModels(ctx context.Context, binary string, args []string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binary, args...).Output()
+	return string(out), err
+}

@@ -18,7 +18,7 @@ import (
 // spawnedSub 由主 agent 开一个子 agent，并让后续 "sub" 调用者就是它。
 func spawnedSub(t *testing.T, w *agentWorld) deckstore.Session {
 	t.Helper()
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "t", "rs1", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "t", "rs1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("开子 agent：%d %s", code, b)
 	}

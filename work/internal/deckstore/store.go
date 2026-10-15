@@ -194,14 +194,34 @@ func (s *Store) Settings() Settings {
 	return cloneSettings(s.settings)
 }
 
-// ReplaceSettings 由 owner 界面调用：校验后写回文件。
+// ReplaceSettings 校验后整份写回文件（不核对代数：deckd 内部与测试用）。
 func (s *Store) ReplaceSettings(next Settings) error {
+	return s.replaceSettings(next, -1)
+}
+
+// ReplaceSettingsAt 由 owner 界面调用（PUT /v1/settings）：带上读到的代数，不是当前代数就拒绝（n057），
+// 免得两个设置窗口、或界面与 deck project add 互相覆盖。
+func (s *Store) ReplaceSettingsAt(next Settings, generation int) error {
+	return s.replaceSettings(next, generation)
+}
+
+func (s *Store) replaceSettings(next Settings, generation int) error {
 	return s.mutate(func() (func() error, []Event, error) {
+		if generation >= 0 && generation != s.settings.Generation {
+			return nil, nil, &ErrSettingsChanged{Want: generation, Have: s.settings.Generation}
+		}
 		if err := next.Validate(); err != nil {
 			return nil, nil, err
 		}
+		next.Generation = s.settings.Generation
 		s.settings = cloneSettings(next)
-		return func() error { return SaveSettings(s.dirs.Config, next) }, []Event{{Kind: "settings"}}, nil
+		return func() error {
+			gen, err := saveSettings(s.dirs.Config, next)
+			if err == nil {
+				s.settings.Generation = gen
+			}
+			return err
+		}, []Event{{Kind: "settings"}}, nil
 	})
 }
 

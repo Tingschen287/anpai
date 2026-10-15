@@ -42,7 +42,7 @@ func TestE2EIdentityFromRealPanes(t *testing.T) {
 	}
 	set := st.Settings()
 	set.Projects = []deckstore.ProjectDef{{ID: "alpha", Name: "alpha", Path: "/tmp/alpha", Agents: []string{"claude"},
-		Models: map[deckstore.Tier]string{deckstore.Frontier: "claude-opus-5-5"}, MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier},
+		Models: map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}}, MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier},
 		Envelope: deckstore.DefaultEnvelope("alpha")}}
 	if err := st.ReplaceSettings(set); err != nil {
 		t.Fatal(err)

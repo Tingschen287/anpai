@@ -61,7 +61,7 @@ func TestKnownQuotaFrontierWithinEnvelopeStarts(t *testing.T) {
 	}
 	// 非 frontier 不受影响
 	w.srv.agents.quotaOf = nil
-	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "普通", "t", "q5", "/tmp/alpha", "", "claude", "claude-sonnet-5")); code != 201 {
+	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "普通", "t", "q5", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")); code != 201 {
 		t.Fatalf("balanced 不受额度门影响：%d %s", code, b)
 	}
 }

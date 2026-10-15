@@ -18,7 +18,7 @@ func TestLedgerReplacingHintSuppressesLaterInference(t *testing.T) {
 		name := map[bool]string{false: "对照_账本提醒新建一行", true: "账本提醒换掉等送的推断提醒"}[replace]
 		t.Run(name, func(t *testing.T) {
 			w, _ := graphWorld(t)
-			code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", map[bool]string{false: "n054-new", true: "n054-replace"}[replace], "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+			code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", map[bool]string{false: "n054-new", true: "n054-replace"}[replace], "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 			if code != 201 {
 				t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
 			}

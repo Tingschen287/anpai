@@ -61,8 +61,12 @@ func (r LaunchRequest) Validate() error {
 	return CheckToolModel(r.Tool, r.ModelNotApplicable)
 }
 
-// toolArg 是 launch -c 的取值：工具名；codex 带声明的额外参数时接在后面（逐个 shell 转义）。
+// toolArg 是 launch -c 的取值：工具名；codex 带声明的额外参数时接在后面（逐个 shell 转义）；
+// 模型经命令传的自定义工具（grok、antigravity）把模型参数接在后面（n057）。
 func (r LaunchRequest) toolArg() string {
+	if flag := ToolsModelViaCommand[r.Tool]; flag != "" && !r.ModelNotApplicable {
+		return r.Tool + " " + flag + " " + shQuote(r.Model)
+	}
 	if r.Tool != "codex" || len(r.Extra) == 0 {
 		return r.Tool
 	}
@@ -112,7 +116,7 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 			}
 		}
 	}
-	if !req.ModelNotApplicable {
+	if !req.ModelNotApplicable && ToolsModelViaCommand[req.Tool] == "" {
 		args = append(args, "--model", req.Model)
 	}
 	if req.Title != "" {

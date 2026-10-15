@@ -23,7 +23,8 @@ func drain(m *Settings, cmd tea.Cmd) {
 }
 
 func TestEmptySettingsKeysDoNotPanic(t *testing.T) {
-	api := &fakeSettingsAPI{set: deckstore.Settings{Agents: deckstore.DefaultAgents()}}
+	// 没有 agent、没有项目、没有授权（n057 起只剩「加入本机的 agent」一行）：乱按不崩、不撤销任何授权
+	api := &fakeSettingsAPI{set: deckstore.Settings{}}
 	m := &Settings{API: api}
 	m.Update(m.load())
 	defer func() {
@@ -31,9 +32,13 @@ func TestEmptySettingsKeysDoNotPanic(t *testing.T) {
 			t.Fatalf("没有项目、没有授权时按键崩溃：%v", r)
 		}
 	}()
-	press(m, "down", "enter", "j", " ", "d", "up", "enter", "k", "down", "down", "enter")
+	press(m, "down", "j", "d", "up", "k", "down", "down", "d")
 	if m.cur != 0 || len(api.revoked) != 0 {
-		t.Fatalf("空列表光标应停在 0、不做任何事：cur=%d revoked=%v", m.cur, api.revoked)
+		t.Fatalf("只有一行时光标应停在 0、不做任何事：cur=%d revoked=%v", m.cur, api.revoked)
+	}
+	press(m, "enter", "down", "enter", "esc", "j", " ", "esc", "esc")
+	if len(api.revoked) != 0 || len(api.saved) != 0 {
+		t.Fatalf("不应撤销或保存：revoked=%v saved=%v", api.revoked, api.saved)
 	}
 }
 

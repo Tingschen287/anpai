@@ -28,7 +28,7 @@ func withProject(t *testing.T, d Dirs, env Envelope) *Store {
 	set.Projects = []ProjectDef{{
 		ID: "deck", Name: "Agent Deck", Path: "/tmp/proj",
 		Agents:    []string{"claude", "codex", "kimi"},
-		Models:    map[Tier]string{Frontier: "claude-opus-5-5", Balanced: "kimi-code/k3", Economy: "gpt-5.6-luna"},
+		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5"}, Balanced: {"kimi-code/k3"}, Economy: {"gpt-5.6-luna"}},
 		MainAgent: MainAgent{Agent: "claude", Tier: Frontier},
 		Envelope:  env,
 	}}
@@ -46,8 +46,8 @@ func TestDefaultAgentsAreWrittenAndValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Settings().Agents) != 5 {
-		t.Fatalf("应生成五家默认 agent：%+v", s.Settings().Agents)
+	if len(s.Settings().Agents) != 6 {
+		t.Fatalf("应生成六家默认 agent（n057 加 Antigravity）：%+v", s.Settings().Agents)
 	}
 	if _, err := os.Stat(filepath.Join(d.Config, "agents.yaml")); err != nil {
 		t.Fatalf("应写出 agents.yaml 供 owner 修改：%v", err)
@@ -60,7 +60,7 @@ func TestResolveTierUsesProjectSelection(t *testing.T) {
 	if err != nil || r.Model != "kimi-code/k3" || r.Agent.ID != "kimi" {
 		t.Fatalf("balanced 应解析为 kimi-code/k3：%+v %v", r, err)
 	}
-	if _, err := s.Settings().ResolveModel("deck", "grok-4.6"); err == nil {
+	if _, err := s.Settings().ResolveModel("deck", "grok-4.5"); err == nil {
 		t.Error("未被本项目选用的 agent（grok）的模型应被拒")
 	}
 }
@@ -68,12 +68,12 @@ func TestResolveTierUsesProjectSelection(t *testing.T) {
 func TestSettingsRejectModelInWrongTierOrUnselectedAgent(t *testing.T) {
 	s := withProject(t, testDirs(t), DefaultEnvelope("deck"))
 	bad := s.Settings()
-	bad.Projects[0].Models[Frontier] = "kimi-code/k3" // 全局登记为 balanced
+	bad.Projects[0].Models[Frontier] = ModelList{"kimi-code/k3"} // 全局登记为 balanced
 	if err := s.ReplaceSettings(bad); err == nil || !strings.Contains(err.Error(), "放进了") {
 		t.Errorf("档位不符应被拒：%v", err)
 	}
 	bad = s.Settings()
-	bad.Projects[0].Models[Balanced] = "grok-4.6" // grok 未被选用
+	bad.Projects[0].Models[Balanced] = ModelList{"grok-4.5"} // grok 未被选用
 	if err := s.ReplaceSettings(bad); err == nil {
 		t.Error("未选用 agent 的模型应被拒")
 	}
@@ -92,7 +92,7 @@ func TestSettingsSurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, ok := s2.Settings().Project("deck")
-	if !ok || p.Models[Frontier] != "claude-opus-5-5" {
+	if !ok || p.Models[Frontier].First() != "claude-opus-5-5" {
 		t.Fatalf("重开后项目设置应还在：%+v", p)
 	}
 }

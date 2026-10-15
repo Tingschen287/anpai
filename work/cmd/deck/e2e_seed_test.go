@@ -29,7 +29,7 @@ func TestE2ESeed(t *testing.T) {
 	}
 	set := st.Settings()
 	set.Projects = []deckstore.ProjectDef{{ID: "demo", Name: "演示项目", Path: os.Getenv("HOME"),
-		Agents: []string{"claude", "codex", "kimi"}, Models: map[deckstore.Tier]string{deckstore.Frontier: "claude-opus-5-5"},
+		Agents: []string{"claude", "codex", "kimi"}, Models: map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
 		MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope("demo")}}
 	if err := st.ReplaceSettings(set); err != nil {
 		t.Fatal(err)

@@ -158,7 +158,7 @@ func newAgentWorld(t *testing.T) *agentWorld {
 	set := f.store.Settings()
 	for i := range set.Projects {
 		set.Projects[i].Agents = []string{"claude", "codex"}
-		set.Projects[i].Models = map[deckstore.Tier]string{deckstore.Frontier: "claude-opus-5-5", deckstore.Balanced: "claude-sonnet-5", deckstore.Economy: "gpt-5.6-luna"}
+		set.Projects[i].Models = map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}, deckstore.Balanced: {"claude-sonnet-5-5"}, deckstore.Economy: {"gpt-5.6-luna"}}
 	}
 	if err := f.store.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
@@ -210,7 +210,7 @@ func decode(t *testing.T, body string) map[string]any {
 
 func TestSpawnHappyPathOrdinaryChannel(t *testing.T) {
 	w := newAgentWorld(t)
-	code, body := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "r1", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, body := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "r1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("应开成：%d %s", code, body)
 	}
@@ -223,7 +223,7 @@ func TestSpawnHappyPathOrdinaryChannel(t *testing.T) {
 		t.Fatalf("brief 应送达：%v", m)
 	}
 	lr := w.up.launches[0]
-	if lr.Tool != "claude" || lr.Model != "claude-sonnet-5" || lr.ProjectPath != "/tmp/alpha" || !lr.NoWait || lr.Group != "alpha" {
+	if lr.Tool != "claude" || lr.Model != "claude-sonnet-5-5" || lr.ProjectPath != "/tmp/alpha" || !lr.NoWait || lr.Group != "alpha" {
 		t.Fatalf("启动参数不对：%+v", lr)
 	}
 	if len(w.up.sends) != 1 || !strings.Contains(w.up.sends[0], "给 foo 写测试") || !strings.Contains(w.up.sends[0], "deck agent report --done") {
@@ -241,11 +241,11 @@ func TestSpawnHappyPathOrdinaryChannel(t *testing.T) {
 func TestSpawnHardRejectsMakeNoDecision(t *testing.T) {
 	w := newAgentWorld(t)
 	cases := map[string]string{
-		"绕过参数":    spawnJSON("balanced", "do it --dangerously-skip-permissions", "t", "r1", "/tmp/alpha", "", "claude", "claude-sonnet-5"),
+		"绕过参数":    spawnJSON("balanced", "do it --dangerously-skip-permissions", "t", "r1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"),
 		"档位没配":    spawnJSON("nope", "x", "t", "r2", "/tmp/alpha", "", "claude", ""),
-		"相对目录":    spawnJSON("balanced", "x", "t", "r3", "rel/dir", "", "claude", "claude-sonnet-5"),
-		"参数指纹对不上": strings.Replace(spawnJSON("balanced", "x", "t", "r4", "/tmp/alpha", "", "claude", "claude-sonnet-5"), `"title":"x"`, `"title":"y"`, 1),
-		"任务为空":    spawnJSON("balanced", "x", " ", "r5", "/tmp/alpha", "", "claude", "claude-sonnet-5"),
+		"相对目录":    spawnJSON("balanced", "x", "t", "r3", "rel/dir", "", "claude", "claude-sonnet-5-5"),
+		"参数指纹对不上": strings.Replace(spawnJSON("balanced", "x", "t", "r4", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"), `"title":"x"`, `"title":"y"`, 1),
+		"任务为空":    spawnJSON("balanced", "x", " ", "r5", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"),
 	}
 	for name, body := range cases {
 		if code, b := w.do("main", "POST", "/v1/agents", body); code != 400 {
@@ -256,13 +256,13 @@ func TestSpawnHardRejectsMakeNoDecision(t *testing.T) {
 		t.Fatal("硬拒绝不应生成决定、不应启动")
 	}
 	for _, as := range []string{"sub", "unknown", "broken-id"} {
-		if code, _ := w.do(as, "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "r9", "/tmp/alpha", "", "claude", "claude-sonnet-5")); code != 403 {
+		if code, _ := w.do(as, "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "r9", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")); code != 403 {
 			t.Errorf("%s 不能开子 agent：%d", as, code)
 		}
 	}
 	// 主 agent 不能替别的项目开
 	var other spawnBody
-	json.Unmarshal([]byte(spawnJSON("balanced", "x", "t", "r10", "/tmp/alpha", "", "claude", "claude-sonnet-5")), &other)
+	json.Unmarshal([]byte(spawnJSON("balanced", "x", "t", "r10", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")), &other)
 	other.Project = "beta"
 	ob, _ := json.Marshal(other)
 	if code, _ := w.do("main", "POST", "/v1/agents", string(ob)); code != 403 {
@@ -369,7 +369,7 @@ func TestSpawnLaunchFailureReleasesOrHoldsSlot(t *testing.T) {
 	w := newAgentWorld(t)
 	w.up.launchErr = errors.New("upstream refused")
 	w.up.launchOut = &agentdeck.LaunchResult{Error: "unknown tool", Code: "INVALID"}
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "f1", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "f1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 502 || decode(t, b)["uncertain"] != false {
 		t.Fatalf("上游明确拒绝是失败：%d %s", code, b)
 	}
@@ -379,7 +379,7 @@ func TestSpawnLaunchFailureReleasesOrHoldsSlot(t *testing.T) {
 	}
 	w.up.launchOut = &agentdeck.LaunchResult{}
 	w.up.launchErr = context.DeadlineExceeded
-	code, b = w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "f2", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b = w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "f2", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	key = decode(t, b)["session"].(string)
 	if x, _ := w.store.Session(key); code != 502 || x.Status != deckstore.StatusUncertain {
 		t.Fatalf("超时是结果不明、继续占名额：%d %s", code, x.Status)

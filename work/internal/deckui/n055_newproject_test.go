@@ -76,7 +76,7 @@ func TestNewProjectFromDirectoryBrowser(t *testing.T) {
 	got := api.saved[len(api.saved)-1].Projects
 	p := got[len(got)-1]
 	if p.ID != "alpha-xq" || p.Name != "alpha-proj" || p.Path != filepath.Join(root, "ai", "alpha-proj") ||
-		p.MainAgent != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || p.Models[deckstore.Frontier] != "claude-opus-5-5" ||
+		p.MainAgent != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || p.Models[deckstore.Frontier].First() != "claude-opus-5-5" ||
 		len(p.Agents) != 1 || p.Agents[0] != "claude" || p.Envelope.ID != "alpha-xq-default" {
 		t.Fatalf("新项目的默认值：%+v", p)
 	}

@@ -17,6 +17,8 @@ type fakeSettingsAPI struct {
 	trust   []deckstore.TrustGrant
 	saved   []deckstore.Settings
 	revoked []string
+	tools   []ToolInfo
+	models  map[string][]string
 }
 
 func (f *fakeSettingsAPI) Load(context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
@@ -30,13 +32,17 @@ func (f *fakeSettingsAPI) Revoke(_ context.Context, project, tool string) error 
 	f.revoked = append(f.revoked, project+"/"+tool)
 	return nil
 }
+func (f *fakeSettingsAPI) Tools(context.Context) ([]ToolInfo, error) { return f.tools, nil }
+func (f *fakeSettingsAPI) ToolModels(_ context.Context, tool string) ([]string, error) {
+	return f.models[tool], nil
+}
 
 func settingsFixture() (*Settings, *fakeSettingsAPI) {
 	api := &fakeSettingsAPI{
 		set: deckstore.Settings{
 			Agents: deckstore.DefaultAgents(),
 			Projects: []deckstore.ProjectDef{{ID: "deck", Name: "Agent Deck", Path: "/tmp/deck",
-				Agents: []string{"claude"}, Models: map[deckstore.Tier]string{deckstore.Frontier: "claude-opus-5-5"},
+				Agents: []string{"claude"}, Models: map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
 				MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope("deck")}},
 		},
 		trust: []deckstore.TrustGrant{{Project: "deck", Tool: "codex", Dir: "/tmp/deck", ApprovedAt: time.Now()}},
@@ -106,23 +112,23 @@ func TestSettingsPickCycleAndSave(t *testing.T) {
 		t.Fatal("应勾上 kimi")
 	}
 	m.cur = idx(rowTier, "", deckstore.Balanced)
-	for i := 0; i < 5 && !strings.HasPrefix(m.project().Models[deckstore.Balanced], "kimi"); i++ {
-		press(m, "enter") // 选项含 claude 与 kimi 的 balanced 模型，按顺序轮换
+	for i := 0; i < 5 && !strings.HasPrefix(m.project().Models[deckstore.Balanced].First(), "kimi"); i++ {
+		press(m, " ") // 空格：只留一个并轮换（n057 起 ⏎ 打开多选）
 	}
-	if bal := m.project().Models[deckstore.Balanced]; !strings.HasPrefix(bal, "kimi") {
+	if bal := m.project().Models[deckstore.Balanced].First(); !strings.HasPrefix(bal, "kimi") {
 		t.Fatalf("balanced 档应能换成 kimi 的模型：%q", bal)
 	}
 	for i := 0; i < 5; i++ {
 		if _, set := m.project().Models[deckstore.Balanced]; !set {
 			break
 		}
-		press(m, "enter")
+		press(m, " ")
 	}
 	if _, set := m.project().Models[deckstore.Balanced]; set {
 		t.Fatal("轮换到最后应是「不设」")
 	}
-	for i := 0; i < 5 && !strings.HasPrefix(m.project().Models[deckstore.Balanced], "kimi"); i++ {
-		press(m, "enter")
+	for i := 0; i < 5 && !strings.HasPrefix(m.project().Models[deckstore.Balanced].First(), "kimi"); i++ {
+		press(m, " ")
 	}
 	// 主 agent 换成 kimi
 	m.cur = idx(rowMain, "", "")
@@ -135,7 +141,7 @@ func TestSettingsPickCycleAndSave(t *testing.T) {
 	// 取消 kimi：它的 balanced 模型与主 agent 都要清掉
 	m.cur = idx(rowAgentPick, "kimi", "")
 	press(m, " ")
-	if picked(m.project(), "kimi") || strings.HasPrefix(m.project().Models[deckstore.Balanced], "kimi") || m.project().MainAgent.Agent == "kimi" {
+	if picked(m.project(), "kimi") || strings.HasPrefix(m.project().Models[deckstore.Balanced].First(), "kimi") || m.project().MainAgent.Agent == "kimi" {
 		t.Fatalf("取消 kimi 后应清掉引用：%+v", *m.project())
 	}
 	press(m, "s")
@@ -154,8 +160,12 @@ func TestSettingsRevokeTrustAndQuitGuard(t *testing.T) {
 	if len(api.revoked) != 1 || api.revoked[0] != "deck/codex" {
 		t.Fatalf("应撤销 deck 的 codex 授权：%v", api.revoked)
 	}
-	// 有改动时按 q：先提示，再按一次才关
-	m.cur = 0
+	// 有改动时按 q：先提示，再按一次才关（勾选一个 agent 算改动）
+	for i, r := range m.rows() {
+		if r.kind == rowAgentPick && r.agent == "codex" {
+			m.cur = i
+		}
+	}
 	press(m, " ")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd != nil {

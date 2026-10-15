@@ -215,7 +215,7 @@ func TestStaleHintDroppedAfterNewerGenerationCompletion(t *testing.T) {
 // attempt 4 起它只是账本提醒、不占完成（owner 选 B2-A）：提醒照常送，第 2 件真正的完成照常转告。
 func TestLateGraphSignalCreditsEarlierTask(t *testing.T) {
 	w, _ := graphWorld(t)
-	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "lg1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "lg1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
 	}

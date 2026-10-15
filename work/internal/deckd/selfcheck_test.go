@@ -28,10 +28,10 @@ func TestMainCannotForgeSpawnScopeDecision(t *testing.T) {
 func TestUnneededExceptionIsClosedNotLeftExecuting(t *testing.T) {
 	w := newAgentWorld(t)
 	sub := spawnedSub(t, w) // 夹具已有 1 个，加上它 2 个
-	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第三个", "t", "x3", "/tmp/alpha", "", "claude", "claude-sonnet-5")); code != 201 {
+	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第三个", "t", "x3", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")); code != 201 {
 		t.Fatalf("第三个：%d %s", code, b)
 	}
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第四个", "t", "x4", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第四个", "t", "x4", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 202 {
 		t.Fatalf("包络满了应生成 cost 决定：%d %s", code, b)
 	}
@@ -45,7 +45,7 @@ func TestUnneededExceptionIsClosedNotLeftExecuting(t *testing.T) {
 		t.Fatalf("应已完成：%s", x.Status)
 	}
 	w.do("owner", "POST", "/v1/decisions/"+id+"/answer", fmt.Sprintf(`{"option":"approve","version":%v}`, dec["version"]))
-	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第四个", "t", "x4", "/tmp/alpha", id, "claude", "claude-sonnet-5")); code != 201 {
+	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "第四个", "t", "x4", "/tmp/alpha", id, "claude", "claude-sonnet-5-5")); code != 201 {
 		t.Fatalf("带例外重试应开成：%d %s", code, b)
 	}
 	d, _ := w.store.Decision(id)

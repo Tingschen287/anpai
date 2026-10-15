@@ -187,3 +187,66 @@ func stripComment(line string) string {
 	}
 	return line
 }
+
+// CustomToolNotCodex：自定义工具在 agent-deck 配置里登记过、确定不是 Codex 兼容的（n057）——[tools.<工具>] 的 command
+// 是一个命令名或路径、文件名不是 codex，没写 compatible_with，别的节（groups/profiles/conductors 里的同名工具）也没改它的
+// command 或 compatible_with。这时上游 launch 不会改写 ~/.codex/config.toml（上游判据 internal/session/userconfig.go:3542
+// IsCodexCompatible），Codex trust 门不必每次问 owner。读不到、看不懂、没登记的一律当「可能」（返回 false）。
+func CustomToolNotCodex(tool string) bool {
+	if tool == "" || tool == "codex" || contains(BuiltinTools, tool) {
+		return false
+	}
+	path, err := AgentDeckConfigPath()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return customToolNotCodex(tool, string(data))
+}
+
+func customToolNotCodex(tool, text string) bool {
+	section, command, registered := "", "", false
+	sc := bufio.NewScanner(strings.NewReader(text))
+	for sc.Scan() {
+		line := strings.TrimSpace(stripComment(sc.Text()))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			section = strings.ReplaceAll(strings.Trim(line, "[] "), `"`, "")
+			if section == "tools."+tool {
+				registered = true
+			}
+			continue
+		}
+		key, raw, ok := strings.Cut(line, "=")
+		if !ok {
+			return false // 看不懂的行（多行字符串、内联表的续行）
+		}
+		key = strings.TrimSpace(key)
+		full := key
+		if section != "" {
+			full = section + "." + key
+		}
+		mine := toolSection(section, tool) || strings.HasPrefix(strings.ReplaceAll(full, `"`, ""), "tools."+tool+".")
+		if !mine {
+			continue
+		}
+		switch k := key[strings.LastIndex(key, ".")+1:]; k {
+		case "compatible_with":
+			return false
+		case "command":
+			if section != "tools."+tool || checkToolKey("command", raw) != nil {
+				return false
+			}
+			command = strings.Trim(strings.TrimSpace(raw), `"'`)
+		}
+	}
+	if sc.Err() != nil || !registered || command == "" {
+		return false
+	}
+	return filepath.Base(command) != "codex"
+}

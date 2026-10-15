@@ -22,7 +22,7 @@ func TestSpawnCompletesAfterClientGivesUp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", w.http.URL+"/v1/agents",
-		strings.NewReader(spawnJSON("balanced", "慢启动", "t", "slow1", "/tmp/alpha", "", "claude", "claude-sonnet-5")))
+		strings.NewReader(spawnJSON("balanced", "慢启动", "t", "slow1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")))
 	req.Header.Set("X-Test-As", "main")
 	if _, err := http.DefaultClient.Do(req); err == nil {
 		t.Fatal("客户端应先超时")

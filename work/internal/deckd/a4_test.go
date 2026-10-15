@@ -17,7 +17,7 @@ import (
 // 两件真正的完成各送一次，第 2 件不被吞。
 func TestGraphSignalDuringQueryAfterActiveReport(t *testing.T) {
 	w, _ := graphWorld(t)
-	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gq1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "gq1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("Graph 通道开子 agent：%d %s", code, b)
 	}

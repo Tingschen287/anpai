@@ -102,7 +102,7 @@ func TestResumeAwaitingAfterRestart(t *testing.T) {
 	if code, b := w.do("owner", "POST", "/v1/projects/gamma/main", `{}`); code != 201 {
 		t.Fatalf("%d %s", code, b)
 	}
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-rs", "/tmp/alpha/sub", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-rs", "/tmp/alpha/sub", "", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("%d %s", code, b)
 	}

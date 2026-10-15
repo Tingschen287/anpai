@@ -45,7 +45,7 @@ func TestDeclaredBypassExtraArgsRefused(t *testing.T) {
 	} {
 		w := newAgentWorld(t)
 		setExtraArgs(t, w, "claude", extra)
-		code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "t", "xa1", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+		code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "t", "xa1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 		if code != 400 {
 			t.Errorf("声明了绕过参数 %q：硬拒绝：%d %s", extra, code, b)
 		}

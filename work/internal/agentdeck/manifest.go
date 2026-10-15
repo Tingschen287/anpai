@@ -46,6 +46,12 @@ var CLIJSONFields = []string{"id", "title", "tool", "status", "path", "group", "
 // 升级上游时要重新核对这张表。
 var ToolsAcceptingModel = []string{"claude", "codex", "gemini", "opencode"}
 
+// ToolsModelViaCommand 是在上游配置里登记成自定义工具、CLI 自己有模型参数的工具 → 那个参数（n057）。
+//
+// 上游 launch 对自定义工具不接受 --model（internal/session/instance.go:9358 ApplyLaunchModel，launch 直接退出 1），
+// 但 -c "<工具> 参数…" 会把工具名后面的参数接在命令末尾（cmd/agent-deck/cli_utils.go:271-279），模型就这样传给 CLI。
+var ToolsModelViaCommand = map[string]string{"grok": "--model", "antigravity": "--model"}
+
 // ToolsWithoutModel 是上游内置、根本没有模型可选的工具：给它传 --model，上游 launch 直接失败（n040 终审断点 3）。
 var ToolsWithoutModel = []string{"shell"}
 
@@ -55,7 +61,7 @@ func CheckToolModel(tool string, modelNotApplicable bool) error {
 	switch {
 	case !modelNotApplicable && contains(ToolsWithoutModel, tool):
 		return fmt.Errorf("工具 %s 没有模型可选，上游 launch 不接受 --model：在配置的这个模型条目里写 \"model_not_applicable\": true", tool)
-	case modelNotApplicable && contains(ToolsAcceptingModel, tool):
+	case modelNotApplicable && (contains(ToolsAcceptingModel, tool) || ToolsModelViaCommand[tool] != ""):
 		return fmt.Errorf("工具 %s 有模型可选，却声明了 model_not_applicable：那等于让上游替你挑默认模型，不派。去掉这个声明并写明模型 id", tool)
 	}
 	return nil
@@ -774,9 +780,9 @@ var NotUsed = []string{
 
 // BypassFlags 是各家 CLI 跳过权限确认或沙箱的参数（架构稿 §5 准入第 4 条：硬拒绝，owner 也批不过）。
 // 出处：claude --dangerously-skip-permissions、--permission-mode bypassPermissions；codex --dangerously-bypass-approvals-and-sandbox、
-// -a/--ask-for-approval never；gemini、kimi 等的 --yolo。
+// -a/--ask-for-approval never；gemini、kimi 等的 --yolo；grok 的 --always-approve（--yolo 的别名，n057）。
 var BypassFlags = []string{"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
-	"--dangerously-bypass-approvals-and-sandbox", "--yolo"}
+	"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--always-approve"}
 
 // 权限与沙箱设置按白名单查（n051 评审 2 R1，owner 选方案 A）：以前按「删掉空白引号后找禁止值」猜，
 // TOML 的转义（never）、多行字符串等合法写法都能绕过。现在凡是键名涉及权限或沙箱的赋值（codex 的 -c 覆盖、

@@ -1,12 +1,14 @@
 package deckstore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -73,16 +75,77 @@ type ProjectDef struct {
 	Name      string          `yaml:"name" json:"name"`
 	Path      string          `yaml:"path" json:"path"`
 	GraphRoot string          `yaml:"graph_root,omitempty" json:"graph_root,omitempty"`
-	Agents    []string        `yaml:"agents" json:"agents"`
-	Models    map[Tier]string `yaml:"models" json:"models"` // 三档各一个模型
-	MainAgent MainAgent       `yaml:"main_agent" json:"main_agent"`
-	Envelope  Envelope        `yaml:"envelope" json:"envelope"`
+	Agents    []string           `yaml:"agents" json:"agents"`
+	Models    map[Tier]ModelList `yaml:"models" json:"models"` // 三档各一个有顺序的模型清单（n057）
+	MainAgent MainAgent          `yaml:"main_agent" json:"main_agent"`
+	Envelope  Envelope           `yaml:"envelope" json:"envelope"`
+}
+
+// ModelList 是项目某一档的模型清单，排前的优先（n057，owner：「排第一的优先，额度用尽就换下一个」）。
+// 读旧格式时一个字符串当作只有一个模型的清单；写出时总是列表。
+type ModelList []string
+
+func (l *ModelList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*l = nil
+		if s != "" {
+			*l = ModelList{s}
+		}
+		return nil
+	}
+	var xs []string
+	if err := n.Decode(&xs); err != nil {
+		return err
+	}
+	*l = xs
+	return nil
+}
+
+func (l *ModelList) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*l = nil
+		if s != "" {
+			*l = ModelList{s}
+		}
+		return nil
+	}
+	var xs []string
+	if err := json.Unmarshal(b, &xs); err != nil {
+		return err
+	}
+	*l = xs
+	return nil
+}
+
+// First 是清单里的第一个模型（不设时为空）。
+func (l ModelList) First() string {
+	if len(l) == 0 {
+		return ""
+	}
+	return l[0]
+}
+
+// Has 说明清单里有没有这个模型。
+func (l ModelList) Has(id string) bool {
+	for _, x := range l {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Settings 是全部 agent 设置。
 type Settings struct {
 	Agents   []AgentDef   `yaml:"agents" json:"agents"`
 	Projects []ProjectDef `yaml:"projects" json:"projects"`
+	// Generation 是两份设置文件当前的代数（n057）：整份保存时要带上读到的代数，对不上就拒绝（别处在这期间改过）。
+	Generation int `yaml:"-" json:"generation"`
 }
 
 // DefaultEnvelope 是 owner 批准的推荐默认值（O5）。
@@ -94,11 +157,13 @@ func DefaultEnvelope(projectID string) Envelope {
 func DefaultAgents() []AgentDef {
 	return []AgentDef{
 		{ID: "claude", Name: "Claude Code", Tool: "claude", Binary: "claude", Models: []ModelDef{
-			{"claude-opus-5-5", Frontier}, {"claude-fable-5-1", Frontier}, {"claude-sonnet-5", Balanced}, {"claude-haiku-4-5", Economy}}},
+			{"claude-opus-5-5", Frontier}, {"claude-fable-5-1", Frontier}, {"claude-sonnet-5-5", Balanced}, {"claude-haiku-5-5", Economy}}},
 		{ID: "codex", Name: "Codex", Tool: "codex", Binary: "codex", Models: []ModelDef{
 			{"gpt-6.1-sol", Frontier}, {"gpt-5.6-terra", Balanced}, {"gpt-5.6-luna", Economy}}},
 		{ID: "grok", Name: "Grok Build", Tool: "grok", Binary: "grok", Agent: true, Models: []ModelDef{
-			{"grok-4.6", Balanced}, {"grok-4.5", Economy}}},
+			{"grok-4.7", Frontier}, {"grok-4.7-build-fast", Balanced}, {"grok-4.5", Economy}}},
+		{ID: "antigravity", Name: "Antigravity", Tool: "antigravity", Binary: "agy", Agent: true, Models: []ModelDef{
+			{"claude-opus-4-6-thinking", Frontier}, {"gemini-3.8-flash-high", Balanced}, {"gemini-3.8-flash-low", Economy}}},
 		{ID: "opencode", Name: "OpenCode", Tool: "opencode", Binary: "opencode", Models: []ModelDef{
 			{"opencode/muse-spark-1.3-contributor-free", Frontier}}},
 		{ID: "kimi", Name: "Kimi Code", Tool: "kimi", Binary: "kimi", Agent: true, Models: []ModelDef{
@@ -107,6 +172,9 @@ func DefaultAgents() []AgentDef {
 }
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// ValidID 说明一个 agent 或项目 id 合不合规（小写字母数字、-、_，不超过 64）。
+func ValidID(s string) bool { return idRe.MatchString(s) }
 
 // Validate 检查设置自洽。任何一条不过，整份设置不用（不猜）。
 func (s Settings) Validate() error {
@@ -153,16 +221,23 @@ func (s Settings) Validate() error {
 			}
 			selected[id] = true
 		}
-		for tier, model := range p.Models {
+		for tier, models := range p.Models {
 			if !validTier(tier) {
 				return fmt.Errorf("项目 %s 的档位 %q 不合规", p.ID, tier)
 			}
-			owner, mtier, ok := s.findModel(model, selected)
-			if !ok {
-				return fmt.Errorf("项目 %s 的 %s 档模型 %s 不属于本项目选用的 agent", p.ID, tier, model)
-			}
-			if mtier != tier {
-				return fmt.Errorf("项目 %s 把 %s 的 %s（全局登记为 %s 档）放进了 %s 档", p.ID, owner, model, mtier, tier)
+			seen := map[string]bool{}
+			for _, model := range models {
+				if seen[model] {
+					return fmt.Errorf("项目 %s 的 %s 档里模型 %s 重复", p.ID, tier, model)
+				}
+				seen[model] = true
+				owner, mtier, ok := s.findModel(model, selected)
+				if !ok {
+					return fmt.Errorf("项目 %s 的 %s 档模型 %s 不属于本项目选用的 agent", p.ID, tier, model)
+				}
+				if mtier != tier {
+					return fmt.Errorf("项目 %s 把 %s 的 %s（全局登记为 %s 档）放进了 %s 档", p.ID, owner, model, mtier, tier)
+				}
 			}
 		}
 		if p.MainAgent.Agent != "" {
@@ -218,22 +293,92 @@ func (s Settings) Agent(id string) (AgentDef, bool) {
 
 // Resolved 是一次档位解析的结果。
 type Resolved struct {
-	Agent AgentDef
-	Model string
-	Tier  Tier
+	Agent AgentDef `json:"agent"`
+	Model string   `json:"model"`
+	Tier  Tier     `json:"tier"`
 }
 
 // ResolveTier 把「本项目某一档」换成具体的 agent 与模型。
+// 不看额度：取这一档清单里排第一个。
 func (s Settings) ResolveTier(projectID string, tier Tier) (Resolved, error) {
+	return s.ResolveTierFor(projectID, tier, "", nil)
+}
+
+// ResolveTierFor 按这一档清单的顺序挑模型（n057）：agentID 不为空时只看这个 agent 的模型（主 agent、点了 agent 的派工）；
+// exhausted 说某个 agent 的额度已用尽时跳过它的模型，取下一个。额度未知不算用尽（由调用方的 exhausted 决定）。
+// 全部被跳过时报错并写明跳过了哪些，不派。
+func (s Settings) ResolveTierFor(projectID string, tier Tier, agentID string, exhausted func(AgentDef) bool) (Resolved, error) {
 	p, ok := s.Project(projectID)
 	if !ok {
 		return Resolved{}, fmt.Errorf("没有项目 %s", projectID)
 	}
-	model, ok := p.Models[tier]
-	if !ok || model == "" {
-		return Resolved{}, fmt.Errorf("项目 %s 没有为 %s 档指定模型", projectID, tier)
+	return s.pick(p, tier, agentID, exhausted)
+}
+
+func (s Settings) pick(p ProjectDef, tier Tier, agentID string, exhausted func(AgentDef) bool) (Resolved, error) {
+	models := p.Models[tier]
+	if len(models) == 0 {
+		return Resolved{}, fmt.Errorf("项目 %s 没有为 %s 档指定模型", p.ID, tier)
 	}
-	return s.ResolveModel(projectID, model)
+	var skipped []string
+	known := map[string]bool{}
+	for _, model := range models {
+		res, err := s.ResolveModel(p.ID, model)
+		if err != nil {
+			return Resolved{}, err
+		}
+		if agentID != "" && res.Agent.ID != agentID {
+			continue
+		}
+		if exhausted != nil {
+			ex, ok := known[res.Agent.ID]
+			if !ok {
+				ex = exhausted(res.Agent)
+				known[res.Agent.ID] = ex
+			}
+			if ex {
+				skipped = append(skipped, model)
+				continue
+			}
+		}
+		return res, nil
+	}
+	if len(skipped) == 0 {
+		return Resolved{}, fmt.Errorf("项目 %s 的 %s 档清单里没有 %s 的模型", p.ID, tier, agentID)
+	}
+	first, err := s.ResolveModel(p.ID, skipped[0])
+	if err != nil {
+		return Resolved{}, err
+	}
+	return Resolved{}, &ErrAllExhausted{Project: p.ID, Tier: tier, Skipped: skipped, First: first}
+}
+
+// ErrAllExhausted：这一档清单里能挑的模型，看板都说额度已用尽。First 是排第一的那个（调用方决定要不要照用：
+// frontier 子 agent 交给额度门上报 owner、主 agent 由 owner 亲自起照用；其余不派）。
+type ErrAllExhausted struct {
+	Project string
+	Tier    Tier
+	Skipped []string
+	First   Resolved
+}
+
+func (e *ErrAllExhausted) Error() string {
+	return fmt.Sprintf("项目 %s 的 %s 档清单里能用的模型额度都已用尽（%s）：不派；等额度恢复，或在设置里给这一档加别家的模型",
+		e.Project, e.Tier, strings.Join(e.Skipped, "、"))
+}
+
+// CheckMainAgents：设了主 agent 的项目，主 agent 那一档清单里得有它自己的模型（n057）。
+// 只在保存新设置时查（deckd），不放进 Validate：读取时不因此挡住已有的设置。
+func (s Settings) CheckMainAgents() error {
+	for _, p := range s.Projects {
+		if p.MainAgent.Agent == "" {
+			continue
+		}
+		if _, err := s.pick(p, p.MainAgent.Tier, p.MainAgent.Agent, nil); err != nil {
+			return fmt.Errorf("项目 %s 的主 agent %s · %s：%w", p.ID, p.MainAgent.Agent, p.MainAgent.Tier, err)
+		}
+	}
+	return nil
 }
 
 // ResolveModel 检查模型在本项目选用范围内，并给出它的 agent 与档位。不在范围内就是错误（调用方硬拒绝）。
@@ -326,7 +471,7 @@ func LoadSettings(cfgDir string) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
-	s := Settings{Agents: a.Agents, Projects: p.Projects}
+	s := Settings{Agents: a.Agents, Projects: p.Projects, Generation: p.Generation}
 	if !haveAgents {
 		s.Agents = DefaultAgents()
 		if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: p.Generation, Agents: s.Agents}); err != nil {
@@ -355,14 +500,20 @@ func CheckSettings(cfgDir string) error {
 
 // SaveSettings 写回两份文件（只由 deckd 调）。写之前先校验；两份写同一个新代数，并先留上一代为 .prev。
 func SaveSettings(cfgDir string, s Settings) error {
+	_, err := saveSettings(cfgDir, s)
+	return err
+}
+
+// saveSettings 同 SaveSettings，并返回写下的代数。
+func saveSettings(cfgDir string, s Settings) (int, error) {
 	if err := s.Validate(); err != nil {
-		return err
+		return 0, err
 	}
 	a, _, _, err := readSettings(cfgDir)
 	if err != nil {
 		var mixed *ErrMixedSettings
 		if !errors.As(err, &mixed) {
-			return err
+			return 0, err
 		}
 		a.Generation = max(mixed.AgentsGen, mixed.ProjGen)
 	}
@@ -370,20 +521,27 @@ func SaveSettings(cfgDir string, s Settings) error {
 	for _, name := range []string{"agents.yaml", "projects.yaml"} {
 		if data, err := os.ReadFile(filepath.Join(cfgDir, name)); err == nil {
 			if err := writeAtomic(filepath.Join(cfgDir, name+".prev"), data); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
 	if err := saveFaultBefore("agents.yaml"); err != nil {
-		return err
+		return 0, err
 	}
 	if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: gen, Agents: s.Agents}); err != nil {
-		return err
+		return 0, err
 	}
 	if err := saveFaultBefore("projects.yaml"); err != nil {
-		return err
+		return 0, err
 	}
-	return saveYAML(filepath.Join(cfgDir, "projects.yaml"), projectsFile{Generation: gen, Projects: s.Projects})
+	return gen, saveYAML(filepath.Join(cfgDir, "projects.yaml"), projectsFile{Generation: gen, Projects: s.Projects})
+}
+
+// ErrSettingsChanged 表示整份保存时带的代数不是当前的：读到之后别处（另一个设置窗口、deck project add、手改）又保存过。
+type ErrSettingsChanged struct{ Want, Have int }
+
+func (e *ErrSettingsChanged) Error() string {
+	return fmt.Sprintf("设置在你打开之后被别处改过（你读到的是第 %d 代，现在是第 %d 代）：没有保存；重新打开设置再改", e.Want, e.Have)
 }
 
 // saveFault 是故障注入点：只有测试会设置它，模拟「写到一半失败」。

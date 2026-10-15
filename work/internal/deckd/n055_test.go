@@ -186,7 +186,7 @@ func TestSubBriefWaitsForDialog(t *testing.T) {
 	w := newAgentWorld(t)
 	w.up.setOutput("Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit")
 	before := w.up.sendCount()
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-sub", "/tmp/alpha/sub", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-sub", "/tmp/alpha/sub", "", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("%d %s", code, b)
 	}
@@ -218,7 +218,7 @@ func TestSpawnPassesDeclaredExtraArgs(t *testing.T) {
 	if err := w.store.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
 	}
-	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-extra", "/tmp/alpha", "", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "写测试", "给 foo 写测试", "n055-extra", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("%d %s", code, b)
 	}

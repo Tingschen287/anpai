@@ -54,11 +54,11 @@ func spawnGraphJSON(tier, title, task, req, dir, node, agentID, model string) st
 
 func TestGraphChannelStartsAfterLaunchAndBindsAttempt(t *testing.T) {
 	w, g := graphWorld(t)
-	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "g1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+	code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "节点活", "做 n099", "g1", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 	if code != 201 {
 		t.Fatalf("Graph 通道应能开：%d %s", code, b)
 	}
-	if len(g.calls) != 1 || !strings.HasPrefix(g.calls[0], "n099_x|deck:") || !strings.HasSuffix(g.calls[0], "|claude-sonnet-5|balanced") {
+	if len(g.calls) != 1 || !strings.HasPrefix(g.calls[0], "n099_x|deck:") || !strings.HasSuffix(g.calls[0], "|claude-sonnet-5-5|balanced") {
 		t.Fatalf("应以 deck:<会话> 为 actor、按解析出的模型与档位开一轮：%v", g.calls)
 	}
 	if g.launched[0] != 1 {
@@ -73,7 +73,7 @@ func TestGraphChannelStartsAfterLaunchAndBindsAttempt(t *testing.T) {
 		t.Fatalf("开成一轮后才送 brief：%v", w.up.sends)
 	}
 	// 普通通道不碰账本
-	if code, _ := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "普通活", "t", "g2", "/tmp/alpha", "", "claude", "claude-sonnet-5")); code != 201 || len(g.calls) != 1 {
+	if code, _ := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "普通活", "t", "g2", "/tmp/alpha", "", "claude", "claude-sonnet-5-5")); code != 201 || len(g.calls) != 1 {
 		t.Fatalf("普通通道不应开一轮：%d calls=%v", code, g.calls)
 	}
 }
@@ -82,7 +82,7 @@ func TestGraphChannelSharesAdmission(t *testing.T) {
 	w, g := graphWorld(t)
 	// bypass 硬拒绝
 	w.cfgBypass = map[string]error{"claude": errors.New("上游会加 --dangerously-skip-permissions")}
-	if code, _ := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "a", "t", "g3", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5")); code != 400 {
+	if code, _ := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "a", "t", "g3", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5")); code != 400 {
 		t.Fatalf("Graph 通道同样硬拒绝绕过：%d", code)
 	}
 	w.cfgBypass = nil
@@ -92,7 +92,7 @@ func TestGraphChannelSharesAdmission(t *testing.T) {
 		t.Fatalf("Graph 通道同样受包络约束，决定范围绑定节点：%d %s", code, b)
 	}
 	// 子 agent 不能开
-	if code, _ := w.do("sub", "POST", "/v1/agents", spawnGraphJSON("balanced", "a", "t", "g5", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5")); code != 403 {
+	if code, _ := w.do("sub", "POST", "/v1/agents", spawnGraphJSON("balanced", "a", "t", "g5", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5")); code != 403 {
 		t.Fatalf("角色检查同样适用：%d", code)
 	}
 	if len(g.calls) != 0 || len(w.up.launches) != 0 {
@@ -113,7 +113,7 @@ func TestGraphStartFailureStopsLaunchedSession(t *testing.T) {
 			w, g := graphWorld(t)
 			g.err = c.err
 			before := w.store.Slots("alpha")
-			code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "开不成", "t", "g6", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5"))
+			code, b := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "开不成", "t", "g6", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5"))
 			if code != 409 || !strings.Contains(b, "已停掉") {
 				t.Fatalf("开不成一轮：停掉刚起的会话并报错：%d %s", code, b)
 			}

@@ -86,7 +86,7 @@ func projectIDFor(dir string, taken map[string]bool) string {
 // defaultProject 给新项目填默认值：勾选全局清单里所有已装的 agent（都没装就全勾），主 agent 取第一个已装的 agent 的
 // frontier（没有 frontier 模型就取它有的最高一档），三档模型各取主 agent 在该档的第一个模型、没有就取其他勾选 agent 的。
 func (m *Settings) defaultProject(id, dir string) deckstore.ProjectDef {
-	p := deckstore.ProjectDef{ID: id, Name: filepath.Base(dir), Path: dir, Models: map[deckstore.Tier]string{},
+	p := deckstore.ProjectDef{ID: id, Name: filepath.Base(dir), Path: dir, Models: map[deckstore.Tier]deckstore.ModelList{},
 		Envelope: deckstore.DefaultEnvelope(id)}
 	for _, a := range m.set.Agents {
 		if m.installed(a) {
@@ -105,16 +105,16 @@ func (m *Settings) defaultProject(id, dir string) deckstore.ProjectDef {
 	for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
 		t := deckstore.Tiers[i]
 		for _, md := range main.Models {
-			if md.Tier == t && p.Models[t] == "" {
-				p.Models[t] = md.ID
+			if md.Tier == t && len(p.Models[t]) == 0 {
+				p.Models[t] = deckstore.ModelList{md.ID}
 			}
 		}
-		if p.Models[t] == "" {
+		if len(p.Models[t]) == 0 {
 			if opts := m.modelsFor(&p, t); len(opts) > 0 {
-				p.Models[t] = opts[0]
+				p.Models[t] = deckstore.ModelList{opts[0]}
 			}
 		}
-		if p.MainAgent.Agent == "" && p.Models[t] != "" && hasTier(main, t) {
+		if p.MainAgent.Agent == "" && len(p.Models[t]) > 0 && hasTier(main, t) {
 			p.MainAgent = deckstore.MainAgent{Agent: main.ID, Tier: t}
 		}
 	}

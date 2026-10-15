@@ -199,13 +199,10 @@ func agentSpawn(ctx context.Context, c *deckclient.Client, args []string) (any, 
 	if err := c.Get(ctx, "/v1/settings", &set); err != nil {
 		return nil, err
 	}
+	// 让 deckd 挑模型（n057）：档位清单按顺序、跳过额度确知用尽的，与派工时同一个挑法，args_sha256 才对得上
+	q := url.Values{"project": {proj}, "tier": {*tier}, "agent": {*agent}, "model": {*model}}
 	var res deckstore.Resolved
-	if *model != "" {
-		res, err = set.ResolveModel(proj, *model)
-	} else {
-		res, err = set.ResolveTier(proj, deckstore.Tier(*tier))
-	}
-	if err != nil {
+	if err := c.Get(ctx, "/v1/resolve?"+q.Encode(), &res); err != nil {
 		return nil, err
 	}
 	p, _ := set.Project(proj)
@@ -310,7 +307,7 @@ func projectCmd(dirs deckstore.Dirs, args []string) {
 		fail("%v", err)
 	}
 	ma, tier, _ := strings.Cut(*mainAgent, ":")
-	p := deckstore.ProjectDef{ID: *id, Name: *name, Path: *path, Agents: []string{ma}, Models: map[deckstore.Tier]string{},
+	p := deckstore.ProjectDef{ID: *id, Name: *name, Path: *path, Agents: []string{ma}, Models: map[deckstore.Tier]deckstore.ModelList{},
 		MainAgent: deckstore.MainAgent{Agent: ma, Tier: deckstore.Tier(tier)}, Envelope: deckstore.DefaultEnvelope(*id)}
 	if *agents != "" {
 		p.Agents = strings.Split(*agents, ",")
@@ -318,19 +315,19 @@ func projectCmd(dirs deckstore.Dirs, args []string) {
 	if *models != "" {
 		for _, kv := range strings.Split(*models, ",") {
 			k, v, _ := strings.Cut(kv, "=")
-			p.Models[deckstore.Tier(k)] = v
+			p.Models[deckstore.Tier(k)] = append(p.Models[deckstore.Tier(k)], v) // 同一档写多次 = 多选，按出现顺序
 		}
 	} else if a, ok := set.Agent(ma); ok {
 		for _, m := range a.Models {
 			if m.Tier == deckstore.Tier(tier) {
-				p.Models[m.Tier] = m.ID
+				p.Models[m.Tier] = deckstore.ModelList{m.ID}
 				break
 			}
 		}
 	}
 	set.Projects = append(set.Projects, p)
 	var out any
-	if err := c.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": set.Agents, "projects": set.Projects}, &out); err != nil {
+	if err := c.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": set.Agents, "projects": set.Projects, "generation": set.Generation}, &out); err != nil {
 		fail("%v", err)
 	}
 	json.NewEncoder(os.Stdout).Encode(p)
