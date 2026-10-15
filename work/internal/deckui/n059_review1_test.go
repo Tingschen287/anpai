@@ -326,6 +326,38 @@ func TestTallBlockScrollsBeforeCursorMoves(t *testing.T) {
 	}
 }
 
+// attempt 2：项目页某一档清单很长（块比一屏高），块内翻到一半按 → 换到另一个同样长的项目：从新项目这一块的顶上看起。
+func TestTallBlockOffsetResetsOnProjectSwitch(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	c := m.agentPtr("claude")
+	var ids deckstore.ModelList
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("tall-%02d-%s", i, strings.Repeat("y", 40))
+		c.Models = append(c.Models, deckstore.ModelDef{ID: id, Tier: deckstore.Economy})
+		ids = append(ids, id)
+	}
+	m.project().Models[deckstore.Economy] = ids
+	second := *m.project()
+	second.ID, second.Name, second.Path = "second", "second", "/tmp/second"
+	second.Models = map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: m.project().Models[deckstore.Frontier], deckstore.Economy: ids}
+	m.set.Projects = append(m.set.Projects, second)
+	goRow(t, m, rowTier, "", deckstore.Economy)
+	plainView(m)
+	if m.scr.blockMax == 0 {
+		t.Fatalf("前提：便宜档这一块比一屏高：%+v", m.scr)
+	}
+	press(m, "down")
+	plainView(m)
+	if m.scr.blockOff == 0 {
+		t.Fatal("前提：块内翻了")
+	}
+	press(m, "right")
+	if v := plainView(m); m.proj != 1 || m.scr.blockOff != 0 || !strings.Contains(strings.ReplaceAll(v, " ", ""), "便宜tall-00-") {
+		t.Fatalf("换项目后从这一块的顶上看起：proj=%d %+v\n%s", m.proj, m.scr, v)
+	}
+}
+
 // attempt 2：文字表每条的格式占位符个数与调用时给的参数个数一致（评审 1 已知问题 1：main.moved 少一个参数）。
 func TestTextFormatArgsMatch(t *testing.T) {
 	verb := regexp.MustCompile(`%[-+# 0]*[0-9]*(\.[0-9]+)?[a-zA-Z]`)

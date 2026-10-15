@@ -453,7 +453,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.scr.blockOff = 0
 		default:
-			m.scr.off = 0
+			m.scr.off, m.scr.blockOff = 0, 0 // 换页、换项目、打开子视图等：从新光标所在块的顶上看起
 		}
 		before := m.edits
 		var cmd tea.Cmd
