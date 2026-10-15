@@ -87,7 +87,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case toolsMsg:
 		if msg.err != nil {
-			m.msg = T("tools.fail", errText(msg.err))
+			m.msg = T("tools.fail", errLong(msg.err))
 			return nil
 		}
 		m.tools = msg.tools
@@ -104,7 +104,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		in := m.sub.input
 		in.loading = false
 		if msg.err != nil {
-			in.note = T("input.listfail", oneLine(deckstore.Clean(errText(msg.err), textCap)))
+			in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
 			return nil
 		}
 		in.all = msg.models
@@ -235,11 +235,11 @@ func (m *Settings) addView() (string, []string) {
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {
-		state := green + "●" + reset + " " + dimOn + sanitizePath(t.Path) + "  " + sanitize(t.Version) + reset
+		state := green + "●" + reset + " " + dimOn + sanitizeFull(t.Path) + "  " + sanitizeFull(t.Version) + reset
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
-		lines := m.wrap(fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state), 3) // 长路径折行、不截短
+		lines := m.wrap(fmt.Sprintf("%-12s %-11s %s", sanitizeFull(t.Name), sanitizeFull(t.Binary), state), 3) // 长路径折行、不截短
 		for j, l := range lines {
 			switch {
 			case i == m.sub.cur && j == 0:
@@ -350,21 +350,21 @@ func (m *Settings) agentView() (string, []string) {
 		return "", nil
 	}
 	var b strings.Builder
-	title := m.titleLine(" "+T("agent.title", sanitize(a.Name), sanitize(a.ID)), T("agent.keys"))
+	title := m.titleLine(" "+T("agent.title", sanitizeFull(a.Name), sanitizeFull(a.ID)), T("agent.keys"))
 	b.WriteString(title)
-	cmd := T("agent.cmd", sanitize(a.Binary))
+	cmd := T("agent.cmd", sanitizeFull(a.Binary))
 	if t, ok := m.toolInfo(a.Tool); ok {
 		if t.Installed {
-			cmd += "  " + sanitize(t.Version)
+			cmd += "  " + sanitizeFull(t.Version)
 		} else {
 			cmd += "  " + orange + T("agent.missing") + reset + dimOn
 		}
 	}
-	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitize(a.Tool)) + reset + "\n")
+	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitizeFull(a.Tool)) + reset + "\n")
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
-			parts = append(parts, sanitizePath(strings.Join(g, " ")))
+			parts = append(parts, sanitizeFull(strings.Join(g, " ")))
 		}
 		b.WriteString(m.note(T("agent.extra", strings.Join(parts, T("sep.semi")))))
 	}
@@ -376,9 +376,9 @@ func (m *Settings) agentView() (string, []string) {
 	for i, md := range a.Models {
 		use := ""
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			use = dimOn + "  " + T("model.used", sanitizePath(strings.Join(users, T("sep.list")))) + reset // 项目多时不截（n059 自查 3）
+			use = dimOn + "  " + T("model.used", sanitizeFull(strings.Join(users, T("sep.list")))) + reset // 项目多时不截（n059 自查 3）
 		}
-		id := sanitize(md.ID)
+		id := sanitizeFull(md.ID)
 		if pad := 34 - ansi.StringWidth(id); pad > 0 {
 			id += strings.Repeat(" ", pad)
 		}
@@ -401,10 +401,15 @@ func (m *Settings) agentView() (string, []string) {
 	if in := m.sub.input; in != nil {
 		in.limit = 12
 		if m.height > 0 {
-			// 先量不带候选时底部要几行（说明折行后可能不止一行），剩下的才给候选
-			in.limit = 0
-			fixed := 1 + strings.Count(m.inputView(), "\n") + len(m.msgFoot()) // fitHeight 加的空行、输入框与说明、提示
-			in.limit = max(0, min(12, m.height-strings.Count(title, "\n")-fixed-3))
+			// 按出口折行后的实际行数量（n059 自查 4：长候选折成两行时按一项一行算会超高）：标题、fitHeight 加的空行、
+			// 输入框与候选与说明、提示，再留出「上面 / 下面还有」与至少一行列表，放不下就少列候选
+			fits := func() bool {
+				foot := m.fitLines(append(strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n"), m.msgFoot()...))
+				return strings.Count(m.fitWidth(title), "\n")+1+len(foot)+3 <= m.height
+			}
+			for in.limit > 0 && !fits() {
+				in.limit--
+			}
 		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
 	}
@@ -549,9 +554,9 @@ func (m *Settings) inputView() string {
 	var b strings.Builder
 	title := T("input.add")
 	if in.rename != "" {
-		title = T("input.rename", sanitize(in.rename))
+		title = T("input.rename", sanitizeFull(in.rename))
 	}
-	b.WriteString("  " + T("input.prompt", title) + bold + sanitize(in.text) + reset + "▏\n")
+	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + reset + "▏\n")
 	if in.note != "" {
 		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, textCap))))
 	}
@@ -565,7 +570,7 @@ func (m *Settings) inputView() string {
 			if o := m.ownerOf(s); o != "" {
 				taken = dimOn + T("input.has") + reset
 			}
-			fmt.Fprintf(&b, "   %s %s%s\n", cur, sanitize(s), taken)
+			fmt.Fprintf(&b, "   %s %s%s\n", cur, sanitizeFull(s), taken)
 		}
 		b.WriteString(m.note(T("input.addkeys")))
 	} else {
@@ -653,7 +658,7 @@ func (m *Settings) tierView() (string, []string) {
 	}
 	t := m.sub.tier
 	var b strings.Builder
-	b.WriteString(m.titleLine(" "+T("tierview.title", sanitize(p.Name), tierName(t)), T("tierview.keys")))
+	b.WriteString(m.titleLine(" "+T("tierview.title", sanitizeFull(p.Name), tierName(t)), T("tierview.keys")))
 	opts := m.tierOptions(p, t)
 	if len(opts) == 0 {
 		b.WriteString(dimOn + "  " + T("tierview.empty", tierName(t)) + reset + "\n")
@@ -666,11 +671,11 @@ func (m *Settings) tierView() (string, []string) {
 				mark = fmt.Sprintf("%2d.", j+1)
 			}
 		}
-		name := sanitize(id)
+		name := sanitizeFull(id)
 		if pad := 34 - ansi.StringWidth(name); pad > 0 {
 			name += strings.Repeat(" ", pad)
 		}
-		line := mark + " " + name + " " + dimOn + sanitize(m.agentName(m.ownerOf(id))) + reset
+		line := mark + " " + name + " " + dimOn + sanitizeFull(m.agentName(m.ownerOf(id))) + reset
 		if i == m.sub.cur {
 			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
 		} else {

@@ -430,3 +430,93 @@ func TestLongContentSweepNothingTruncated(t *testing.T) {
 		press(m, "esc")
 	}
 }
+
+// 长内容再扫一遍（n059 自查 4）：读不到设置与保存失败的长报错（后半句「先运行 deck daemon」要看得见）、合规的 99 字模型 id
+// （项目页、全局 agent 页、agent 编辑、档位多选、输入框里打的字）、很长的候选（个数按折行后的行数缩减）、项目页滚动时项目名固定在顶部、
+// 没有连字符的超长目录——80×24 及以上不超宽、不超高、不截短。
+func TestLongContentSweepMore(t *testing.T) {
+	arn := "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/us.anthropic.claude-sonnet-4-5"
+	if !deckstore.ValidModelID(arn) {
+		t.Fatal("前提：99 字的 ARN 是合规的模型 id")
+	}
+	dial := "连不上 deckd（Get \"http://deckd/v1/settings\": dial unix /home/linux/.local/state/deck/deckd.sock: connect: no such file or directory）：先运行 deck daemon"
+	under := filepath.Join(t.TempDir(), "Tingschen287", "terminal_deck_worktrees_n049_a1_work_internal_deckui_settings_and_more_words")
+	if err := os.MkdirAll(filepath.Join(under, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {140, 40}} {
+		check := func(m *Settings, what, head string, must ...string) {
+			t.Helper()
+			v := plainView(m)
+			ls := strings.Split(v, "\n")
+			if len(ls) > size[1] {
+				t.Fatalf("%dx%d %s：超高 %d 行：\n%s", size[0], size[1], what, len(ls), v)
+			}
+			if !strings.Contains(ls[0], head) {
+				t.Fatalf("%dx%d %s：第一行不是标题 %q：\n%s", size[0], size[1], what, head, v)
+			}
+			for _, l := range ls {
+				if ansi.StringWidth(l) > size[0] || strings.Contains(strings.ReplaceAll(l, "……", ""), "…") {
+					t.Fatalf("%dx%d %s：超宽或截短：%q\n%s", size[0], size[1], what, l, v)
+				}
+			}
+			flat := strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "")
+			for _, w := range must {
+				if !strings.Contains(flat, strings.ReplaceAll(w, " ", "")) {
+					t.Fatalf("%dx%d %s：缺 %q：\n%s", size[0], size[1], what, w, v)
+				}
+			}
+		}
+		// 读不到设置
+		m0 := &Settings{width: size[0], height: size[1]}
+		m0.Update(loadedMsg{err: errors.New(dial)})
+		check(m0, "读不到设置", "设置", "先运行 deck daemon")
+
+		m, api := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		m.set.Agents = deckstore.DefaultAgents() // 6 个 agent：80×24 下项目页要滚动
+		c := m.agentPtr("claude")
+		c.Models = append(c.Models, deckstore.ModelDef{ID: arn, Tier: deckstore.Frontier})
+		p := m.project()
+		p.Agents = []string{"claude", "codex"}
+		p.Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", arn, "gpt-6.1-sol", "claude-fable-5-1"}
+		p.Models[deckstore.Balanced] = deckstore.ModelList{"claude-sonnet-5-5", "gpt-5.6-terra"}
+		p.Models[deckstore.Economy] = deckstore.ModelList{"claude-haiku-5-5"}
+		check(m, "项目页（长 id）", "设置", arn)
+		goRow(t, m, rowTier, "", deckstore.Economy)
+		check(m, "项目页（光标在便宜档）", "设置", "‹ ai ›", "便宜")
+		// 保存失败的长报错
+		api.fail = errors.New(dial)
+		goRow(t, m, rowMain, "", "")
+		press(m, " ") // 换主 agent：一处改动
+		check(m, "保存失败", "设置", "先运行 deck daemon", "s 重试")
+		api.fail = nil
+		press(m, "s")
+		press(m, "2")
+		check(m, "全局 agent 页（长 id）", "设置", arn)
+		goRow(t, m, rowGlobal, "claude", "")
+		press(m, "enter")
+		check(m, "agent 编辑（长 id）", "Claude Code", arn, "esc 返回")
+		press(m, "+")
+		var cands []string
+		for i := 0; i < 20; i++ {
+			cands = append(cands, fmt.Sprintf("openrouter/anthropic/claude-sonnet-4-5-variant-%02d-extended:free-and-something", i))
+		}
+		m.sub.input.all = cands
+		check(m, "长候选", "Claude Code", "esc 返回", "esc 取消", cands[0])
+		for _, r := range arn {
+			press(m, string(r))
+		}
+		check(m, "输入框里打长 id", "Claude Code", "加模型："+arn+"▏", "esc 取消")
+		press(m, "esc", "esc", "1")
+		goRow(t, m, rowTier, "", deckstore.Frontier)
+		press(m, "enter")
+		check(m, "档位多选（长 id）", "最强", arn, "esc 返回")
+		press(m, "esc")
+		// 没有连字符的超长目录
+		m.Start = under
+		press(m, "n")
+		check(m, "新建项目 · 选目录（无连字符）", "新建项目", under)
+		press(m, "esc")
+	}
+}

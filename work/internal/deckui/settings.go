@@ -395,7 +395,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
 		if msg.err != nil {
-			m.msg = T("load.fail", errText(msg.err))
+			m.msg = T("load.fail", errLong(msg.err))
 			return m, nil
 		}
 		if msg.trustOnly {
@@ -421,7 +421,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.saveDone(msg)
 		}
 		if msg.err != nil {
-			m.msg = T("action.fail", msg.what, errText(msg.err))
+			m.msg = T("action.fail", msg.what, errLong(msg.err))
 			return m, nil
 		}
 		m.msg = T("action.done", msg.what)
@@ -473,7 +473,7 @@ func (m *Settings) save() tea.Cmd {
 	set, err := cloneSettings(m.set)
 	if err != nil {
 		m.saving = false
-		m.saveErr = errText(err)
+		m.saveErr = errLong(err)
 		return nil
 	}
 	edits, reloads := m.edits, m.reloads
@@ -511,7 +511,7 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 			m.saveErr = T("save.conflict")
 			return nil
 		}
-		m.saveErr = errText(msg.err)
+		m.saveErr = errLong(msg.err)
 		if m.pending && m.edits != msg.edits { // 之后的改动可能已经把它改对了
 			m.pending = false
 			return m.autosave()
@@ -712,7 +712,7 @@ func (m *Settings) fitWidth(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
 		if ansi.StringWidth(l) > m.width {
-			lines[i] = ansi.Wrap(l, m.width, "")
+			lines[i] = ansi.Wrap(l, max(1, m.width-1), "") // 留 1 列：行首空格加超长词时 ansi.Wrap 第一行会多 1 列（n059 自查 4）
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -733,8 +733,12 @@ func (m *Settings) fitLines(lines []string) []string {
 // textCap 是报错、提示原样显示的长度上限：只防异常长的文字，平常的都显示全、折行（验收：80×24 及以上无截断）。
 const textCap = 1000
 
-// sanitizePath 清理要显示的目录、路径与拼起来的名字清单：与 sanitize 一样去控制字符、打码，但不按 80 个字截短（折行显示全）。
-func sanitizePath(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
+// sanitizeFull 是设置界面显示 owner 的数据（名字、模型 id、目录、路径、清单）用的清理：与侧栏的 sanitize 一样去控制字符、打码，
+// 但不按 80 个字截短，长的交给出口折行显示全（n059 自查 4：模型 id 可到 128 字、目录与清单更长，按 80 截就看不全）。
+func sanitizeFull(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
+
+// errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。
+func errLong(err error) string { return oneLine(deckstore.Clean(err.Error(), textCap)) }
 
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
 func (m *Settings) wrap(s string, lead int) []string {
@@ -816,7 +820,7 @@ func (m *Settings) View() string {
 	b.WriteString(m.tabBar())
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
-		return b.String()
+		return fitHeight(m.fitWidth(b.String()), nil, m.height) // 读不到设置的报错也折行（n059 自查 4）
 	}
 	line, lastSel := 0, false
 	// row 画一行能移光标的行：光标所在行前面是「›」并整行加底色
@@ -843,7 +847,11 @@ func (m *Settings) View() string {
 	case pageTrust:
 		m.trustPage(&b, row, cont)
 	}
-	return fitHeight(m.fitWidth(b.String()), m.fitLines(m.foot()), m.height)
+	keep := 1
+	if m.page == pageProject && m.project() != nil {
+		keep = 2 // 项目页：「项目 ‹ 名字 ›」一行也固定在顶部，滚动时看得见在改哪个项目（n059 自查 4）
+	}
+	return fitHeightKeep(m.fitWidth(b.String()), m.fitLines(m.foot()), m.height, keep)
 }
 
 func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string) {
@@ -852,7 +860,7 @@ func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string
 		b.WriteString(dimOn + "   " + T("project.empty") + reset + "\n")
 		return
 	}
-	fmt.Fprintf(b, " %s  %s‹ %s ›%s  %s\n\n", bold+T("project.label")+reset, bold+brand, sanitize(p.Name), reset,
+	fmt.Fprintf(b, " %s  %s‹ %s ›%s  %s\n\n", bold+T("project.label")+reset, bold+brand, sanitizeFull(p.Name), reset,
 		dimOn+fmt.Sprintf("%d/%d", m.proj+1, len(m.set.Projects))+reset)
 	b.WriteString(" " + bold + T("project.agents") + reset + "\n")
 	if len(m.set.Agents) == 0 {
@@ -867,14 +875,14 @@ func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string
 		if !m.installed(a) {
 			note = dimOn + "  " + T("agent.missing") + reset
 		}
-		b.WriteString(row(box+" "+sanitize(a.Name)+note) + "\n")
+		b.WriteString(row(box+" "+sanitizeFull(a.Name)+note) + "\n")
 	}
 	b.WriteString("\n")
 	main := dimOn + T("main.unset") + reset
 	if p.MainAgent.Agent != "" {
-		main = sanitize(m.mainText(p.MainAgent))
+		main = sanitizeFull(m.mainText(p.MainAgent))
 		if model := m.mainModel(p); model != "" {
-			main += dimOn + "  " + T("main.uses", sanitize(model)) + reset
+			main += dimOn + "  " + T("main.uses", sanitizeFull(model)) + reset
 		} else {
 			main += orange + "  " + T("main.nomodel") + reset
 		}
@@ -888,9 +896,9 @@ func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string
 			toks = nil
 			for i, model := range list {
 				if i > 0 {
-					toks = append(toks, dimOn+" → "+reset+sanitize(model))
+					toks = append(toks, dimOn+" → "+reset+sanitizeFull(model))
 				} else {
-					toks = append(toks, sanitize(model))
+					toks = append(toks, sanitizeFull(model))
 				}
 			}
 		}
@@ -918,7 +926,7 @@ func (m *Settings) agentsPage(b *strings.Builder, row, cont func(string) string)
 		if !m.installed(a) {
 			mark, style, note = dimOn+"○"+reset, dimOn, "  "+T("agent.missing")
 		}
-		name := sanitize(a.Name)
+		name := sanitizeFull(a.Name)
 		if pad := nameW - ansi.StringWidth(name); pad > 0 {
 			name += strings.Repeat(" ", pad)
 		}
@@ -956,10 +964,10 @@ func modelTokens(a deckstore.AgentDef) []string {
 				if len(toks) > 0 {
 					sep = "   "
 				}
-				toks = append(toks, sep+tierLabel(t)+" "+sanitize(md.ID))
+				toks = append(toks, sep+tierLabel(t)+" "+sanitizeFull(md.ID))
 				first = false
 			} else {
-				toks = append(toks, T("sep.list")+sanitize(md.ID))
+				toks = append(toks, T("sep.list")+sanitizeFull(md.ID))
 			}
 		}
 	}
@@ -998,8 +1006,8 @@ func (m *Settings) trustPage(b *strings.Builder, row, cont func(string) string) 
 	}
 	for _, g := range m.trust {
 		// 太长时折行、不截短（n059 自查：80 列下很长的目录被截掉，验收要求 80×24 及以上无截断）
-		lines := m.wrap(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitize(g.Project),
-			sanitize(g.Tool), sanitizePath(g.Dir)), 3)
+		lines := m.wrap(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitizeFull(g.Project),
+			sanitizeFull(g.Tool), sanitizeFull(g.Dir)), 3)
 		b.WriteString(row(lines[0]) + "\n")
 		for _, l := range lines[1:] {
 			b.WriteString(cont("   "+l) + "\n")
@@ -1105,6 +1113,11 @@ func wrapKeys(keys string, width int) []string {
 // fitHeight 让画面放得进窗口（n057 自查：矮窗口时顶部按键提示与光标行被裁掉）：顶部标题（到第一个空行为止）与底部提示固定，
 // 中间按光标所在行（「›」）滚动，上下还有内容时写明。
 func fitHeight(body string, foot []string, height int) string {
+	return fitHeightKeep(body, foot, height, 1)
+}
+
+// fitHeightKeep 同 fitHeight，固定的标题到第 keep 个空行为止。
+func fitHeightKeep(body string, foot []string, height, keep int) string {
 	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
 	if len(foot) > 0 {
 		foot = append([]string{""}, foot...)
@@ -1113,8 +1126,12 @@ func fitHeight(body string, foot []string, height int) string {
 		return strings.Join(append(lines, foot...), "\n")
 	}
 	head := 0
-	for head < len(lines) && lines[head] != "" {
-		head++
+	for blanks := 0; head < len(lines); head++ {
+		if lines[head] == "" {
+			if blanks++; blanks == keep {
+				break
+			}
+		}
 	}
 	head = min(head+1, len(lines))
 	rest := lines[head:]

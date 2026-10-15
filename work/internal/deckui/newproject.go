@@ -39,7 +39,7 @@ func (f *projectForm) enter(dir string) {
 	dir = filepath.Clean(dir)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		f.err = T("form.cantread", dir, errText(err))
+		f.err = T("form.cantread", dir, errLong(err))
 		if f.dir == "" { // 起点就读不了：从家目录开始
 			if home, herr := os.UserHomeDir(); herr == nil && home != dir {
 				f.enter(home)
@@ -191,7 +191,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 func (m *Settings) choose(dir string) {
 	f := m.form
 	if err := deckstore.CheckPath(dir); err != nil {
-		f.err = T("form.badpath", errText(err))
+		f.err = T("form.badpath", errLong(err))
 		return
 	}
 	taken := map[string]bool{}
@@ -203,7 +203,7 @@ func (m *Settings) choose(dir string) {
 	}
 	for _, p := range m.set.Projects {
 		if real(p.Path) == real(dir) {
-			f.err = T("form.taken", sanitize(p.Name))
+			f.err = T("form.taken", sanitizeFull(p.Name))
 			return
 		}
 		taken[p.ID] = true
@@ -220,13 +220,13 @@ func (m *Settings) createProject() tea.Cmd {
 	}
 	next, err := cloneSettings(m.set)
 	if err != nil {
-		f.err = errText(err)
+		f.err = errLong(err)
 		return nil
 	}
 	p := m.defaultProject(f.id, f.chosen)
 	next.Projects = append(next.Projects, p)
 	if err := next.Validate(); err != nil {
-		f.err = T("form.invalid", errText(err))
+		f.err = T("form.invalid", errLong(err))
 		return nil
 	}
 	m.set = next
@@ -234,8 +234,8 @@ func (m *Settings) createProject() tea.Cmd {
 	m.proj, m.cur = len(m.set.Projects)-1, 0
 	m.form = nil
 	m.touch() // Update 看到改动就自动保存（n059）
-	m.msg = T("form.created", sanitize(p.Name))
-	m.hint, m.hintEdits = T("form.next", sanitize(p.Name)), m.edits // 存上了含这个项目的那次保存才提示去侧栏
+	m.msg = T("form.created", sanitizeFull(p.Name))
+	m.hint, m.hintEdits = T("form.next", sanitizeFull(p.Name)), m.edits // 存上了含这个项目的那次保存才提示去侧栏
 	return nil
 }
 
@@ -245,10 +245,10 @@ func (m *Settings) formView() string {
 	var b strings.Builder
 	if f.chosen == "" {
 		b.WriteString(m.titleLine(" "+T("form.browse.title"), T("form.browse.keys")))
-		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitizePath(f.dir))
+		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitizeFull(f.dir))
 		rows := []string{green + T("form.usethis") + reset}
 		for _, s := range f.subdirs {
-			rows = append(rows, sanitize(s)+"/")
+			rows = append(rows, sanitizeFull(s)+"/")
 		}
 		room := 20
 		if m.height > 10 {
@@ -278,18 +278,18 @@ func (m *Settings) formView() string {
 			lw = max(lw, ansi.StringWidth(l))
 		}
 		label := func(l string) string { return l + strings.Repeat(" ", lw-ansi.StringWidth(l)) } // 按显示宽度对齐（n059 自查）
-		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitizePath(f.chosen))
-		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", label(T("form.id")), sanitize(f.id))
+		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitizeFull(f.chosen))
+		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", label(T("form.id")), sanitizeFull(f.id))
 		p := m.defaultProject(f.id, f.chosen)
 		main := dimOn + T("form.noagent") + reset
 		if p.MainAgent.Agent != "" {
-			main = sanitize(m.mainText(p.MainAgent))
+			main = sanitizeFull(m.mainText(p.MainAgent))
 		}
 		var names []string
 		for _, id := range p.Agents {
 			names = append(names, m.agentName(id))
 		}
-		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitizePath(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
+		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitizeFull(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
 		b.WriteString(" " + m.note(T("form.later")))
 	}
 	return b.String()
