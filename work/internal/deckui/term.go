@@ -173,9 +173,10 @@ func (f Frame) Encode(width, height int) string {
 		if i > 0 {
 			b.WriteString("\r\n")
 		}
-		// 先用空格铺满一行再回行首（n058）：tmux 只在写入窄字符时清掉压在格子上的旧 sixel 图，
-		// 行首是双宽汉字（「安排 Anpai」）时，切成字母徽章后旧 logo 图留着，不支持 sixel 的终端上出「SIXEL IMAGE」占位
-		b.WriteString(strings.Repeat(" ", width) + "\r")
+		// 先擦掉整行再写（n058）：tmux 写双宽字符时不清压在格子上的旧 sixel 图，行首是「安排 Anpai」时，
+		// 切成字母徽章后旧 logo 图留着，不支持 sixel 的终端上出「SIXEL IMAGE」占位。用擦行而不是铺满空格：
+		// 宽度与窗格对不上（改大小的瞬间）时铺空格会自动折行（n058 自查）
+		b.WriteString("\x1b[2K")
 		if i < len(f.Lines) {
 			b.WriteString(ansi.Truncate(f.Lines[i], width, ""))
 		}
