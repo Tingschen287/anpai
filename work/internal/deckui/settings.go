@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -436,6 +437,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				step = -step
 			}
 			m.scr.off += step
+			m.cancelConfirms()
 			return m, nil
 		case "down", "j", "up", "k":
 			m.scr.off = 0
@@ -444,10 +446,12 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				step := max(1, m.scr.show-1) // 一次翻大半屏（留一行接上），块里的内容几下就看完
 				if (k == "down" || k == "j") && m.scr.blockOff < m.scr.blockMax {
 					m.scr.blockOff = min(m.scr.blockOff+step, m.scr.blockMax)
+					m.cancelConfirms()
 					return m, nil
 				}
 				if (k == "up" || k == "k") && m.scr.blockOff > 0 {
 					m.scr.blockOff = max(m.scr.blockOff-step, 0)
+					m.cancelConfirms()
 					return m, nil
 				}
 			}
@@ -471,6 +475,14 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// cancelConfirms 取消「再按一次确认」：翻页与块内翻页像别的键一样，按了就不算确认（attempt 2 自查）。
+func (m *Settings) cancelConfirms() {
+	m.quitAsked, m.reloadAsked, m.revokeAsked = false, false, nil
+	if m.sub != nil {
+		m.sub.confirm = false
+	}
 }
 
 func batchCmd(a, b tea.Cmd) tea.Cmd {
@@ -746,19 +758,23 @@ func (m *Settings) fitWidth(s string) string {
 		}
 		// ansi.Wrap 遇到某些长度、带连字符的长词会折出空行而把长词整个留在一行（评审 1 B1）：
 		// 折完逐行再量，还超宽的按宽度硬折；折出来的空行不要（里面的颜色码接到下一行前面）
-		carry := ""
+		var pieces []string
 		for _, p := range strings.Split(ansi.Wrap(l, lim, ""), "\n") {
-			p = carry + p
-			carry = ""
-			if strings.TrimSpace(ansi.Strip(p)) == "" {
-				carry = p
-				continue
-			}
 			if ansi.StringWidth(p) > lim {
-				out = append(out, strings.Split(ansi.Hardwrap(p, lim, true), "\n")...)
+				pieces = append(pieces, strings.Split(ansi.Hardwrap(p, lim, true), "\n")...)
+			} else {
+				pieces = append(pieces, p)
+			}
+		}
+		// 只有空格的一段（ansi.Wrap 与 Hardwrap 都会折出来）不要；里面的颜色码接到下一段前面（attempt 2 自查：Hardwrap 的空行以前漏了）
+		carry := ""
+		for _, p := range pieces {
+			if strings.TrimSpace(ansi.Strip(p)) == "" {
+				carry += strings.Join(sgrRe.FindAllString(p, -1), "")
 				continue
 			}
-			out = append(out, p)
+			out = append(out, carry+p)
+			carry = ""
 		}
 		if carry != "" && len(out) > 0 {
 			out[len(out)-1] += carry
@@ -781,6 +797,9 @@ func (m *Settings) fitLines(lines []string) []string {
 
 // textCap 是报错、提示原样显示的长度上限：只防异常长的文字，平常的都显示全、折行（验收：80×24 及以上无截断）。
 const textCap = 1000
+
+// sgrRe 认出颜色等 SGR 转义码（折行时空白段里的颜色码要接到下一段）。
+var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 
 // sanitizeFull 是设置界面显示 owner 的数据（名字、模型 id、目录、路径、清单）用的清理：与侧栏的 sanitize 一样去控制字符、打码，
 // 但不按 80 个字截短，长的交给出口折行显示全（n059 自查 4：模型 id 可到 128 字、目录与清单更长，按 80 截就看不全）。
@@ -1197,37 +1216,46 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	}
 	head = min(head+1, len(lines))
 	rest, pinned := lines[head:], foot
-	at, blockEnd := 0, 0
+	bodyLen := len(rest)
 	if head+len(foot)+3 > height {
-		// 底部固定不下：底部接在正文后面一起滚，从底部第一行起看（评审 1 B3：以前强留 3 行正文，总高超出窗口）
+		// 底部固定不下：底部接在正文后面一起滚（评审 1 B3：以前强留 3 行正文，总高超出窗口）；PgUp/PgDn 翻看
 		rest = append(append([]string{}, rest...), foot...)
 		pinned = nil
-		at = min(len(rest)-len(foot)+1, len(rest)-1)
-		blockEnd = len(rest) - 1
-	} else {
-		for i, l := range rest {
-			if strings.Contains(l, "›") {
-				at = i
-			}
+	}
+	// 光标所在的整块：「›」行与它折下来、同样带底色的续行（n059 自查 5）。底部接进来时也跟着光标走，
+	// 不把底部当成光标块（attempt 2 自查：以前 ↑↓ 选行时看不见光标行）；没有光标（输入框打开时）就从底部第一行看起
+	at, blockEnd, cursor := 0, 0, false
+	for i := 0; i < bodyLen; i++ {
+		if strings.Contains(rest[i], "›") {
+			at, cursor = i, true
 		}
-		// 光标所在的整块（「›」行与它折下来、同样带底色的续行）都要在窗口里（n059 自查 5）
+	}
+	if cursor {
 		blockEnd = at
-		for blockEnd+1 < len(rest) && strings.Contains(rest[blockEnd+1], selBg) {
+		for blockEnd+1 < bodyLen && strings.Contains(rest[blockEnd+1], selBg) {
 			blockEnd++
 		}
+	} else if pinned == nil {
+		at = min(bodyLen+1, len(rest)-1)
+		blockEnd = at
 	}
 	show := max(1, height-head-len(pinned)-2) // 留两行写「上面 / 下面还有几行」
 	st.show = show
 	start := at - show/2
+	if !cursor && pinned == nil {
+		start = at // 输入框（或底部第一行）放在窗口顶上，下面接着是说明与报错
+	}
 	if blockEnd-start+1 > show {
 		start = blockEnd - show + 1
 	}
 	start = min(start, at)
+	sticky := false
 	if n := blockEnd - at + 1; n > show {
-		// 块比一屏还高：从块顶起，↑↓ 在块内滚（评审 1 B2）
+		// 块比一屏还高：从块顶起，↑↓ 在块内翻（评审 1 B2）；翻过之后光标行固定在窗口顶上，看得见在哪一行（attempt 2 自查）
 		st.blockMax = n - show
 		st.blockOff = max(0, min(st.blockOff, st.blockMax))
 		start = at + st.blockOff
+		sticky = st.blockOff > 0
 	} else {
 		st.blockOff = 0
 	}
@@ -1236,9 +1264,13 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	start = max(0, min(base+st.off, maxStart)) // PgUp/PgDn
 	st.off = start - base
 	end := min(len(rest), start+show)
+	window := rest[start:end]
+	if sticky && st.off == 0 && start > at {
+		window = append([]string{rest[at]}, rest[start+1:end]...)
+	}
 	out := append([]string{}, lines[:head]...)
 	out = append(out, dimOn+"   "+T("scroll.up", start)+reset)
-	out = append(out, rest[start:end]...)
+	out = append(out, window...)
 	out = append(out, dimOn+"   "+T("scroll.down", len(rest)-end)+reset)
 	return strings.Join(append(out, pinned...), "\n")
 }

@@ -260,7 +260,7 @@ func TestFitWidthNeverOverflows(t *testing.T) {
 	for _, w := range []int{60, 80, 100, 140} {
 		m.width = w
 		for n := 1; n <= 260; n++ {
-			for _, sep := range []string{"-bbb-ccc", "_bbb_ccc", " bbb ccc", "/bbb/ccc", "中文目录名", "-", ""} {
+			for _, sep := range []string{"-bbb-ccc", "_bbb_ccc", " bbb ccc", "/bbb/ccc", "中文目录名", "-", "", " -c x", "  --flag", "   -"} {
 				word := "/projects/" + strings.Repeat("a", n) + sep
 				for _, in := range []string{" " + bold + word + reset, "   目录      " + word, word, " " + dimOn + "● " + word + "  1.0" + reset} {
 					got := m.fitWidth(in)
@@ -302,9 +302,16 @@ func TestTallBlockScrollsBeforeCursorMoves(t *testing.T) {
 		if i > 3 {
 			t.Fatalf("块内翻页太慢：%+v", m.scr)
 		}
-		seen += key("down")
+		v = key("down")
+		seen += v
 		if m.cur != 0 {
 			t.Fatal("块没翻完就移了光标")
+		}
+		if !strings.Contains(v, "› ● Claude Code") {
+			t.Fatalf("块内翻页时光标行固定在窗口顶上（attempt 2 自查）：\n%s", v)
+		}
+		if n := len(strings.Split(v, "\n")); n > 24 {
+			t.Fatalf("超高 %d", n)
 		}
 	}
 	for i := 0; i < 40; i++ {
@@ -386,5 +393,67 @@ func TestTextFormatArgsMatch(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// attempt 2 自查：底部放不下（很长的保存报错）时，↑↓ 选行仍看得见光标行、每按一次光标就动一次；报错全文 PgDn 翻得到。
+func TestCursorStaysVisibleWhenFootOverflows(t *testing.T) {
+	m, api := n057Fixture()
+	m.width, m.height = 80, 24
+	m.set.Agents = deckstore.DefaultAgents()
+	long := strings.Repeat("保存失败的原因很长很长；", 70) + "最后一句" // 约 840 字：80×24 下底部放不下
+	api.fail = errors.New(long)
+	goRow(t, m, rowMain, "", "")
+	press(m, " ")
+	api.fail = nil
+	m.cur = 0 // 回到第一行
+	if v := plainView(m); !strings.Contains(v, "保存失败的原因") {
+		t.Fatalf("前提：底部有长报错：\n%s", v)
+	}
+	for i := 0; i < 8; i++ {
+		before := m.cur
+		press(m, "down")
+		v := plainView(m)
+		if m.cur != before+1 {
+			t.Fatalf("第 %d 次 ↓：光标要动一次（%d→%d）", i+1, before, m.cur)
+		}
+		if !strings.Contains(v, "›") || len(strings.Split(v, "\n")) > 24 {
+			t.Fatalf("第 %d 次 ↓：看不见光标行或超高：\n%s", i+1, v)
+		}
+	}
+	seen := ""
+	for i := 0; i < 12; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		seen += strings.ReplaceAll(strings.ReplaceAll(plainView(m), "\n", ""), " ", "")
+	}
+	if !strings.Contains(seen, "最后一句") {
+		t.Fatal("报错全文 PgDn 翻得到")
+	}
+}
+
+// attempt 2 自查：PgUp/PgDn 与块内翻页像别的键一样，按了就取消「再按一次确认」。
+func TestScrollingCancelsConfirm(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	a := m.agentPtr("claude")
+	for i := 0; i < 40; i++ {
+		a.Models = append(a.Models, deckstore.ModelDef{ID: fmt.Sprintf("model-%02d-%s", i, strings.Repeat("x", 42)), Tier: deckstore.Frontier})
+	}
+	m.dirty = true
+	press(m, "2")
+	plainView(m)
+	press(m, "R")
+	if !m.reloadAsked {
+		t.Fatal("前提：第一次 R 要确认")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.reloadAsked {
+		t.Fatal("PgDn 后不再算确认")
+	}
+	press(m, "R")
+	plainView(m)
+	press(m, "down") // 块内翻页
+	if m.cur != 0 || m.reloadAsked {
+		t.Fatalf("块内 ↓ 后不再算确认：cur=%d asked=%v", m.cur, m.reloadAsked)
 	}
 }
