@@ -163,7 +163,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 
 - logo：`DECK_GRAPHICS=sixel|blocks|none`（或 `deck up -graphics`）；不设时 `deck up` 问终端（CSI 16 t 与 DA1，n056）：声明支持 Sixel 且知道一格多少像素就用 Sixel，否则用品牌色字母徽章（不再自动用半格色块：4×2 格只有 4×4 点，认不出）。
   - WSL 下 Windows Terminal 报给 Linux 的像素尺寸永远是 0，tmux 3.4 只认这个、为 0 就把 Sixel 画成「SIXEL IMAGE」占位。`deck up` 接上布局后把问到的格子像素（Windows Terminal 回答 10×20）补进自己的终端，窗口每次改大小（WSL 会清零）后再补，并请布局整屏重画。只对经 `deck up` 接上的客户端有效：直接 `tmux attach` 的不补。
-  - 复用一个用别的画法起的布局时，`deck up` 会给布局 server 补上 Sixel 特性，并把本次画法写进状态目录的 `graphics`；已在运行的侧栏与额度面板每 1–2 秒读它切换（n056 评审 1 B2）。同时接着几个客户端时，最后接上的说了算（tmux 里一个窗格只有一种画法），它退出或接不上时都不恢复：先开的窗口可能跟着换画法，在那个终端里再运行一次 `deck up` 就换回来（n056 评审 2）。
+  - 复用一个用别的画法起的布局时，`deck up` 会给布局 server 补上 Sixel 特性，并把本次画法写进状态目录的 `graphics`；已在运行的侧栏与额度面板每 1–2 秒读它切换（n056 评审 1 B2）。同时接着几个客户端时，最后运行 `deck up` 的说了算（tmux 里一个窗格只有一种画法）：画法在建布局、接上之前就写下，之后它退出、接不上或中途失败都不恢复。先开的窗口可能跟着换画法；要换回来，关掉那个窗口重开，或在支持 Sixel 的终端另开一个标签页运行 `deck up`（布局里没有 detach 键，不能在原窗口里再运行；n056 评审 2）。
   - deck 自己的 logo（暂用，adr_031）与品牌色青柠 `#b4f546`：侧栏标题前（Sixel 时）、中间空闲页（嵌套 tmux 里画不了 Sixel，用 16×8 格半格色块）。
 - 中间 client 断开（例如显示的会话被关掉）会以只读重连，并把断开时显示的会话放回后台；连续 3 次在 3 秒内断开就停下等你按回车。
   每次重连通知 deckd 的结果记在 `$XDG_STATE_HOME/deck/center.log`。通知带着这个 client 的进程号：client 已退出或已不是中间现在的 client，deckd 拒绝执行（日志里记「已退出」或 409）。重建的 client 与旧的共用中间窗格的终端，所以：deckd 的每个视图操作都绑定到开始时的那个 client，每条改动 client 的 tmux 命令执行后读回，落到了新 client 上就把它还原到起点（deck-idle、只读）；`deck center` 每次起 client 之前先等 deckd 确认没有进行中的视图操作（deckd 没在运行则不用等），deckd 在而没确认时中间显示原因、不起新 client。中途发现 client 被替换：还没写下任何东西就整体撤回；lease 交还已经落盘就按操作目标补齐焦点与打开集合（接口返回 409 与最新状态），由新 client 的重连通知收尾。

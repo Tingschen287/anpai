@@ -132,7 +132,9 @@ func up(dirs deckstore.Dirs, args []string) {
 			// 打不开就退回字母徽章：sixel 特性不在时 tmux 对所有客户端画占位（n056 attempt 2 自查）
 			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败，改用字母徽章：%v\n", err)
 			mode = "none"
-			logo.WriteMode(dirs.State, mode)
+			if err := logo.WriteMode(dirs.State, mode); err != nil {
+				fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板可能仍按 sixel 画，显示成占位）：%v\n", err)
+			}
 		}
 	}
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
