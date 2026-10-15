@@ -87,3 +87,36 @@ func TestCustomToolNotCodex(t *testing.T) {
 		}
 	}
 }
+
+// 自查 B1：OpenCode 的启动参数（上游 -m <模型>、-s <会话号>、--port <N>）在白名单里，--agent 与非数字端口不放行。
+func TestOpenCodeLaunchArgsAllowed(t *testing.T) {
+	want := LaunchArgs{Tool: "opencode", Binary: "opencode"}
+	if err := CheckCLIArgs([]string{"-m", "opencode/muse-spark-1.3-contributor-free", "--port", "41234"}, want); err != nil {
+		t.Fatalf("上游起 OpenCode 的参数应放行：%v", err)
+	}
+	if err := CheckCLIArgs([]string{"-s", "ses_abc", "-m", "x/y"}, want); err != nil {
+		t.Fatalf("恢复会话：%v", err)
+	}
+	for _, a := range [][]string{{"--port", "1;id"}, {"--agent", "build"}, {"-m", "--yolo"}} {
+		if err := CheckCLIArgs(a, want); err == nil {
+			t.Errorf("%v 应拒绝", a)
+		}
+	}
+}
+
+// 自查：带引号的键名与上游一样认；codex 不分大小写、去掉 .exe。
+func TestQuotedKeysAndCodexSpelling(t *testing.T) {
+	for _, c := range []struct{ name, text string }{
+		{"带引号的 compatible_with", "[tools.grok]\ncommand = \"grok\"\n\"compatible_with\" = \"codex\"\n"},
+		{"单引号键", "[tools.grok]\ncommand = \"grok\"\n'compatible_with' = 'codex'\n"},
+		{"大写 Codex", "[tools.grok]\ncommand = \"/usr/local/bin/Codex\"\n"},
+		{"codex.exe", "[tools.grok]\ncommand = \"/mnt/c/bin/codex.exe\"\n"},
+	} {
+		if customToolNotCodex("grok", c.text) {
+			t.Errorf("%s：应当「可能是 Codex」", c.name)
+		}
+	}
+	if err := checkConfigText("grok", "[claude]\ndangerous_mode = false\n[tools.grok]\ncommand = \"grok\"\n\"dangerous_mode\" = true\n"); err == nil {
+		t.Error("带引号的 dangerous_mode 也要拒绝")
+	}
+}

@@ -3,7 +3,6 @@ package deckui
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -30,6 +29,8 @@ type subView struct {
 	cur   int
 	// 输入框（subAgent 里加模型、改 id）：input 不为 nil 时所有按键归输入框
 	input *modelInput
+	// confirm：按过一次 r、等确认移出（有手写启动参数的 agent）
+	confirm bool
 }
 
 // modelInput 是输入模型 id 的输入框，带候选（该 CLI 自己列出的模型，按输入过滤）。
@@ -52,8 +53,6 @@ type toolModelsMsg struct {
 	models []string
 	err    error
 }
-
-var modelIDOK = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,127}$`)
 
 func (m *Settings) fetchTools() tea.Cmd {
 	return func() tea.Msg {
@@ -96,6 +95,9 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 	case toolModelsMsg:
 		if m.sub == nil || m.sub.input == nil {
 			return nil
+		}
+		if a := m.agentPtr(m.sub.agent); a == nil || a.Tool != msg.tool {
+			return nil // 别的 agent 的候选回来晚了（n057 自查：不能填进当前 agent 的输入框）
 		}
 		in := m.sub.input
 		in.loading = false
@@ -157,6 +159,9 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 		return m.inputKey(msg)
 	}
 	k := msg.String()
+	if k != "r" {
+		s.confirm = false
+	}
 	switch k {
 	case "esc", "q":
 		m.sub = nil // 提示留着（例如清单变了、主 agent 自动换了）
@@ -296,6 +301,11 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 			m.msg = fmt.Sprintf("项目「%s」勾选了 %s：先在这些项目里取消勾选，再移出", strings.Join(users, "、"), a.Name)
 			return nil
 		}
+		if len(a.ExtraArgs) > 0 && !m.sub.confirm {
+			m.sub.confirm = true
+			m.msg = a.Name + " 有手写的启动额外参数，移出后就没了（再加回来也不会恢复，要手改 agents.yaml）：再按一次 r 确认移出"
+			return nil
+		}
 		name := a.Name
 		var keep []deckstore.AgentDef
 		for _, x := range m.set.Agents {
@@ -425,7 +435,7 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 	if a == nil {
 		return "agent 不见了"
 	}
-	if !modelIDOK.MatchString(id) {
+	if !deckstore.ValidModelID(id) {
 		return "模型 id 只能是字母数字和 . _ / : @ + -，不能有空格"
 	}
 	if owner := m.ownerOf(id); owner != "" && !(rename == id) {

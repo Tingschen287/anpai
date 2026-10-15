@@ -1,6 +1,8 @@
 package deckstore
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,10 +73,10 @@ type MainAgent struct {
 
 // ProjectDef 是一个项目的选用。
 type ProjectDef struct {
-	ID        string          `yaml:"id" json:"id"`
-	Name      string          `yaml:"name" json:"name"`
-	Path      string          `yaml:"path" json:"path"`
-	GraphRoot string          `yaml:"graph_root,omitempty" json:"graph_root,omitempty"`
+	ID        string             `yaml:"id" json:"id"`
+	Name      string             `yaml:"name" json:"name"`
+	Path      string             `yaml:"path" json:"path"`
+	GraphRoot string             `yaml:"graph_root,omitempty" json:"graph_root,omitempty"`
 	Agents    []string           `yaml:"agents" json:"agents"`
 	Models    map[Tier]ModelList `yaml:"models" json:"models"` // 三档各一个有顺序的模型清单（n057）
 	MainAgent MainAgent          `yaml:"main_agent" json:"main_agent"`
@@ -172,6 +174,24 @@ func DefaultAgents() []AgentDef {
 }
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+var modelIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,127}$`)
+
+// ValidModelID 说明一个模型 id 能不能用（n057 自查）：只许字母数字与 . _ / : @ + -，不超过 128。
+// 模型 id 会进 CLI 的命令行：上游给 gemini、opencode 拼命令时不加引号，自定义工具的 {command} 会被上游当占位符替换。
+func ValidModelID(id string) bool { return modelIDRe.MatchString(id) }
+
+// CheckModelIDs：全局清单里的模型 id 都合规（保存时查；派工时 deckd 对选中的模型再查一次，手改的也拦得住）。
+func (s Settings) CheckModelIDs() error {
+	for _, a := range s.Agents {
+		for _, m := range a.Models {
+			if !ValidModelID(m.ID) {
+				return fmt.Errorf("agent %s 的模型 id %q 不合规：只能是字母数字和 . _ / : @ + -，不能有空格", a.ID, m.ID)
+			}
+		}
+	}
+	return nil
+}
 
 // ValidID 说明一个 agent 或项目 id 合不合规（小写字母数字、-、_，不超过 64）。
 func ValidID(s string) bool { return idRe.MatchString(s) }
@@ -537,11 +557,29 @@ func saveSettings(cfgDir string, s Settings) (int, error) {
 	return gen, saveYAML(filepath.Join(cfgDir, "projects.yaml"), projectsFile{Generation: gen, Projects: s.Projects})
 }
 
-// ErrSettingsChanged 表示整份保存时带的代数不是当前的：读到之后别处（另一个设置窗口、deck project add、手改）又保存过。
-type ErrSettingsChanged struct{ Want, Have int }
+// ErrSettingsChanged 表示整份保存时带的代数不是当前的：读到之后别处（另一个设置窗口、deck project add）又保存过；
+// HandEdited：两份文件在 deckd 之外被改过（手改），deckd 已读入改过的那份。
+type ErrSettingsChanged struct {
+	Want, Have int
+	HandEdited bool
+}
 
 func (e *ErrSettingsChanged) Error() string {
-	return fmt.Sprintf("设置在你打开之后被别处改过（你读到的是第 %d 代，现在是第 %d 代）：没有保存；重新打开设置再改", e.Want, e.Have)
+	if e.HandEdited {
+		return fmt.Sprintf("设置文件在 deckd 之外被改过（手改）：没有保存，免得盖掉；deck 已读入改过的那份（第 %d 代），重新读取后再改", e.Have)
+	}
+	return fmt.Sprintf("设置在你打开之后被别处改过（你读到的是第 %d 代，现在是第 %d 代）：没有保存；重新读取后再改", e.Want, e.Have)
+}
+
+// settingsFilesHash 是两份设置文件当前内容的指纹（不存在的按空）。
+func settingsFilesHash(cfgDir string) string {
+	h := sha256.New()
+	for _, name := range []string{"agents.yaml", "projects.yaml"} {
+		b, _ := os.ReadFile(filepath.Join(cfgDir, name))
+		fmt.Fprintf(h, "%d:", len(b))
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // saveFault 是故障注入点：只有测试会设置它，模拟「写到一半失败」。

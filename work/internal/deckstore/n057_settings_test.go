@@ -67,8 +67,8 @@ projects:
 
 func multiSettings() Settings {
 	return Settings{Agents: DefaultAgents(), Projects: []ProjectDef{{ID: "p", Name: "P", Path: "/tmp/p",
-		Agents: []string{"claude", "codex", "grok"},
-		Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5", "gpt-6.1-sol", "grok-4.7"}, Balanced: {"claude-sonnet-5-5"}},
+		Agents:    []string{"claude", "codex", "grok"},
+		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5", "gpt-6.1-sol", "grok-4.7"}, Balanced: {"claude-sonnet-5-5"}},
 		MainAgent: MainAgent{Agent: "codex", Tier: Frontier}, Envelope: DefaultEnvelope("p")}}}
 }
 
@@ -163,5 +163,62 @@ func TestReplaceSettingsAtChecksGeneration(t *testing.T) {
 	re, _ := LoadSettings(d.Config)
 	if re.Generation != s.Settings().Generation {
 		t.Fatalf("内存里的代数与文件一致：%d %d", re.Generation, s.Settings().Generation)
+	}
+}
+
+// 自查 B2：deckd 运行时手改了设置文件，界面保存不盖掉它：拒绝并读入改过的那份，按新代数再存才行。
+func TestHandEditIsNotOverwritten(t *testing.T) {
+	d := testDirs(t)
+	s, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := s.Settings()
+	set.Projects = []ProjectDef{{ID: "p", Name: "UI", Path: "/tmp/p", Agents: []string{"claude"},
+		Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("p")}}
+	if err := s.ReplaceSettingsAt(set, set.Generation); err != nil {
+		t.Fatal(err)
+	}
+	ui := s.Settings()
+	pf := filepath.Join(d.Config, "projects.yaml")
+	b, _ := os.ReadFile(pf)
+	os.WriteFile(pf, []byte(strings.Replace(string(b), "name: UI", "name: HAND", 1)), 0o600) // 照 README 手改，代数不动
+	ui.Projects[0].Name = "UI2"
+	err = s.ReplaceSettingsAt(ui, ui.Generation)
+	var changed *ErrSettingsChanged
+	if !errors.As(err, &changed) || !changed.HandEdited || !strings.Contains(err.Error(), "手改") {
+		t.Fatalf("手改后界面保存应拒绝：%v", err)
+	}
+	if got := s.Settings().Projects[0].Name; got != "HAND" {
+		t.Fatalf("deckd 应读入手改的那份：%s", got)
+	}
+	if b, _ := os.ReadFile(pf); !strings.Contains(string(b), "name: HAND") {
+		t.Fatal("手改的文件不能被盖掉")
+	}
+	again := s.Settings()
+	again.Projects[0].Name = "UI3"
+	if err := s.ReplaceSettingsAt(again, again.Generation); err != nil {
+		t.Fatalf("读入后按新代数可以存：%v", err)
+	}
+	if err := s.ReplaceSettingsAt(again, -1); err != nil {
+		t.Fatalf("-1 只给 deckd 内部（不核对）：%v", err)
+	}
+}
+
+func TestModelIDCheck(t *testing.T) {
+	for _, id := range []string{"claude-opus-5-5", "opencode/muse-spark-1.3-contributor-free", "kimi-code/k3", "a:b@c+d"} {
+		if !ValidModelID(id) {
+			t.Errorf("%q 应合规", id)
+		}
+	}
+	for _, id := range []string{"", "a b", "x;id", "{command}", "$(id)", "a'b", "-m", "a\nb", strings.Repeat("a", 129)} {
+		if ValidModelID(id) {
+			t.Errorf("%q 应拒绝", id)
+		}
+	}
+	s := multiSettings()
+	s.Agents[0].Models = append(s.Agents[0].Models, ModelDef{ID: "x;touch /tmp/p", Tier: Economy})
+	if err := s.CheckModelIDs(); err == nil {
+		t.Fatal("保存时拒绝不合规的模型 id")
 	}
 }

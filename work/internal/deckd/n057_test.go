@@ -256,3 +256,50 @@ func TestGrokLaunchPassesModelAndChecksTool(t *testing.T) {
 		t.Fatalf("确认不了时照旧上报 Codex 授权：%d %s", code, b)
 	}
 }
+
+// 自查：generation 不能是负数；不合规的模型 id 保存时拒绝，手改进来的派工时拒绝；没登记的 grok 被上游起成 shell 也停掉。
+func TestN057SelfCheckGuards(t *testing.T) {
+	f := newFixture(t)
+	s := getSettings(t, f)
+	neg := -1
+	if code, b := putSettings(f, s, &neg); code != 400 {
+		t.Fatalf("generation=-1：400：%d %s", code, b)
+	}
+	for i := range s.Agents {
+		if s.Agents[i].ID == "claude" {
+			s.Agents[i].Models = append(s.Agents[i].Models, deckstore.ModelDef{ID: "x;touch${IFS}/tmp/pwned", Tier: deckstore.Economy})
+		}
+	}
+	g := s.Generation
+	if code, b := putSettings(f, s, &g); code != 400 || !strings.Contains(b, "不合规") {
+		t.Fatalf("不合规的模型 id：400：%d %s", code, b)
+	}
+
+	w := grokWorld(t)
+	set := w.store.Settings()
+	for i := range set.Agents {
+		if set.Agents[i].ID == "grok" {
+			set.Agents[i].Models = append(set.Agents[i].Models, deckstore.ModelDef{ID: "{command}", Tier: deckstore.Economy})
+		}
+	}
+	for i := range set.Projects {
+		set.Projects[i].Models[deckstore.Economy] = deckstore.ModelList{"{command}"}
+	}
+	if err := w.store.ReplaceSettings(set); err != nil { // 手改进来（不经 PUT）
+		t.Fatal(err)
+	}
+	n := len(w.up.launches)
+	if code, b := w.do("main", "POST", "/v1/agents", spawnJSON("economy", "试", "t", "g57x", "/tmp/alpha", "", "grok", "{command}")); code != 400 || !strings.Contains(b, "不合规") || len(w.up.launches) != n {
+		t.Fatalf("手改进来的不合规 id：派工前拒绝、不启动：%d %s", code, b)
+	}
+	w.up.launchOut = &agentdeck.LaunchResult{SessionID: "ad-shell", Success: true, Tool: "shell", Command: "grok --model 'grok-4.7-build-fast'"}
+	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "试 grok", "t", "g57y", "/tmp/alpha", "", "grok", "grok-4.7-build-fast"))
+	if code != 502 || !strings.Contains(b, "[tools.grok]") || !strings.Contains(strings.Join(w.up.stops, ","), "ad-shell") {
+		t.Fatalf("没登记时上游起成 shell：也停掉：%d %s stops=%v", code, b, w.up.stops)
+	}
+	for _, e := range Catalog {
+		if e.Tool == "kimi" {
+			t.Fatal("kimi 不在可加入的目录里（模型参数没核实）")
+		}
+	}
+}

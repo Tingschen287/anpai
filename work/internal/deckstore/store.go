@@ -38,19 +38,21 @@ type Event struct {
 
 // Store 是 deckd 的状态。
 type Store struct {
-	mu       sync.Mutex
-	dirs     Dirs
-	now      func() time.Time
-	broken   error
-	settings Settings
-	sessions map[string]*Session
-	trust    []TrustGrant
-	decs     map[string]*Decision
-	notes    []Notification
-	noteSeq  int64
-	reports  []*Report
-	panels   []PanelDef
-	hook     func(Event)
+	mu   sync.Mutex
+	dirs Dirs
+	// filesHash：deckd 最后一次读或写设置文件时两份文件的指纹；对不上就是在 deckd 之外被改过（n057）
+	filesHash string
+	now       func() time.Time
+	broken    error
+	settings  Settings
+	sessions  map[string]*Session
+	trust     []TrustGrant
+	decs      map[string]*Decision
+	notes     []Notification
+	noteSeq   int64
+	reports   []*Report
+	panels    []PanelDef
+	hook      func(Event)
 }
 
 // Open 读回全部状态。executing 中的决定、launching 中的会话在重启后一律标为 uncertain：
@@ -62,6 +64,7 @@ func Open(dirs Dirs) (*Store, error) {
 		return nil, fmt.Errorf("agent 设置不可用：%w", err)
 	}
 	s.settings = set
+	s.filesHash = settingsFilesHash(dirs.Config)
 	var sessions []*Session
 	if _, err := readJSON(s.path("registry.json"), &sessions); err != nil {
 		return nil, err
@@ -207,7 +210,17 @@ func (s *Store) ReplaceSettingsAt(next Settings, generation int) error {
 
 func (s *Store) replaceSettings(next Settings, generation int) error {
 	return s.mutate(func() (func() error, []Event, error) {
-		if generation >= 0 && generation != s.settings.Generation {
+		if generation < 0 {
+			// -1 只给 deckd 内部与测试用（ReplaceSettings）；界面带来的负数不当「不核对」（n057 自查）
+		} else if h := settingsFilesHash(s.dirs.Config); h != s.filesHash {
+			// 两份文件在 deckd 之外被改过（手改，n057 自查：以前会被界面保存悄悄盖掉）：不保存，读入改过的那份
+			disk, err := LoadSettings(s.dirs.Config)
+			if err != nil {
+				return nil, nil, fmt.Errorf("设置文件在 deckd 之外被改过，而且读不了：%w（没有保存；改好后重启 deck）", err)
+			}
+			s.settings, s.filesHash = disk, h
+			return func() error { return nil }, []Event{{Kind: "settings"}}, &ErrSettingsChanged{Want: generation, Have: disk.Generation, HandEdited: true}
+		} else if generation != s.settings.Generation {
 			return nil, nil, &ErrSettingsChanged{Want: generation, Have: s.settings.Generation}
 		}
 		if err := next.Validate(); err != nil {
@@ -220,6 +233,7 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 			if err == nil {
 				s.settings.Generation = gen
 			}
+			s.filesHash = settingsFilesHash(s.dirs.Config)
 			return err
 		}, []Event{{Kind: "settings"}}, nil
 	})

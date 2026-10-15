@@ -3,7 +3,6 @@ package deckd
 import (
 	"bufio"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
@@ -11,7 +10,8 @@ import (
 )
 
 // 工具目录（n057）：设置界面「加入本机的 agent」从这里挑。每一项是 Agent Deck 认识、能经 agent-deck 起会话的终端 agent CLI：
-// 上游内置的（claude、codex、opencode、gemini），以及在 agent-deck 配置里登记成自定义工具的（grok、antigravity、kimi）。
+// 上游内置的（claude、codex、opencode、gemini），以及在 agent-deck 配置里登记成自定义工具、模型经命令传的（grok、antigravity）。
+// kimi 不在这里（n057 自查）：它也是自定义工具，但 deck 没核实过它的模型参数，上游 launch 又不接受自定义工具的 --model。
 // binary 与 agent 标记固定在这里，界面不能改（checkAgentEdits）；模型清单只是加入时的初值，加入后可在界面里改。
 
 // CatalogEntry 是工具目录的一项。
@@ -49,8 +49,6 @@ var Catalog = []CatalogEntry{
 	{Tool: "antigravity", Name: "Antigravity", Binary: "agy", Agent: true,
 		Models:   []deckstore.ModelDef{md("claude-opus-4-6-thinking", fr), md("gemini-3.8-flash-high", ba), md("gemini-3.8-flash-low", ec)},
 		listArgs: []string{"models"}, parse: parseTabbedModels},
-	{Tool: "kimi", Name: "Kimi Code", Binary: "kimi", Agent: true,
-		Models: []deckstore.ModelDef{md("kimi-code/k3", ba), md("kimi-for-coding", ec)}},
 	{Tool: "gemini", Name: "Gemini CLI", Binary: "gemini"},
 }
 
@@ -64,10 +62,8 @@ func CatalogTool(tool string) (CatalogEntry, bool) {
 	return CatalogEntry{}, false
 }
 
-var modelIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,127}$`)
-
 func keepModel(out []string, id string) []string {
-	if modelIDRe.MatchString(id) {
+	if deckstore.ValidModelID(id) {
 		return append(out, id)
 	}
 	return out
@@ -125,8 +121,8 @@ type ToolStatus struct {
 	Version   string `json:"version,omitempty"`
 	Installed bool   `json:"installed"`
 	Error     string `json:"error,omitempty"`
-	Added     bool   `json:"added"`      // 已在全局可用清单里（agents.yaml 有用这个工具的 agent）
-	CanList   bool   `json:"can_list"`   // 能列出可用模型
+	Added     bool   `json:"added"`    // 已在全局可用清单里（agents.yaml 有用这个工具的 agent）
+	CanList   bool   `json:"can_list"` // 能列出可用模型
 }
 
 // getTools 列工具目录与本机情况（owner 界面）：命令在不在 PATH、版本（binary --version，与 Codex 授权核对同一个取法）。

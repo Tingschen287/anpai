@@ -81,7 +81,8 @@ func checkConfigText(tool, text string) error {
 		if !ok {
 			continue
 		}
-		key, value = strings.TrimSpace(key), strings.ToLower(strings.TrimSpace(value))
+		// 带引号的键名（"dangerous_mode" = true）在 TOML 里与裸键相同（n057 自查）
+		key, value = strings.Trim(strings.TrimSpace(key), `"'`), strings.ToLower(strings.TrimSpace(value))
 		full := key
 		if section != "" {
 			full = section + "." + key
@@ -229,6 +230,9 @@ func customToolNotCodex(tool, text string) bool {
 			return false // 看不懂的行（多行字符串、跨行的数组或内联表）：后面几行归谁说不准
 		}
 		key = strings.TrimSpace(key)
+		if strings.ContainsAny(key, `"'`) {
+			return false // 带引号的键名：上游照样认（"compatible_with" = "codex"），这里不逐个还原，当「可能」
+		}
 		full := key
 		if section != "" {
 			full = section + "." + key
@@ -250,5 +254,7 @@ func customToolNotCodex(tool, text string) bool {
 	if sc.Err() != nil || !registered || command == "" {
 		return false
 	}
-	return filepath.Base(command) != "codex"
+	// 与上游 isCommand 同样不分大小写、去掉 .exe（internal/session/userconfig.go:3625-3628）
+	base := strings.ToLower(filepath.Base(command))
+	return strings.TrimSuffix(base, ".exe") != "codex"
 }

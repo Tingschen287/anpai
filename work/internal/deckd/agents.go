@@ -206,6 +206,9 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 		return plan, fmt.Errorf("模型 %s 属于 agent %s，不是请求里的 %s", res.Model, res.Agent.ID, b.Agent)
 	}
 	a := res.Agent
+	if !deckstore.ValidModelID(res.Model) {
+		return plan, fmt.Errorf("模型 id %q 不合规（只能是字母数字和 . _ / : @ + -）：它会进 CLI 的命令行，不派；请在设置里改", res.Model)
+	}
 	if err := agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model, b.Title); err != nil {
 		return plan, err
 	}
@@ -238,7 +241,8 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 		return plan, fmt.Errorf("task_sha256 与任务正文对不上")
 	}
 	if want := SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, b.Title, dir, b.GraphNode); b.ArgsSHA256 != want {
-		return plan, fmt.Errorf("args_sha256 与启动参数对不上（agent、档位、模型、标题、目录、Graph 节点按 deckd 解析的结果算）")
+		return plan, fmt.Errorf("args_sha256 与启动参数对不上（agent、档位、模型、标题、目录、Graph 节点按 deckd 解析的结果算；" +
+			"只说档位时，若额度在这期间变了，挑到的模型会不同：重新运行一次 deck agent spawn 即可）")
 	}
 	x := deckstore.Session{Project: project, Role: "sub", Parent: c.Session, Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model,
 		Tier: res.Tier, Title: b.Title, CreatedBy: creatorOf(c), RequestID: b.RequestID, Dir: dir,
@@ -377,6 +381,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		writeJSON(w, code, map[string]any{"error": "启动失败：" + why, "session": key, "uncertain": uncertain})
 		return
 	}
+	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
+	// 那样起的不是 owner 选的 agent，停掉、不送任务
+	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
+		why := fmt.Sprintf("上游把 %s 起成了 %q：agent-deck 的配置里要先登记 [tools.%s]", x.Tool, out.Tool, x.Tool)
+		s.stopLaunched(ctx, key, id, x, "启动后核对："+why, false, "起成了别的工具")
+		fail(w, http.StatusBadGateway, "会话 %s %s，已停掉、不送任务", id, why)
+		return
+	}
 	if err := agentdeck.CheckLaunchedTakesTaskText(out); err != nil {
 		s.store.LaunchFailed(key, true, "上游起的不是 agent："+err.Error())
 		fail(w, http.StatusBadGateway, "上游起的不是 agent，不送任务：%v（会话 %s 留在 agent-deck 里，请 owner 处理）", err, id)
@@ -385,14 +397,6 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	tmux := ""
 	if list, err := s.agents.upstream.ListSessions(ctx); err == nil {
 		tmux, _ = agentdeck.TmuxSessionOf(list, id)
-	}
-	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会按命令里的词把它认成别的工具起（n057），
-	// 那样起的不是 owner 选的 agent，停掉、不送任务
-	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
-		why := fmt.Sprintf("上游把 %s 起成了 %q：agent-deck 的配置里要先登记 [tools.%s]", x.Tool, out.Tool, x.Tool)
-		s.stopLaunched(ctx, key, id, x, "启动后核对："+why, false, "起成了别的工具")
-		fail(w, http.StatusBadGateway, "会话 %s %s，已停掉、不送任务", id, why)
-		return
 	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
 	if err := s.processesNoBypass(ctx, tmux, plan.agent); err != nil {
@@ -678,6 +682,10 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a := res.Agent
+	if !deckstore.ValidModelID(res.Model) {
+		fail(w, http.StatusBadRequest, "主 agent 的模型 id %q 不合规（只能是字母数字和 . _ / : @ + -）：它会进 CLI 的命令行，不起；请在设置里改", res.Model)
+		return
+	}
 	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckExtraArgs(a.Tool, a.ExtraArgs), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
 		agentdeck.CheckTakesTaskText(a.Tool, a.Agent), deckstore.CheckPath(p.Path)} {
 		if check != nil {

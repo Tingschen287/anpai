@@ -532,12 +532,16 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "整份替换设置须同时给出 agents 与 projects")
 		return
 	}
-	if body.Generation == nil {
-		fail(w, http.StatusBadRequest, "整份替换设置须带上读到的 generation")
+	if body.Generation == nil || *body.Generation < 0 {
+		fail(w, http.StatusBadRequest, "整份替换设置须带上读到的 generation（不小于 0）")
 		return
 	}
 	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
 	if err := checkAgentEdits(s.store.Settings(), next); err != nil {
+		fail(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if err := next.CheckModelIDs(); err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
 	}

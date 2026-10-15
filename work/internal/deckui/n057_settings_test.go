@@ -1,6 +1,7 @@
 package deckui
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
 
@@ -207,3 +208,75 @@ func TestEmptyStatesTellNextStep(t *testing.T) {
 		}
 	}
 }
+
+// 自查：保存途中又改了，下一次保存带上新的代数；R 与 q 各自确认；排好的多选清单按空格不被压成一个；
+// 晚到的别的 agent 的候选不填进来；移出带手写启动参数的 agent 要再按一次；矮窗口滚动、窄窗口标题折行。
+func TestSettingsSelfCheckFixes(t *testing.T) {
+	m, api := n057Fixture()
+	m.cur = rowIdx(t, m, rowAgentPick, "codex", "")
+	press(m, " ")
+	_, save := m.Update(keyMsg("s"))
+	press(m, " ") // 保存还没回来又改了一处
+	m.Update(save())
+	if m.set.Generation != 8 || len(api.saved) != 1 || api.saved[0].Generation != 7 {
+		t.Fatalf("保存回来后代数跟上：%d", m.set.Generation)
+	}
+	// R 再 q：q 仍要确认
+	press(m, "R")
+	if _, cmd := m.Update(keyMsg("q")); cmd != nil {
+		t.Fatal("先按 R 再按 q：有没保存的改动时 q 仍要先提醒")
+	}
+	// 多选清单按空格：打开多选，不压成一个
+	m.project().Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gpt-6.1-sol"}
+	m.cur = rowIdx(t, m, rowTier, "", deckstore.Frontier)
+	press(m, " ")
+	if m.sub == nil || m.sub.kind != subTier || len(m.project().Models[deckstore.Frontier]) != 2 {
+		t.Fatalf("应打开多选、清单不变：%v %v", m.sub, m.project().Models)
+	}
+	press(m, "esc")
+	// 晚到的候选
+	m.cur = rowIdx(t, m, rowGlobal, "codex", "")
+	press(m, "enter")
+	m.sub.input = &modelInput{cur: -1}
+	m.Update(toolModelsMsg{tool: "grok", models: []string{"grok-4.7"}})
+	if len(m.sub.input.all) != 0 {
+		t.Fatal("别的工具的候选不能填进来")
+	}
+	press(m, "esc", "esc")
+	// 移出带手写启动参数的 agent
+	m.cur = rowIdx(t, m, rowAgentPick, "codex", "")
+	if picked(m.project(), "codex") {
+		press(m, " ")
+	}
+	for i := range m.set.Agents {
+		if m.set.Agents[i].ID == "codex" {
+			m.set.Agents[i].ExtraArgs = [][]string{{"-c", "x=1"}}
+		}
+	}
+	m.cur = rowIdx(t, m, rowGlobal, "codex", "")
+	press(m, "enter", "r")
+	if _, ok := m.agent("codex"); !ok || !strings.Contains(m.msg, "再按一次 r") {
+		t.Fatalf("第一次 r 只提醒：%q", m.msg)
+	}
+	press(m, "r")
+	if _, ok := m.agent("codex"); ok {
+		t.Fatal("第二次 r 移出")
+	}
+	// 矮窗口、窄窗口
+	m2, _ := n057Fixture()
+	m2.width, m2.height = 80, 14
+	m2.cur = len(m2.rows()) - 1 // 最后一行（加入本机的 agent）
+	v := plainView(m2)
+	lines := strings.Split(v, "\n")
+	if len(lines) > 14 || !strings.Contains(lines[0], "agent 设置") || !strings.Contains(lines[1], "q 关闭") ||
+		!strings.Contains(v, "加入本机的 agent") || !strings.Contains(v, "上面还有") {
+		t.Fatalf("矮窄窗口：标题与按键提示在、光标行看得见：\n%s", v)
+	}
+	for _, l := range lines {
+		if ansi.StringWidth(l) > 112 {
+			t.Fatalf("太宽：%q", l)
+		}
+	}
+}
+
+func keyMsg(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }

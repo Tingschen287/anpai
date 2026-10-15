@@ -39,6 +39,10 @@ var knownArgs = map[string]map[string]int{
 	// 上游登记里不写 resume_flag、dangerous_flag，不会再加别的参数
 	"grok":        {"--model": 1},
 	"antigravity": {"--model": 1},
+	// opencode（上游内置）：-m <模型>、恢复时 -s <会话号>、事件端口 --port <N>（上游 internal/session/instance.go:1894-1964
+	// buildOpenCodeCommand/ExtraFlags/SSEPortFlag；n057 自查：以前不在这里，OpenCode 起来就被停掉）。--agent 不在白名单里：
+	// 它换用 OpenCode 自己配置的 agent，权限由那份配置定
+	"opencode": {"-m": 1, "-s": 1, "--port": 1},
 }
 
 // knownValueOK 是个别已知参数对取值的限制。
@@ -46,6 +50,10 @@ func knownValueOK(tool, flag, value string) bool {
 	if strings.HasPrefix(value, "-") {
 		// 值的位置上放一个参数（--resume --dangerously-skip-permissions）：CLI 会把它当参数读（attempt 3 自查）
 		return false
+	}
+	if tool == "opencode" && flag == "--port" {
+		_, err := strconv.Atoi(value)
+		return err == nil
 	}
 	if tool == "codex" && flag == "--config" {
 		// 上游只用 --config 传推理强度；其余配置覆盖都可能改权限或沙箱

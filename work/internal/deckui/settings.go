@@ -115,10 +115,12 @@ type Settings struct {
 	dirty     bool
 	edits     int // 每次改动加一：保存回来时据此判断保存期间有没有新改动
 	quitAsked bool
-	msg       string
-	loaded    bool
-	width     int
-	height    int
+	// reloadAsked：按过一次 R、等确认（与 q 的确认分开：先 R 再 q 不能不提醒就退出，n057 自查）
+	reloadAsked bool
+	msg         string
+	loaded      bool
+	width       int
+	height      int
 	// Start 是新建项目时目录浏览的起点（deck settings 进程的当前目录，即 deck up 所在的目录，n055）
 	Start string
 	form  *projectForm // 不为 nil：正在新建项目
@@ -140,6 +142,7 @@ type doneMsg struct {
 	err   error
 	save  bool // 是保存（不是撤销授权）
 	edits int  // 保存时的改动计数
+	gen   int  // 保存时带的代数
 }
 
 func (m *Settings) Init() tea.Cmd { return m.load }
@@ -375,13 +378,16 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.msg = msg.what + "失败：" + errText(msg.err)
 			if msg.save {
 				m.hint = ""
-				if strings.Contains(msg.err.Error(), "被别处改过") {
+				if strings.Contains(msg.err.Error(), "改过") {
 					m.msg += "；按 R 重新读取（会丢掉这里没保存的改动）"
 				}
 			}
 			return m, nil
 		}
 		m.msg = msg.what + "完成"
+		if msg.save && m.set.Generation == msg.gen {
+			m.set.Generation = msg.gen + 1 // 保存期间又改了、不重读时，下一次保存带上新的代数（n057 自查）
+		}
 		if msg.save {
 			m.msg += "：对之后起的会话生效，已在跑的会话不变"
 		}
@@ -419,13 +425,16 @@ func (m *Settings) save() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits}
+		return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits, gen: set.Generation}
 	}
 }
 
 func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
-	if k != "q" && k != "esc" && k != "R" {
+	if k != "q" && k != "esc" {
 		m.quitAsked = false
+	}
+	if k != "R" {
+		m.reloadAsked = false
 	}
 	rs := m.rows()
 	m.cur = max(0, min(m.cur, len(rs)-1)) // 列表可能变短或为空
@@ -457,7 +466,8 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		case rowAgentPick:
 			m.togglePick(r.agent)
 		case rowTier:
-			if k == "enter" {
+			if k == "enter" || len(m.project().Models[r.tier]) > 1 {
+				// 已经排好多个模型时，空格不把清单压成一个（n057 自查：容易误触），打开多选
 				return m, m.openTier(r.tier)
 			}
 			m.cycleTier(r.tier)
@@ -486,12 +496,12 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, m.save()
 		}
 	case "R":
-		if m.dirty && !m.quitAsked {
-			m.quitAsked = true
+		if m.dirty && !m.reloadAsked {
+			m.reloadAsked = true
 			m.msg = "重新读取会丢掉没保存的改动：再按一次 R 确认"
 			return m, nil
 		}
-		m.quitAsked = false
+		m.reloadAsked = false
 		return m, func() tea.Msg {
 			msg := m.load().(loadedMsg)
 			msg.force = true
@@ -571,7 +581,12 @@ func (m *Settings) View() string {
 		return m.subView()
 	}
 	var b strings.Builder
-	b.WriteString(bold + brand + " agent 设置" + reset + dimOn + "   ↑↓ 选  ⏎ 打开/改  空格 勾选/轮换  ←→ 换项目  a 加 agent  n 新建项目  d 撤销授权  s 保存  q 关闭" + reset + "\n\n")
+	keys := "↑↓ 选  ⏎ 打开/改  空格 勾选/轮换  ←→ 换项目  a 加 agent  n 新建项目  d 撤销授权  s 保存  R 重读  q 关闭"
+	if m.width > 0 && m.width < 112 {
+		b.WriteString(bold + brand + " agent 设置" + reset + "\n" + dimOn + " " + keys + reset + "\n\n") // 窄窗口：按键提示另起一行
+	} else {
+		b.WriteString(bold + brand + " agent 设置" + reset + dimOn + "   " + keys + reset + "\n\n")
+	}
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String()
@@ -641,13 +656,50 @@ func (m *Settings) View() string {
 	for _, g := range m.trust {
 		fmt.Fprintf(&b, " %s %s · %s · %s · %s\n", cursor(), sanitize(g.Project), sanitize(g.Tool), sanitize(g.Dir), g.ApprovedAt.Local().Format("01-02 15:04"))
 	}
+	var foot []string
 	if m.dirty {
-		b.WriteString("\n" + orange + " 有没保存的改动（s 保存）" + reset)
+		foot = append(foot, orange+" 有没保存的改动（s 保存）"+reset)
 	}
 	if m.msg != "" {
-		b.WriteString("\n " + oneLine(deckstore.Clean(m.msg, 240)))
+		foot = append(foot, " "+oneLine(deckstore.Clean(m.msg, 240)))
 	}
-	return b.String()
+	return fitHeight(b.String(), foot, m.height)
+}
+
+// fitHeight 让主界面放得进窗口（n057 自查：矮窗口时顶部按键提示与光标行被裁掉）：顶部标题（到第一个空行为止）与底部提示固定，
+// 中间按光标所在行（「›」）滚动，上下还有内容时写明。
+func fitHeight(body string, foot []string, height int) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if len(foot) > 0 {
+		foot = append([]string{""}, foot...)
+	}
+	if height <= 0 || len(lines)+len(foot) <= height {
+		return strings.Join(append(lines, foot...), "\n")
+	}
+	head := 0
+	for head < len(lines) && lines[head] != "" {
+		head++
+	}
+	head = min(head+1, len(lines))
+	rest := lines[head:]
+	avail := height - head - len(foot)
+	if avail < 3 {
+		avail = 3
+	}
+	at := 0
+	for i, l := range rest {
+		if strings.Contains(l, "›") {
+			at = i
+		}
+	}
+	show := avail - 2 // 留两行写「上面 / 下面还有几行」
+	start := max(0, min(at-show/2, len(rest)-show))
+	end := min(len(rest), start+show)
+	out := append([]string{}, lines[:head]...)
+	out = append(out, dimOn+fmt.Sprintf("   ↑ 上面还有 %d 行", start)+reset)
+	out = append(out, rest[start:end]...)
+	out = append(out, dimOn+fmt.Sprintf("   ↓ 下面还有 %d 行", len(rest)-end)+reset)
+	return strings.Join(append(out, foot...), "\n")
 }
 
 // modelsSummary 是全局区一行里的模型摘要：档位首字母 + 模型 id，按档位从高到低。
