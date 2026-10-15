@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -599,4 +600,38 @@ func saveYAML(path string, v any) error {
 		return err
 	}
 	return writeAtomic(path, data)
+}
+
+// 设置代数的高水位（n057 attempt 2 自查）：deckd 用过的最大代数与那时两份文件的指纹，记在状态目录 settings-generation。
+// 读入手改时内存里的代数会比文件里的大；只记在内存里，deckd 重启后就倒退，与之后保存写出的代数撞号。
+// 指纹用来认出 deckd 停着时的手改：重启时文件与记下的不一样，代数再前推一格，重启前打开的设置窗口拿着的代数都对不上。
+func genHighWaterPath(stateDir string) string { return filepath.Join(stateDir, "settings-generation") }
+
+func readGenHighWater(stateDir string) (int, string) {
+	b, err := os.ReadFile(genHighWaterPath(stateDir))
+	if err != nil {
+		return 0, ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return 0, ""
+	}
+	n, err := strconv.Atoi(f[0])
+	if err != nil || n < 0 {
+		return 0, ""
+	}
+	if len(f) > 1 {
+		return n, f[1]
+	}
+	return n, ""
+}
+
+func writeGenHighWater(stateDir string, gen int, filesHash string) error {
+	if old, _ := readGenHighWater(stateDir); old > gen {
+		gen = old
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return err
+	}
+	return writeAtomic(genHighWaterPath(stateDir), []byte(strconv.Itoa(gen)+"\n"+filesHash+"\n"))
 }

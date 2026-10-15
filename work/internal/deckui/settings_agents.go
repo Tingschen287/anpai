@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
@@ -211,12 +212,12 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	return nil
 }
 
-func (m *Settings) addView() string {
+func (m *Settings) addView() (string, []string) {
 	var b strings.Builder
-	b.WriteString(bold + brand + " 加入本机的 agent" + reset + dimOn + "   ↑↓ 选  ⏎ 加入  esc 返回" + reset + "\n\n")
+	b.WriteString(m.titleLine(" 加入本机的 agent", "↑↓ 选  ⏎ 加入  esc 返回"))
 	if m.tools == nil {
 		b.WriteString("  " + m.msg + "\n")
-		return b.String()
+		return b.String(), nil
 	}
 	opts := m.addable()
 	if len(opts) == 0 {
@@ -235,10 +236,7 @@ func (m *Settings) addView() string {
 		fmt.Fprintf(&b, " %s %-12s %-11s %s\n", cur, sanitize(t.Name), sanitize(t.Binary), state)
 	}
 	b.WriteString("\n" + dimOn + "  加入时带一份默认模型与档位，加入后可改。命令与启动额外参数不能在这里改。" + reset + "\n")
-	if m.msg != "" {
-		b.WriteString("\n " + oneLine(deckstore.Clean(m.msg, 240)))
-	}
-	return b.String()
+	return b.String(), m.msgFoot()
 }
 
 // ---------------- 编辑一个全局 agent ----------------
@@ -330,13 +328,13 @@ func nextTier(t deckstore.Tier) deckstore.Tier {
 	return deckstore.Frontier
 }
 
-func (m *Settings) agentView() string {
+func (m *Settings) agentView() (string, []string) {
 	a := m.agentPtr(m.sub.agent)
 	if a == nil {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, bold+brand+" %s"+reset+dimOn+"（%s）   ↑↓ 选  ⏎ 换档位  + 加模型  e 改 id  x 删模型  r 移出全局  esc 返回"+reset+"\n\n", sanitize(a.Name), sanitize(a.ID))
+	b.WriteString(m.titleLine(" "+sanitize(a.Name)+"（"+sanitize(a.ID)+"）", "↑↓ 选  ⏎ 换档位  + 加模型  e 改 id  x 删模型  r 移出全局  esc 返回"))
 	cmd := "命令 " + sanitize(a.Binary)
 	if t, ok := m.toolInfo(a.Tool); ok {
 		if t.Installed {
@@ -369,14 +367,42 @@ func (m *Settings) agentView() string {
 		}
 		fmt.Fprintf(&b, " %s %-34s %s%s\n", cur, sanitize(md.ID), string(md.Tier), use)
 	}
-	if in := m.sub.input; in != nil {
-		b.WriteString("\n" + m.inputView())
-	}
 	b.WriteString("\n" + dimOn + "  档位：frontier 最强、balanced 日常、economy 便宜；项目每档的清单只能放同一档的模型。" + reset)
-	if m.msg != "" {
-		b.WriteString("\n " + oneLine(deckstore.Clean(m.msg, 240)))
+	// 输入框、候选与提示固定在底部（n057 attempt 2 自查：模型多时滚动会把输入框滚出屏幕）
+	var foot []string
+	if m.sub.input != nil {
+		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
 	}
-	return b.String()
+	return b.String(), append(foot, m.msgFoot()...)
+}
+
+// msgFoot 是子视图底部的提示行（拒绝原因、「再按一次确认」等）：固定显示，不随列表滚走（n057 attempt 2 自查）。
+func (m *Settings) msgFoot() []string {
+	if m.msg == "" {
+		return nil
+	}
+	return []string{" " + oneLine(deckstore.Clean(m.msg, 240))}
+}
+
+// titleLine 是子视图的标题：窄窗口时按键提示另起一行（n057 attempt 2 自查：「esc 返回」被截掉）。
+func (m *Settings) titleLine(title, keys string) string {
+	if m.width <= 0 || ansi.StringWidth(title)+3+ansi.StringWidth(keys) <= m.width {
+		return bold + brand + title + reset + dimOn + "   " + keys + reset + "\n\n"
+	}
+	// 按键提示另起一行；还放不下就按「一组按键」折成几行
+	var lines []string
+	cur := ""
+	for _, k := range strings.Split(keys, "  ") {
+		if cur != "" && ansi.StringWidth(cur)+2+ansi.StringWidth(k) > m.width-1 {
+			lines, cur = append(lines, cur), ""
+		}
+		if cur != "" {
+			cur += "  "
+		}
+		cur += k
+	}
+	lines = append(lines, cur)
+	return bold + brand + title + reset + "\n" + dimOn + " " + strings.Join(lines, "\n ") + reset + "\n\n"
 }
 
 // ---------------- 输入模型 id ----------------
@@ -574,14 +600,14 @@ func (m *Settings) tierOptions(p *deckstore.ProjectDef, t deckstore.Tier) []stri
 	return out
 }
 
-func (m *Settings) tierView() string {
+func (m *Settings) tierView() (string, []string) {
 	p := m.project()
 	if p == nil {
-		return ""
+		return "", nil
 	}
 	t := m.sub.tier
 	var b strings.Builder
-	fmt.Fprintf(&b, bold+brand+" %s · %s 档"+reset+dimOn+"   ↑↓ 选  ⏎/空格 放进/拿掉  [ ] 或 K J 调顺序  esc 返回"+reset+"\n\n", sanitize(p.Name), string(t))
+	b.WriteString(m.titleLine(" "+sanitize(p.Name)+" · "+string(t)+" 档", "↑↓ 选  ⏎/空格 放进/拿掉  [ ] 或 K J 调顺序  esc 返回"))
 	opts := m.tierOptions(p, t)
 	if len(opts) == 0 {
 		b.WriteString(dimOn + "  勾选的 agent 里没有 " + string(t) + " 档的模型：先在项目里勾选 agent，或在全局 agent 里把模型标成这一档" + reset + "\n")
@@ -602,13 +628,10 @@ func (m *Settings) tierView() string {
 	}
 	b.WriteString("\n" + dimOn + "  只说档位派活时，按序号取第一个额度没显示用尽的；额度未知照常用；全部用尽就不派并说明。\n" +
 		"  点名某个模型时不看这里：勾选的 agent 的模型都能点名用。" + reset + "\n")
-	if m.msg != "" {
-		b.WriteString("\n " + oneLine(deckstore.Clean(m.msg, 240)))
-	}
-	return b.String()
+	return b.String(), m.msgFoot()
 }
 
-func (m *Settings) subView() string {
+func (m *Settings) subView() (string, []string) {
 	switch m.sub.kind {
 	case subAdd:
 		return m.addView()
@@ -617,5 +640,5 @@ func (m *Settings) subView() string {
 	case subTier:
 		return m.tierView()
 	}
-	return ""
+	return "", nil
 }

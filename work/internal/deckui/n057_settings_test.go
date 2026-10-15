@@ -311,4 +311,26 @@ func TestSubViewsFitHeight(t *testing.T) {
 		press(m, "down")
 	}
 	check("档位多选", "›")
+	press(m, "esc")
+	// 模型很多时按 + 打开输入框：输入框与候选固定在底部，看得见；拒绝提示也看得见（attempt 2 自查）
+	m.cur = rowIdx(t, m, rowGlobal, "claude", "")
+	press(m, "enter", "+", "x", "y")
+	v := plainView(m)
+	if !strings.Contains(v, "加模型：xy") || len(strings.Split(v, "\n")) > 24 {
+		t.Fatalf("输入框应看得见：\n%s", v)
+	}
+	press(m, "esc", "x") // 光标在第一个模型（项目在用）：删不掉，提示要看得见
+	if v := plainView(m); !strings.Contains(v, "先在项目里拿掉它") {
+		t.Fatalf("拒绝提示应看得见：\n%s", v)
+	}
+	// 窄窗口：子视图标题的按键提示另起一行，「esc 返回」不被截
+	m.width = 60
+	for _, l := range strings.Split(plainView(m), "\n") {
+		if ansi.StringWidth(l) > 60 && strings.Contains(l, "esc") {
+			t.Fatalf("窄窗口标题行太宽：%q", l)
+		}
+	}
+	if !strings.Contains(plainView(m), "esc 返回") {
+		t.Fatal("窄窗口也要看得见 esc 返回")
+	}
 }

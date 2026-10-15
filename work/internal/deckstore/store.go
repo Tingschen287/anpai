@@ -65,6 +65,19 @@ func Open(dirs Dirs) (*Store, error) {
 	}
 	s.settings = set
 	s.filesHash = settingsFilesHash(dirs.Config)
+	// 代数不倒退（n057 attempt 2 自查）：读入手改时前推的代数、以前存过的代数都记在状态目录；重启后取较大的那个，
+	// 重启前打开的设置窗口拿着旧代数照样对不上（deckd 单独重启时 F9 窗口还开着）
+	hw, hh := readGenHighWater(dirs.State)
+	s.settings.Generation = max(s.settings.Generation, hw)
+	if hh != "" && hh != s.filesHash {
+		// deckd 停着时文件被改过（手改）：重启前打开的设置窗口拿着的代数作废
+		s.settings.Generation++
+	}
+	if hw != s.settings.Generation || hh != s.filesHash {
+		if err := writeGenHighWater(dirs.State, s.settings.Generation, s.filesHash); err != nil {
+			return nil, fmt.Errorf("记不下设置代数：%w", err)
+		}
+	}
 	var sessions []*Session
 	if _, err := readJSON(s.path("registry.json"), &sessions); err != nil {
 		return nil, err
@@ -218,11 +231,13 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 			if err != nil {
 				return nil, nil, fmt.Errorf("设置文件在 deckd 之外被改过，而且读不了：%w（没有保存；改好后重启 deck）", err)
 			}
+			h = settingsFilesHash(s.dirs.Config) // agents.yaml 被删时 LoadSettings 会写出默认的：按写完的算（自查：否则重新读取后还要再被误拒一次）
 			// 旧窗口拿着的代数都要作废（n057 评审 1 B1：以前只挡住第一次，同一个旧窗口再存、或另一个旧窗口存，照样盖掉手改）：
 			// 内存里的代数推到比文件里的、原来的都大；下一次保存写的代数比它再大（saveSettings），不会与它撞上
 			disk.Generation = max(disk.Generation, s.settings.Generation) + 1
 			s.settings, s.filesHash = disk, h
-			return func() error { return nil }, []Event{{Kind: "settings"}}, &ErrSettingsChanged{Want: generation, Have: disk.Generation, HandEdited: true}
+			return func() error { return writeGenHighWater(s.dirs.State, disk.Generation, h) }, []Event{{Kind: "settings"}},
+				&ErrSettingsChanged{Want: generation, Have: disk.Generation, HandEdited: true}
 		} else if generation != s.settings.Generation {
 			return nil, nil, &ErrSettingsChanged{Want: generation, Have: s.settings.Generation}
 		}
@@ -237,6 +252,9 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 				s.settings.Generation = gen
 			}
 			s.filesHash = settingsFilesHash(s.dirs.Config)
+			if err == nil {
+				err = writeGenHighWater(s.dirs.State, gen, s.filesHash)
+			}
 			return err
 		}, []Event{{Kind: "settings"}}, nil
 	})

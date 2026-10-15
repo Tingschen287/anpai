@@ -3,6 +3,7 @@ package deckstore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,5 +264,66 @@ func TestHandEditInvalidatesEveryStaleWindow(t *testing.T) {
 	}
 	if re, _ := LoadSettings(d.Config); re.Projects[0].Name != "A2" || re.Generation != s.Settings().Generation {
 		t.Fatalf("文件是 A2、代数与内存一致：%s %d %d", re.Projects[0].Name, re.Generation, s.Settings().Generation)
+	}
+}
+
+// attempt 2 自查：代数不倒退。读入手改时前推的代数、deckd 停着时的手改，重启后旧窗口照样对不上；deck project add 不会被按过 R 的窗口盖掉。
+func TestGenerationSurvivesRestart(t *testing.T) {
+	d := testDirs(t)
+	open := func() *Store {
+		t.Helper()
+		s, err := Open(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	s := open()
+	set := s.Settings()
+	set.Projects = []ProjectDef{{ID: "p", Name: "UI", Path: "/tmp/p", Agents: []string{"claude"},
+		Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("p")}}
+	if err := s.ReplaceSettingsAt(set, set.Generation); err != nil {
+		t.Fatal(err)
+	}
+	stale := s.Settings()
+	pf := filepath.Join(d.Config, "projects.yaml")
+	edit := func(from, to string) {
+		b, _ := os.ReadFile(pf)
+		os.WriteFile(pf, []byte(strings.Replace(string(b), from, to, 1)), 0o600)
+	}
+	// 1) 运行时手改、被读入（代数前推），然后 deckd 重启：按过 R 的窗口与 deck project add 不撞号
+	edit("name: UI", "name: HAND")
+	s.ReplaceSettingsAt(stale, stale.Generation)
+	reread := s.Settings()
+	s = open()
+	if s.Settings().Generation < reread.Generation {
+		t.Fatalf("重启后代数倒退：%d < %d", s.Settings().Generation, reread.Generation)
+	}
+	add := s.Settings()
+	add.Projects = append(add.Projects, ProjectDef{ID: "added", Name: "ADDED", Path: "/tmp/added", Agents: []string{"claude"},
+		Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("added")})
+	if err := s.ReplaceSettingsAt(add, add.Generation); err != nil {
+		t.Fatalf("deck project add：%v", err)
+	}
+	for _, w := range []Settings{reread, stale} {
+		if err := s.ReplaceSettingsAt(w, w.Generation); err == nil {
+			t.Fatalf("重启前的窗口（第 %d 代）不能盖掉 deck project add", w.Generation)
+		}
+	}
+	// 2) deckd 停着时手改（把代数改小也一样），重启后重启前打开的窗口对不上
+	win := s.Settings()
+	b, _ := os.ReadFile(pf)
+	re := strings.NewReplacer(fmt.Sprintf("generation: %d", win.Generation), "generation: 0")
+	os.WriteFile(pf, []byte(strings.Replace(re.Replace(string(b)), "name: HAND", "name: OFFLINE", 1)), 0o600)
+	af := filepath.Join(d.Config, "agents.yaml")
+	ab, _ := os.ReadFile(af)
+	os.WriteFile(af, []byte(re.Replace(string(ab))), 0o600)
+	s = open()
+	win.Projects[0].Name = "STALE"
+	if err := s.ReplaceSettingsAt(win, win.Generation); err == nil {
+		t.Fatal("deckd 停着时的手改：重启前打开的窗口不能盖掉")
+	}
+	if got, _ := s.Settings().Project("p"); got.Name != "OFFLINE" {
+		t.Fatalf("应是停着时手改的内容：%s", got.Name)
 	}
 }

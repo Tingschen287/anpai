@@ -578,7 +578,8 @@ func (m *Settings) View() string {
 		return m.formView()
 	}
 	if m.sub != nil {
-		return fitHeight(m.subView(), nil, m.height) // 模型、候选多时也看得见光标行与顶部按键提示（n057 评审 1）
+		body, foot := m.subView() // 模型、候选多时也看得见光标行、顶部按键提示与底部的输入框和提示（n057 评审 1、attempt 2 自查）
+		return fitHeight(body, foot, m.height)
 	}
 	var b strings.Builder
 	keys := "↑↓ 选  ⏎ 打开/改  空格 勾选/轮换  ←→ 换项目  a 加 agent  n 新建项目  d 撤销授权  s 保存  R 重读  q 关闭"
