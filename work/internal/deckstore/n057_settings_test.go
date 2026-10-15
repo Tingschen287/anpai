@@ -222,3 +222,46 @@ func TestModelIDCheck(t *testing.T) {
 		t.Fatal("保存时拒绝不合规的模型 id")
 	}
 }
+
+// 评审 1 B1：读入手改后，所有拿着旧代数的窗口都不能再存（同一个旧窗口再存、另一个旧窗口存），重新读取后才行；
+// 重新读取的窗口存过之后，另一个读到「推过的代数」的窗口也不能覆盖。
+func TestHandEditInvalidatesEveryStaleWindow(t *testing.T) {
+	d := testDirs(t)
+	s, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := s.Settings()
+	set.Projects = []ProjectDef{{ID: "p", Name: "UI", Path: "/tmp/p", Agents: []string{"claude"},
+		Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("p")}}
+	if err := s.ReplaceSettingsAt(set, set.Generation); err != nil {
+		t.Fatal(err)
+	}
+	winA, winB := s.Settings(), s.Settings() // 两个设置窗口，读到同一代
+	pf := filepath.Join(d.Config, "projects.yaml")
+	b, _ := os.ReadFile(pf)
+	os.WriteFile(pf, []byte(strings.Replace(string(b), "name: UI", "name: HAND", 1)), 0o600)
+	winA.Projects[0].Name = "A"
+	winB.Projects[0].Name = "B"
+	for i, w := range []Settings{winA, winA, winB} {
+		var changed *ErrSettingsChanged
+		if err := s.ReplaceSettingsAt(w, w.Generation); !errors.As(err, &changed) {
+			t.Fatalf("第 %d 次旧窗口保存应拒绝：%v", i+1, err)
+		}
+	}
+	if b, _ := os.ReadFile(pf); !strings.Contains(string(b), "name: HAND") {
+		t.Fatal("手改不能被任何旧窗口盖掉")
+	}
+	reA, reB := s.Settings(), s.Settings() // 两个窗口都按 R 重新读取
+	reA.Projects[0].Name = "A2"
+	if err := s.ReplaceSettingsAt(reA, reA.Generation); err != nil {
+		t.Fatalf("重新读取后可以存：%v", err)
+	}
+	reB.Projects[0].Name = "B2"
+	if err := s.ReplaceSettingsAt(reB, reB.Generation); err == nil {
+		t.Fatal("A 存过之后，B 拿着同一代再存应拒绝")
+	}
+	if re, _ := LoadSettings(d.Config); re.Projects[0].Name != "A2" || re.Generation != s.Settings().Generation {
+		t.Fatalf("文件是 A2、代数与内存一致：%s %d %d", re.Projects[0].Name, re.Generation, s.Settings().Generation)
+	}
+}

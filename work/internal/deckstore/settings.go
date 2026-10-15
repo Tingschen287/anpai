@@ -537,7 +537,8 @@ func saveSettings(cfgDir string, s Settings) (int, error) {
 		}
 		a.Generation = max(mixed.AgentsGen, mixed.ProjGen)
 	}
-	gen := a.Generation + 1
+	// 新代数比文件里的、调用方手上的（deckd 内存里的，读入手改后可能更大）都大：拿着旧代数的窗口一律对不上（n057 评审 1 B1）
+	gen := max(a.Generation, s.Generation) + 1
 	for _, name := range []string{"agents.yaml", "projects.yaml"} {
 		if data, err := os.ReadFile(filepath.Join(cfgDir, name)); err == nil {
 			if err := writeAtomic(filepath.Join(cfgDir, name+".prev"), data); err != nil {

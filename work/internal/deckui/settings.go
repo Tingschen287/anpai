@@ -578,7 +578,7 @@ func (m *Settings) View() string {
 		return m.formView()
 	}
 	if m.sub != nil {
-		return m.subView()
+		return fitHeight(m.subView(), nil, m.height) // 模型、候选多时也看得见光标行与顶部按键提示（n057 评审 1）
 	}
 	var b strings.Builder
 	keys := "↑↓ 选  ⏎ 打开/改  空格 勾选/轮换  ←→ 换项目  a 加 agent  n 新建项目  d 撤销授权  s 保存  R 重读  q 关闭"

@@ -218,6 +218,9 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 			if err != nil {
 				return nil, nil, fmt.Errorf("设置文件在 deckd 之外被改过，而且读不了：%w（没有保存；改好后重启 deck）", err)
 			}
+			// 旧窗口拿着的代数都要作废（n057 评审 1 B1：以前只挡住第一次，同一个旧窗口再存、或另一个旧窗口存，照样盖掉手改）：
+			// 内存里的代数推到比文件里的、原来的都大；下一次保存写的代数比它再大（saveSettings），不会与它撞上
+			disk.Generation = max(disk.Generation, s.settings.Generation) + 1
 			s.settings, s.filesHash = disk, h
 			return func() error { return nil }, []Event{{Kind: "settings"}}, &ErrSettingsChanged{Want: generation, Have: disk.Generation, HandEdited: true}
 		} else if generation != s.settings.Generation {

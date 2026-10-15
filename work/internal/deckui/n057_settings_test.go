@@ -1,6 +1,7 @@
 package deckui
 
 import (
+	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
@@ -280,3 +281,34 @@ func TestSettingsSelfCheckFixes(t *testing.T) {
 }
 
 func keyMsg(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+// 评审 1 已知问题 1：模型多时 agent 编辑与档位多选也按窗口高度滚动，光标行与顶部按键提示看得见。
+func TestSubViewsFitHeight(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 120, 24
+	for i := 0; i < 30; i++ {
+		m.set.Agents[0].Models = append(m.set.Agents[0].Models, deckstore.ModelDef{ID: fmt.Sprintf("claude-extra-%02d", i), Tier: deckstore.Balanced})
+	}
+	m.cur = rowIdx(t, m, rowGlobal, "claude", "")
+	press(m, "enter")
+	for i := 0; i < 20; i++ {
+		press(m, "down")
+	}
+	check := func(what, mark string) {
+		t.Helper()
+		v := plainView(m)
+		lines := strings.Split(v, "\n")
+		if len(lines) > 24 || !strings.Contains(lines[0], "esc 返回") || !strings.Contains(v, mark) {
+			t.Fatalf("%s：%d 行\n%s", what, len(lines), v)
+		}
+	}
+	check("agent 编辑", "› claude-extra-16")
+	press(m, "esc", "esc")
+	m.project().Agents = []string{"claude"}
+	m.cur = rowIdx(t, m, rowTier, "", deckstore.Balanced)
+	press(m, "enter")
+	for i := 0; i < 25; i++ {
+		press(m, "down")
+	}
+	check("档位多选", "›")
+}
