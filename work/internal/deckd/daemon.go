@@ -152,7 +152,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			DeckCommand = exe
 		}
 		agentSock := cfg.AgentSocket
-		srv.WithBypassChecks(BypassChecks{Config: agentdeck.CheckUpstreamConfigNoBypass,
+		srv.WithBypassChecks(BypassChecks{Config: agentdeck.CheckUpstreamConfigNoBypass, NotCodex: agentdeck.CustomToolNotCodex,
 			Alive: func(ctx context.Context, tmux string) (bool, error) {
 				return agentdeck.TmuxSessionAlive(ctx, agentSock, tmux)
 			},

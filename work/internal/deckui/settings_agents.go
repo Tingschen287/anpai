@@ -159,7 +159,7 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 	k := msg.String()
 	switch k {
 	case "esc", "q":
-		m.sub, m.msg = nil, ""
+		m.sub = nil // 提示留着（例如清单变了、主 agent 自动换了）
 		return nil
 	case "ctrl+c":
 		return tea.Quit
@@ -526,13 +526,11 @@ func (m *Settings) tierKey(k string) tea.Cmd {
 			return nil
 		}
 		list[pos-1], list[pos] = list[pos], list[pos-1]
-		m.sub.cur--
 	case "J", "shift+down", "]":
 		if pos < 0 || pos >= len(list)-1 {
 			return nil
 		}
 		list[pos+1], list[pos] = list[pos], list[pos+1]
-		m.sub.cur++
 	default:
 		return nil
 	}
@@ -543,6 +541,12 @@ func (m *Settings) tierKey(k string) tea.Cmd {
 		delete(p.Models, t)
 	} else {
 		p.Models[t] = list
+	}
+	// 选项按「已选在前」重排了：光标跟着刚动过的那个模型
+	for i, o := range m.tierOptions(p, t) {
+		if o == id {
+			m.sub.cur = i
+		}
 	}
 	m.fixMain(p)
 	m.touch()

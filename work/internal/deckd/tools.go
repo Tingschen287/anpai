@@ -136,7 +136,10 @@ func (s *Server) getTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	set := s.store.Settings()
-	info := s.agents.toolInfo
+	var info ToolInfoFunc
+	if s.agents != nil {
+		info = s.agents.toolInfo
+	}
 	out := make([]ToolStatus, 0, len(Catalog))
 	for _, e := range Catalog {
 		st := ToolStatus{CatalogEntry: e, CanList: len(e.listArgs) > 0}

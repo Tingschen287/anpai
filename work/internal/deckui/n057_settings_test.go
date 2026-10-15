@@ -1,0 +1,209 @@
+package deckui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+)
+
+// n057：设置界面里加入本机的 agent、改它的模型与档位、移出；项目每档有序多选；主 agent 只能选清单里有它模型的档位。
+
+func n057Fixture() (*Settings, *fakeSettingsAPI) {
+	agents := []deckstore.AgentDef{}
+	for _, a := range deckstore.DefaultAgents() {
+		if a.ID == "claude" || a.ID == "codex" {
+			agents = append(agents, a)
+		}
+	}
+	api := &fakeSettingsAPI{
+		set: deckstore.Settings{Generation: 7, Agents: agents, Projects: []deckstore.ProjectDef{{ID: "ai", Name: "ai", Path: "/tmp/ai",
+			Agents: []string{"claude", "codex"}, Models: map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
+			MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope("ai")}}},
+		tools: []ToolInfo{
+			{Tool: "claude", Name: "Claude Code", Binary: "claude", Installed: true, Added: true},
+			{Tool: "opencode", Name: "OpenCode", Binary: "opencode", Installed: true, Path: "/usr/bin/opencode", Version: "1.2", CanList: true,
+				Models: []deckstore.ModelDef{{ID: "opencode/muse", Tier: deckstore.Frontier}}},
+			{Tool: "grok", Name: "Grok Build", Binary: "grok", Agent: true, Installed: true, CanList: true,
+				Models: []deckstore.ModelDef{{ID: "grok-4.7", Tier: deckstore.Frontier}, {ID: "grok-4.5", Tier: deckstore.Economy}}},
+			{Tool: "gemini", Name: "Gemini CLI", Binary: "gemini"},
+		},
+		models: map[string][]string{"grok": {"grok-4.7", "grok-4.7-build-fast", "grok-4.5"}},
+	}
+	m := &Settings{API: api, Installed: func(string) bool { return true }}
+	m.Update(m.load())
+	return m, api
+}
+
+func rowIdx(t *testing.T, m *Settings, kind rowKind, agent string, tier deckstore.Tier) int {
+	t.Helper()
+	for i, r := range m.rows() {
+		if r.kind == kind && r.agent == agent && r.tier == tier {
+			return i
+		}
+	}
+	t.Fatalf("没有这一行：%v %s %s", kind, agent, tier)
+	return -1
+}
+
+func plainView(m *Settings) string { return ansi.Strip(m.View()) }
+
+// 验收：加入本机的 grok、改它的模型（从 grok models 的候选里加、改档位、改 id、删），项目勾选、frontier 多选并排顺序，保存带代数。
+func TestAddAgentEditModelsAndMultiSelect(t *testing.T) {
+	m, api := n057Fixture()
+	v := plainView(m)
+	for _, want := range []string{"项目：ai", "全局可用的 agent", "+ 加入本机的 agent", "都能点名用", "主 agent  claude · frontier（起来时用 claude-opus-5-5）"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("主界面缺 %q：\n%s", want, v)
+		}
+	}
+	// 加入：只列没加的，装了的在前，没装的标出且加不进
+	press(m, "a")
+	v = plainView(m)
+	if !strings.Contains(v, "加入本机的 agent") || strings.Contains(v, "Claude Code") || !strings.Contains(v, "Gemini CLI") || !strings.Contains(v, "○ 没装") {
+		t.Fatalf("加入列表：\n%s", v)
+	}
+	press(m, "down", "down", "enter") // 第三项是没装的 gemini
+	if len(m.set.Agents) != 2 || !strings.Contains(m.msg, "没装") {
+		t.Fatalf("没装的不能加：%q", m.msg)
+	}
+	press(m, "up", "enter") // grok
+	g, ok := m.agent("grok")
+	if !ok || g.Binary != "grok" || !g.Agent || len(g.Models) != 2 || !m.dirty || m.sub == nil || m.sub.kind != subAgent {
+		t.Fatalf("加入 grok：带默认模型、照目录的命令与 agent 标记，并打开它：%+v %v", g, m.sub)
+	}
+	// 加模型：候选来自 grok models，打字过滤
+	press(m, "+", "b", "u", "i", "l", "d", "down", "enter")
+	g, _ = m.agent("grok")
+	if len(g.Models) != 3 || g.Models[2].ID != "grok-4.7-build-fast" {
+		t.Fatalf("从候选里加 grok-4.7-build-fast：%+v（%s）", g.Models, plainView(m))
+	}
+	// 新模型沿用加之前光标所在模型的档位（grok-4.7 是 frontier）；光标在新模型上按 ⏎ 换档位（frontier → balanced）
+	press(m, "enter")
+	g, _ = m.agent("grok")
+	if g.Models[2].Tier != deckstore.Balanced {
+		t.Fatalf("⏎ 换档位：%+v", g.Models[2])
+	}
+	// 手填 id、空格不收
+	press(m, "+", "b", "a", "d", " ", "i", "d", "enter")
+	if g, _ = m.agent("grok"); len(g.Models) != 3 || m.sub.input == nil || !strings.Contains(m.sub.input.note, "空格") {
+		t.Fatalf("带空格的 id 不收：%+v", m.sub.input)
+	}
+	press(m, "esc", "esc") // 关输入框、回主界面
+	// 项目里勾选 grok，frontier 档 ⏎ 打开多选：放进 grok-4.7、再调到第一
+	m.cur = rowIdx(t, m, rowAgentPick, "grok", "")
+	if !picked(m.project(), "grok") {
+		press(m, " ")
+	}
+	m.cur = rowIdx(t, m, rowTier, "", deckstore.Frontier)
+	press(m, "enter")
+	if m.sub == nil || m.sub.kind != subTier || !strings.Contains(plainView(m), "额度未知照常用") {
+		t.Fatalf("应打开 frontier 档：\n%s", plainView(m))
+	}
+	opts := m.tierOptions(m.project(), deckstore.Frontier)
+	pos := -1
+	for i, o := range opts {
+		if o == "grok-4.7" {
+			pos = i
+		}
+	}
+	for i := 0; i < pos; i++ {
+		press(m, "down")
+	}
+	press(m, "enter", "K")
+	if got := strings.Join(m.project().Models[deckstore.Frontier], ","); got != "grok-4.7,claude-opus-5-5" {
+		t.Fatalf("放进并调到第一：%s", got)
+	}
+	press(m, "esc")
+	if !strings.Contains(plainView(m), "frontier  grok-4.7 → claude-opus-5-5") {
+		t.Fatalf("主界面显示有顺序的清单：\n%s", plainView(m))
+	}
+	press(m, "s")
+	if len(api.saved) != 1 || api.saved[0].Generation != 7 || api.saved[0].Validate() != nil || api.saved[0].CheckMainAgents() != nil {
+		t.Fatalf("保存带读到的代数、能过校验：%+v", api.saved)
+	}
+	if !strings.Contains(m.msg, "对之后起的会话生效") {
+		t.Fatalf("保存后说明生效范围：%q", m.msg)
+	}
+}
+
+func TestRenameRemoveAndGuards(t *testing.T) {
+	m, _ := n057Fixture()
+	m.cur = rowIdx(t, m, rowGlobal, "claude", "")
+	press(m, "enter")
+	// 项目在用的模型：不能删、不能改档位
+	press(m, "x")
+	if a, _ := m.agent("claude"); len(a.Models) != 4 || !strings.Contains(m.msg, "项目「ai」") {
+		t.Fatalf("在用的模型不能删：%q", m.msg)
+	}
+	press(m, "enter")
+	if a, _ := m.agent("claude"); a.Models[0].Tier != deckstore.Frontier {
+		t.Fatal("在用的模型不能改档位")
+	}
+	// 改 id：项目清单里的一并改
+	press(m, "e")
+	for range len("claude-opus-5-5") {
+		press(m, "backspace")
+	}
+	press(m, "o", "p", "u", "s", "-", "n", "e", "w", "enter")
+	if a, _ := m.agent("claude"); a.Models[0].ID != "opus-new" || m.project().Models[deckstore.Frontier].First() != "opus-new" {
+		t.Fatalf("改 id 连带项目：%+v %v", a.Models[0], m.project().Models)
+	}
+	// 移出：项目勾选着就不让
+	press(m, "r")
+	if _, ok := m.agent("claude"); !ok || !strings.Contains(m.msg, "先在这些项目里取消勾选") {
+		t.Fatalf("项目在用的 agent 不能移出：%q", m.msg)
+	}
+	press(m, "esc")
+	// 取消勾选 codex 后可以移出 codex
+	m.cur = rowIdx(t, m, rowAgentPick, "codex", "")
+	press(m, " ")
+	m.cur = rowIdx(t, m, rowGlobal, "codex", "")
+	press(m, "enter", "r")
+	if _, ok := m.agent("codex"); ok || m.sub != nil {
+		t.Fatalf("没人用的 agent 可以移出：%q", m.msg)
+	}
+	// 启动额外参数只读显示
+	m.set.Agents[0].ExtraArgs = [][]string{{"--allowedTools", "Read"}}
+	m.cur = rowIdx(t, m, rowGlobal, "claude", "")
+	press(m, "enter")
+	if v := plainView(m); !strings.Contains(v, "启动额外参数（安全白名单，只读") || !strings.Contains(v, "--allowedTools Read") {
+		t.Fatalf("extra_args 只显示、说明去哪改：\n%s", v)
+	}
+}
+
+// 主 agent 只能选「这一档清单里有它的模型」的组合；清单变了让主 agent 落空时自动换并说明。
+func TestMainAgentFollowsTierLists(t *testing.T) {
+	m, _ := n057Fixture()
+	p := m.project()
+	p.Models[deckstore.Balanced] = deckstore.ModelList{"gpt-5.6-terra"}
+	opts := m.mainOptions(p)
+	if len(opts) != 2 || opts[0] != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || opts[1] != (deckstore.MainAgent{Agent: "codex", Tier: deckstore.Balanced}) {
+		t.Fatalf("可选的主 agent：%v", opts)
+	}
+	m.cur = rowIdx(t, m, rowMain, "", "")
+	press(m, "enter")
+	if p.MainAgent != (deckstore.MainAgent{Agent: "codex", Tier: deckstore.Balanced}) {
+		t.Fatalf("轮换到 codex · balanced：%v", p.MainAgent)
+	}
+	// 把 balanced 清单清空：主 agent 落空，自动换到还能选的
+	m.cur = rowIdx(t, m, rowTier, "", deckstore.Balanced)
+	press(m, "enter", "enter", "esc")
+	if p.MainAgent != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || !strings.Contains(m.msg, "主 agent 改为") {
+		t.Fatalf("主 agent 应自动换并说明：%v %q", p.MainAgent, m.msg)
+	}
+}
+
+func TestEmptyStatesTellNextStep(t *testing.T) {
+	api := &fakeSettingsAPI{set: deckstore.Settings{}}
+	m := &Settings{API: api}
+	m.Update(m.load())
+	v := plainView(m)
+	for _, want := range []string{"还没有项目：按 n 新建", "还没有：按 a 从本机装了的 CLI 里加入"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("空状态缺 %q：\n%s", want, v)
+		}
+	}
+}

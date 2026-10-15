@@ -157,7 +157,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
 | F2 | 接管中间正在显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还；交还没完成时再按 F2 重新接管） |
 | Ctrl-Q | 把中间正在看的会话放回后台（会话照常运行；任何 CLI 都收不到 Ctrl-Q） |
 | F5 / F6 / F7 | 显示或隐藏左栏 / 右栏 / 下栏（程序不退出，尺寸复原） |
-| F9 | agent 设置：全局可用清单（没装的标灰）、项目勾选 agent 与三档模型、主 agent、撤销记住的 Codex 授权；按 n 选目录新建项目（从 deck up 所在的目录开始） |
+| F9 | agent 设置：项目（每个主会话）勾选 agent、三档各一个有顺序的模型清单、主 agent；全局可用的 agent（按 a 从本机装了的 CLI 里加入，⏎ 打开改模型与档位、移出）；撤销记住的 Codex 授权；按 n 选目录新建项目（从 deck up 所在的目录开始） |
 | m（左栏） | 为选中的项目起主 agent（项目标题行也能选；与 `deck agent start-main` 同一套准入） |
 | F10 | 键盘焦点回到中间窗格 |
 
@@ -187,6 +187,10 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   - 项目目录同样进 scope，所以设置里项目 `path` 最长 300 字节。
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
   - 两份文件每次保存写同一个 `generation`（上一代 +1），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`（没有 `.prev` 说明它是第一次写，删掉即回到默认），或核对后把两份的 generation 改成一样。第一次保存时 `projects.yaml` 还不存在，缺的那份按第 0 代算，同样能识别。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
+  - **在设置界面里改**（n057）：全局 agent 可加入（只列 Agent Deck 认识、本机装了的 CLI：claude、codex、opencode、grok、Antigravity 的 `agy`、kimi、gemini，带一份默认模型）、移出（有项目勾选着就不让）；每个 agent 的模型可增删、改 id（项目清单里的一并改）、换档位（项目在用的先拿掉才能改）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（用该 CLI 自己的登录与网络，20 秒为限），claude、codex 手填。命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
+  - **每档有序多选**（n057，owner：「排第一的优先，额度用尽就换下一个」）：`projects.yaml` 的 `models` 每档是一个列表（旧的一档一个字符串照读，保存时写成列表）。只说档位派活时按顺序取第一个额度没显示用尽的（看板确知用尽才跳过，未知照常用）；frontier 全都用尽时照用第一个、交给原有的额度门上报 owner，其他档位说明原因、不派。点名某个模型时不看清单：勾选的 agent 的模型都能点名用。主 agent 用它那一档清单里它自己的第一个模型（用尽就取它的下一个）。`deck agent` 起子 agent 前问 deckd（`GET /v1/resolve`）这一档现在会派哪个，指纹按它算。
+  - **保存**：整份保存要带上读到的 `generation`，别处（另一个设置窗口、`deck project add`、手改）在这期间存过就拒绝（409），按 R 重新读取。主 agent 那一档清单里没有它的模型也拒绝。保存后对之后起的会话生效，已在跑的会话不变。
+  - **grok、Antigravity**（n057）：不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。上游 launch 不接受自定义工具的 `--model`，deck 按 `-c "grok --model <模型>"` 传；上游没登记时会把它认成别的工具起，deck 发现后停掉、不送任务。确认登记的命令不是 codex、没声明 codex 兼容时，Codex trust 门不再问。
   - **升级前自查**：n049 起项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等任何控制字符（项目目录会原样写进批准范围）。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`，把超长或带控制字符的路径改掉再启动。
 - **额度**：deckd 的额度门只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口的来源按「未知」处理，不编数字。额度面板（`/v1/quota`）在此之外补几个只供显示的来源：Claude 读 owner 的 Claude Code 状态栏脚本缓存的官方用量（`/tmp/claude/<CLAUDE_CONFIG_DIR 目录名>/statusline-usage-cache.json`，超过一天或已过重置时刻的不用）；Antigravity 按看板的各额度池各一条；Kimi 暂时隐藏（`dashquota.DisplayTools`）。取不到的来源在面板上不显示。每个来源前有它的 logo，窗口后写重置时间（今天之内只写时刻）。OpenCode 免费模型没有限额接口，按看板的撞墙日均值算当天用量百分比（与看板 `calendar.js` 同口径：今天该模型的增量 + 缓存读 + reasoning ÷ 均值），标「日」，次日 0 点重置。
 - 主 agent 工具（`deck agent`）在 n051。

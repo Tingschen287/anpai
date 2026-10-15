@@ -223,8 +223,10 @@ func customToolNotCodex(tool, text string) bool {
 			continue
 		}
 		key, raw, ok := strings.Cut(line, "=")
-		if !ok {
-			return false // 看不懂的行（多行字符串、内联表的续行）
+		v := strings.TrimSpace(raw)
+		if !ok || strings.HasPrefix(v, `"""`) || strings.HasPrefix(v, "'''") ||
+			strings.Count(v, "{") != strings.Count(v, "}") || strings.Count(v, "[") != strings.Count(v, "]") {
+			return false // 看不懂的行（多行字符串、跨行的数组或内联表）：后面几行归谁说不准
 		}
 		key = strings.TrimSpace(key)
 		full := key

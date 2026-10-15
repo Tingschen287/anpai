@@ -53,6 +53,9 @@ type BypassChecks struct {
 	Processes func(ctx context.Context, tmuxSession string, want agentdeck.LaunchArgs) error
 	// Alive 看 tmux 会话还在不在（agentdeck.TmuxSessionAlive）。起主 agent 时用它认出已经退出的旧主 agent；没接上就不认。
 	Alive func(ctx context.Context, tmuxSession string) (bool, error)
+	// NotCodex 说自定义工具在上游配置里登记过、确定不是 Codex 兼容的（agentdeck.CustomToolNotCodex，n057）：
+	// 这时 Codex trust 门不必问 owner。没接上就按「可能」处理（照旧问）。
+	NotCodex func(tool string) bool
 }
 
 // GraphStartFunc 为 Graph 通道开一轮（projectctl start），返回账本给的 attempt。
@@ -83,6 +86,10 @@ func (s *Server) WithAgents(up Upstream, leases *lease.Store, toolInfo ToolInfoF
 
 // WithBypassChecks 接上上游侧的绕过检查（daemon 与测试调用；不接就不开任何 agent）。
 func (s *Server) WithBypassChecks(b BypassChecks) { s.agents.bypass = b }
+
+func (s *Server) notCodex(tool string) bool {
+	return s.agents != nil && s.agents.bypass.NotCodex != nil && s.agents.bypass.NotCodex(tool)
+}
 
 // upstreamConfigNoBypass：上游配置会不会给这个工具加跳过权限的参数。
 func (s *Server) upstreamConfigNoBypass(tool string) error {
@@ -256,7 +263,7 @@ func creatorOf(c Caller) string {
 func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, plan spawnPlan, exception, graphNode string) {
 	x, p := plan.x, plan.project
 	// Codex trust 门（§14.3）
-	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !agentdeck.CustomToolNotCodex(x.Tool) {
+	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !(trust == agentdeck.CodexTrustMaybe && s.notCodex(x.Tool)) {
 		path, version, err := s.agents.toolInfo(ctx, plan.agent.Binary)
 		if err != nil {
 			fail(w, http.StatusBadRequest, "确认不了 %s 的可执行文件与版本（Codex trust 门要按它们记住授权）：%v", plan.agent.Binary, err)
@@ -503,7 +510,7 @@ func (s *Server) quotaUnsure(ctx context.Context, tool string) bool {
 
 func (s *Server) quotaStatus(ctx context.Context, tool string) string {
 	switch {
-	case s.agents.quotaOf != nil:
+	case s.agents != nil && s.agents.quotaOf != nil:
 		return s.agents.quotaOf(ctx, tool)
 	case s.quota != nil:
 		return s.quota.Tool(ctx, tool).Status
