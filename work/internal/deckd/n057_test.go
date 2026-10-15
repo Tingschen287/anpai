@@ -68,8 +68,8 @@ func TestPutSettingsNeedsCurrentGeneration(t *testing.T) {
 	if code, b := putSettings(f, s, &g); code != 409 || !strings.Contains(b, "被别处改过") {
 		t.Fatalf("拿旧代数再存：409：%d %s", code, b)
 	}
-	if now := getSettings(t, f).Generation; now != g+1 {
-		t.Fatalf("代数应加一：%d → %d", g, now)
+	if now := getSettings(t, f).Generation; now <= g { // rev 127 起按时间走，不是正好 +1
+		t.Fatalf("代数应增大：%d → %d", g, now)
 	}
 }
 
@@ -301,5 +301,27 @@ func TestN057SelfCheckGuards(t *testing.T) {
 		if e.Tool == "kimi" {
 			t.Fatal("kimi 不在可加入的目录里（模型参数没核实）")
 		}
+	}
+}
+
+// rev 127：PUT 回的是这次存下的那份与它的代数，界面用它接着存；另一个窗口紧接着存过，回的也不是那个窗口的代数。
+func TestPutSettingsReturnsSavedGeneration(t *testing.T) {
+	f := newFixture(t)
+	s := getSettings(t, f)
+	g := s.Generation
+	code, b := putSettings(f, s, &g)
+	if code != 200 {
+		t.Fatalf("保存：%d %s", code, b)
+	}
+	var out deckstore.Settings
+	if err := json.Unmarshal([]byte(b), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Generation <= g || out.Generation != getSettings(t, f).Generation {
+		t.Fatalf("回的代数应是存下的：%d（读到 %d，当前 %d）", out.Generation, g, getSettings(t, f).Generation)
+	}
+	next := out.Generation
+	if code, b := putSettings(f, s, &next); code != 200 {
+		t.Fatalf("用回的代数接着存：%d %s", code, b)
 	}
 }

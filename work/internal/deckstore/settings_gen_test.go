@@ -32,14 +32,15 @@ func TestSaveSettingsWritesOneGenerationAndKeepsPrev(t *testing.T) {
 	s := withProject(t, d, DefaultEnvelope("deck")) // 一次保存
 	set := s.Settings()
 	set.Projects[0].Name = "改名"
+	a, p := filepath.Join(d.Config, "agents.yaml"), filepath.Join(d.Config, "projects.yaml")
+	first := genOf(t, a)
 	if err := s.ReplaceSettings(set); err != nil { // 第二次保存
 		t.Fatal(err)
 	}
-	a, p := filepath.Join(d.Config, "agents.yaml"), filepath.Join(d.Config, "projects.yaml")
-	if genOf(t, a) != genOf(t, p) || genOf(t, a) < 2 {
-		t.Fatalf("两份文件应是同一代且递增：%d %d", genOf(t, a), genOf(t, p))
+	if genOf(t, a) != genOf(t, p) || genOf(t, a) <= first {
+		t.Fatalf("两份文件应是同一代且递增：%d %d（上一代 %d）", genOf(t, a), genOf(t, p), first)
 	}
-	if genOf(t, a+".prev") != genOf(t, a)-1 || genOf(t, p+".prev") != genOf(t, p)-1 {
+	if genOf(t, a+".prev") != first || genOf(t, p+".prev") != first { // rev 127 起代数按时间走，上一代不是 -1
 		t.Fatal(".prev 应是上一代")
 	}
 }

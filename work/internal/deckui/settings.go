@@ -27,7 +27,7 @@ import (
 // SettingsAPI 是设置界面对 deckd 的调用（测试可换）。
 type SettingsAPI interface {
 	Load(ctx context.Context) (deckstore.Settings, []deckstore.TrustGrant, error)
-	Save(ctx context.Context, s deckstore.Settings) error
+	Save(ctx context.Context, s deckstore.Settings) (int, error) // 返回存下的代数
 	Revoke(ctx context.Context, project, tool string) error
 	Tools(ctx context.Context) ([]ToolInfo, error)
 	ToolModels(ctx context.Context, tool string) ([]string, error)
@@ -63,9 +63,10 @@ func (a DeckSettingsAPI) Load(ctx context.Context) (deckstore.Settings, []deckst
 	return s, g, nil
 }
 
-func (a DeckSettingsAPI) Save(ctx context.Context, s deckstore.Settings) error {
-	var out any
-	return a.C.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}, &out)
+func (a DeckSettingsAPI) Save(ctx context.Context, s deckstore.Settings) (int, error) {
+	var out deckstore.Settings
+	err := a.C.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}, &out)
+	return out.Generation, err
 }
 
 func (a DeckSettingsAPI) Revoke(ctx context.Context, project, tool string) error {
@@ -143,6 +144,7 @@ type doneMsg struct {
 	save  bool // 是保存（不是撤销授权）
 	edits int  // 保存时的改动计数
 	gen   int  // 保存时带的代数
+	saved int  // 存下的代数（deckd 回的）
 }
 
 func (m *Settings) Init() tea.Cmd { return m.load }
@@ -386,7 +388,8 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.msg = msg.what + "完成"
 		if msg.save && m.set.Generation == msg.gen {
-			m.set.Generation = msg.gen + 1 // 保存期间又改了、不重读时，下一次保存带上新的代数（n057 自查）
+			// 保存期间又改了、不重读时，下一次保存带上存下的代数（n057 自查；rev 127 起代数不再是 +1，用 deckd 回的）
+			m.set.Generation = msg.saved
 		}
 		if msg.save {
 			m.msg += "：对之后起的会话生效，已在跑的会话不变"
@@ -425,7 +428,8 @@ func (m *Settings) save() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return doneMsg{what: "保存", err: m.API.Save(ctx, set), save: true, edits: edits, gen: set.Generation}
+		saved, err := m.API.Save(ctx, set)
+		return doneMsg{what: "保存", err: err, save: true, edits: edits, gen: set.Generation, saved: saved}
 	}
 }
 

@@ -65,19 +65,11 @@ func Open(dirs Dirs) (*Store, error) {
 	}
 	s.settings = set
 	s.filesHash = settingsFilesHash(dirs.Config)
-	// 代数不倒退（n057 attempt 2 自查）：读入手改时前推的代数、以前存过的代数都记在状态目录；重启后取较大的那个，
-	// 重启前打开的设置窗口拿着旧代数照样对不上（deckd 单独重启时 F9 窗口还开着）
-	hw, hh := readGenHighWater(dirs.State)
-	s.settings.Generation = max(s.settings.Generation, hw)
-	if hh != "" && hh != s.filesHash {
-		// deckd 停着时文件被改过（手改）：重启前打开的设置窗口拿着的代数作废
-		s.settings.Generation++
-	}
-	if hw != s.settings.Generation || hh != s.filesHash {
-		if err := writeGenHighWater(dirs.State, s.settings.Generation, s.filesHash); err != nil {
-			return nil, fmt.Errorf("记不下设置代数：%w", err)
-		}
-	}
+	// 代数按时间前推（n057 rev 127，owner 选定）：重启前发出的代数（读入手改时只在内存里前推的也算）都小于这一刻，
+	// 重启前打开的设置窗口第一次保存一律对不上、按 R 重读；deckd 停着时的手改也就不会被它们盖掉。
+	// 不记状态文件（attempt 2 的 settings-generation 损坏或丢失时会降代，评审 2 R1），留下的旧文件删掉。
+	s.settings.Generation = nextGen(s.settings.Generation)
+	os.Remove(filepath.Join(dirs.State, "settings-generation"))
 	var sessions []*Session
 	if _, err := readJSON(s.path("registry.json"), &sessions); err != nil {
 		return nil, err
@@ -212,17 +204,26 @@ func (s *Store) Settings() Settings {
 
 // ReplaceSettings 校验后整份写回文件（不核对代数：deckd 内部与测试用）。
 func (s *Store) ReplaceSettings(next Settings) error {
-	return s.replaceSettings(next, -1)
+	_, err := s.replaceSettings(next, -1)
+	return err
 }
 
 // ReplaceSettingsAt 由 owner 界面调用（PUT /v1/settings）：带上读到的代数，不是当前代数就拒绝（n057），
 // 免得两个设置窗口、或界面与 deck project add 互相覆盖。
 func (s *Store) ReplaceSettingsAt(next Settings, generation int) error {
+	_, err := s.ReplaceSettingsAtGen(next, generation)
+	return err
+}
+
+// ReplaceSettingsAtGen 同 ReplaceSettingsAt，并返回这次写下的代数：界面下一次保存带它
+// （n057 rev 127：代数不再是读到的 +1；保存后再读当前设置，可能读到另一个窗口紧接着存的代数）。
+func (s *Store) ReplaceSettingsAtGen(next Settings, generation int) (int, error) {
 	return s.replaceSettings(next, generation)
 }
 
-func (s *Store) replaceSettings(next Settings, generation int) error {
-	return s.mutate(func() (func() error, []Event, error) {
+func (s *Store) replaceSettings(next Settings, generation int) (int, error) {
+	saved := 0
+	err := s.mutate(func() (func() error, []Event, error) {
 		if generation < 0 {
 			// -1 只给 deckd 内部与测试用（ReplaceSettings）；界面带来的负数不当「不核对」（n057 自查）
 		} else if h := settingsFilesHash(s.dirs.Config); h != s.filesHash {
@@ -234,9 +235,9 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 			h = settingsFilesHash(s.dirs.Config) // agents.yaml 被删时 LoadSettings 会写出默认的：按写完的算（自查：否则重新读取后还要再被误拒一次）
 			// 旧窗口拿着的代数都要作废（n057 评审 1 B1：以前只挡住第一次，同一个旧窗口再存、或另一个旧窗口存，照样盖掉手改）：
 			// 内存里的代数推到比文件里的、原来的都大；下一次保存写的代数比它再大（saveSettings），不会与它撞上
-			disk.Generation = max(disk.Generation, s.settings.Generation) + 1
+			disk.Generation = nextGen(max(disk.Generation, s.settings.Generation))
 			s.settings, s.filesHash = disk, h
-			return func() error { return writeGenHighWater(s.dirs.State, disk.Generation, h) }, []Event{{Kind: "settings"}},
+			return func() error { return nil }, []Event{{Kind: "settings"}},
 				&ErrSettingsChanged{Want: generation, Have: disk.Generation, HandEdited: true}
 		} else if generation != s.settings.Generation {
 			return nil, nil, &ErrSettingsChanged{Want: generation, Have: s.settings.Generation}
@@ -249,15 +250,13 @@ func (s *Store) replaceSettings(next Settings, generation int) error {
 		return func() error {
 			gen, err := saveSettings(s.dirs.Config, next)
 			if err == nil {
-				s.settings.Generation = gen
+				s.settings.Generation, saved = gen, gen
 			}
 			s.filesHash = settingsFilesHash(s.dirs.Config)
-			if err == nil {
-				err = writeGenHighWater(s.dirs.State, gen, s.filesHash)
-			}
 			return err
 		}, []Event{{Kind: "settings"}}, nil
 	})
+	return saved, err
 }
 
 func cloneSettings(x Settings) Settings {

@@ -549,7 +549,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
 	}
-	if err := s.store.ReplaceSettingsAt(next, *body.Generation); err != nil {
+	gen, err := s.store.ReplaceSettingsAtGen(next, *body.Generation)
+	if err != nil {
 		var changed *deckstore.ErrSettingsChanged
 		if errors.As(err, &changed) {
 			fail(w, http.StatusConflict, "%v", err)
@@ -558,7 +559,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		storeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.Settings())
+	// 回的是这次存下的那份与它的代数（n057 rev 127：不是保存后再读的当前设置，那可能已是另一个窗口紧接着存的）
+	next.Generation = gen
+	writeJSON(w, http.StatusOK, next)
 }
 
 func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {

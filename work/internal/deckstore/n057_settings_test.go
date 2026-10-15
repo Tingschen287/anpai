@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -150,8 +151,8 @@ func TestReplaceSettingsAtChecksGeneration(t *testing.T) {
 	if err := s.ReplaceSettingsAt(set, g0); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Settings().Generation; got != g0+1 {
-		t.Fatalf("保存后代数加一：%d → %d", g0, got)
+	if got := s.Settings().Generation; got <= g0 { // rev 127 起按时间走，不是正好 +1
+		t.Fatalf("保存后代数增大：%d → %d", g0, got)
 	}
 	err = s.ReplaceSettingsAt(set, g0) // 拿着旧代数再存
 	var changed *ErrSettingsChanged
@@ -326,4 +327,126 @@ func TestGenerationSurvivesRestart(t *testing.T) {
 	if got, _ := s.Settings().Project("p"); got.Name != "OFFLINE" {
 		t.Fatalf("应是停着时手改的内容：%s", got.Name)
 	}
+}
+
+// rev 127（评审 2 R1）：不记状态文件，代数按时间走。attempt 2 留下的 settings-generation 不论完好、损坏、只有数字还是丢了，
+// 重启后旧窗口都盖不掉停着时的手改与重启后 deck project add 加的项目；留下的旧文件删掉。
+func TestGenerationNeedsNoStateFile(t *testing.T) {
+	for _, mode := range []string{"none", "corrupt", "number-only", "huge", "dir"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDirs(t)
+			s, err := Open(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			set := s.Settings()
+			set.Projects = []ProjectDef{{ID: "p", Name: "UI", Path: "/tmp/p", Agents: []string{"claude"},
+				Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("p")}}
+			if err := s.ReplaceSettingsAt(set, set.Generation); err != nil {
+				t.Fatal(err)
+			}
+			pf := filepath.Join(d.Config, "projects.yaml")
+			edit := func(from, to string) {
+				b, _ := os.ReadFile(pf)
+				os.WriteFile(pf, []byte(strings.Replace(string(b), from, to, 1)), 0o600)
+			}
+			old := s.Settings()
+			edit("name: UI", "name: HAND")
+			s.ReplaceSettingsAt(old, old.Generation) // 读入手改（内存代数前推，不写文件）
+			stale := s.Settings()                    // 窗口按 R
+			hw := filepath.Join(d.State, "settings-generation")
+			os.MkdirAll(d.State, 0o700)
+			switch mode {
+			case "corrupt":
+				os.WriteFile(hw, []byte("broken\n"), 0o600)
+			case "number-only":
+				os.WriteFile(hw, []byte("1\n"), 0o600)
+			case "huge":
+				os.WriteFile(hw, []byte("999999999999999999\nxx\n"), 0o600)
+			case "dir":
+				os.Mkdir(hw, 0o700)
+			}
+			edit("name: HAND", "name: OFFLINE") // deckd 停着时手改
+			s, err = Open(d)                    // 紧接着重启，不等
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "dir" {
+				if _, err := os.Stat(hw); !os.IsNotExist(err) {
+					t.Fatalf("attempt 2 留下的状态文件应删掉：%v", err)
+				}
+			}
+			if s.Settings().Generation <= stale.Generation {
+				t.Fatalf("重启后代数应比重启前发出的都大：%d <= %d", s.Settings().Generation, stale.Generation)
+			}
+			add := s.Settings()
+			add.Projects = append(add.Projects, ProjectDef{ID: "added", Name: "ADDED", Path: "/tmp/added", Agents: []string{"claude"},
+				Models: map[Tier]ModelList{Frontier: {"claude-opus-5-5"}}, Envelope: DefaultEnvelope("added")})
+			if err := s.ReplaceSettingsAt(add, add.Generation); err != nil {
+				t.Fatalf("deck project add：%v", err)
+			}
+			for _, w := range []Settings{stale, old} {
+				var changed *ErrSettingsChanged
+				if err := s.ReplaceSettingsAt(w, w.Generation); !errors.As(err, &changed) {
+					t.Fatalf("重启前的窗口应拒绝：%v", err)
+				}
+			}
+			disk, err := LoadSettings(d.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, _ := disk.Project("p")
+			if _, ok := disk.Project("added"); !ok || p.Name != "OFFLINE" {
+				t.Fatalf("停着时的手改与新加的项目都要在：%s %v", p.Name, ok)
+			}
+		})
+	}
+}
+
+// rev 127：重启前打开、没有任何改动的窗口，第一次保存也被拒（owner 选定：按 R 重读）；重读后能存，存下的代数供下一次保存。
+func TestRestartAsksOpenWindowsToReload(t *testing.T) {
+	d := testDirs(t)
+	s, err := Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	win := s.Settings()
+	s, err = Open(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed *ErrSettingsChanged
+	if err := s.ReplaceSettingsAt(win, win.Generation); !errors.As(err, &changed) || strings.Contains(err.Error(), "代）") {
+		t.Fatalf("重启前的窗口应拒绝，提示里不写十几位的代数：%v", err)
+	}
+	re := s.Settings()
+	gen, err := s.ReplaceSettingsAtGen(re, re.Generation)
+	if err != nil || gen != s.Settings().Generation || gen <= re.Generation {
+		t.Fatalf("重读后可以存，返回存下的代数：%d %v（当前 %d）", gen, err, s.Settings().Generation)
+	}
+	if _, err := s.ReplaceSettingsAtGen(re, gen); err != nil {
+		t.Fatalf("用返回的代数接着存：%v", err)
+	}
+}
+
+// rev 127：发出的代数不领先时钟（nextGen 等时钟追上），重启时取的当前时间一定比它们大；手改写了远在未来的代数时不等。
+func TestNextGenNeverLeadsTheClock(t *testing.T) {
+	floor := genClock() + 50 // 比当前时间领先 50 微秒（例如同一刻连存了几次）
+	g := nextGen(floor)
+	if g <= floor || genClock() < g {
+		t.Fatalf("新代数应比下限大、且不领先时钟：%d floor=%d clock=%d", g, floor, genClock())
+	}
+	far := genClock() + int(time.Hour/time.Microsecond)
+	start := time.Now()
+	if g := nextGen(far); g != far+1 || time.Since(start) > 50*time.Millisecond {
+		t.Fatalf("远在未来的下限不等，照样 +1：%d %v", g-far, time.Since(start))
+	}
+}
+
+// rev 127：时钟回拨或停走时，靠「比文件里的、内存里的都大」兜底，评审 1 B1 的场景照样挡住（nextGen 等不到时钟，最多等 2 毫秒）。
+func TestHandEditInvalidatesEveryStaleWindowWithoutClock(t *testing.T) {
+	old := genClock
+	genClock = func() int { return 0 }
+	defer func() { genClock = old }()
+	TestHandEditInvalidatesEveryStaleWindow(t)
 }

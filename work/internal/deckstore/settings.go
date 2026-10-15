@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -538,8 +538,9 @@ func saveSettings(cfgDir string, s Settings) (int, error) {
 		}
 		a.Generation = max(mixed.AgentsGen, mixed.ProjGen)
 	}
-	// 新代数比文件里的、调用方手上的（deckd 内存里的，读入手改后可能更大）都大：拿着旧代数的窗口一律对不上（n057 评审 1 B1）
-	gen := max(a.Generation, s.Generation) + 1
+	// 新代数比文件里的、调用方手上的（deckd 内存里的，读入手改后可能更大）都大：拿着旧代数的窗口一律对不上（n057 评审 1 B1）；
+	// 也不小于当前时间（rev 127，nextGen）
+	gen := nextGen(max(a.Generation, s.Generation))
 	for _, name := range []string{"agents.yaml", "projects.yaml"} {
 		if data, err := os.ReadFile(filepath.Join(cfgDir, name)); err == nil {
 			if err := writeAtomic(filepath.Join(cfgDir, name+".prev"), data); err != nil {
@@ -567,10 +568,11 @@ type ErrSettingsChanged struct {
 }
 
 func (e *ErrSettingsChanged) Error() string {
+	// 不写代数：按时间前推后是十几位的数（n057 rev 127），对 owner 没有意义
 	if e.HandEdited {
-		return fmt.Sprintf("设置文件在 deckd 之外被改过（手改）：没有保存，免得盖掉；deck 已读入改过的那份（第 %d 代），重新读取后再改", e.Have)
+		return "设置文件在 deckd 之外被改过（手改）：没有保存，免得盖掉；deck 已读入改过的那份，重新读取后再改"
 	}
-	return fmt.Sprintf("设置在你打开之后被别处改过（你读到的是第 %d 代，现在是第 %d 代）：没有保存；重新读取后再改", e.Want, e.Have)
+	return "设置在你打开之后被别处改过（另一个设置窗口、deck project add，或 deck 重启过）：没有保存；重新读取后再改"
 }
 
 // settingsFilesHash 是两份设置文件当前内容的指纹（不存在的按空）。
@@ -602,36 +604,19 @@ func saveYAML(path string, v any) error {
 	return writeAtomic(path, data)
 }
 
-// 设置代数的高水位（n057 attempt 2 自查）：deckd 用过的最大代数与那时两份文件的指纹，记在状态目录 settings-generation。
-// 读入手改时内存里的代数会比文件里的大；只记在内存里，deckd 重启后就倒退，与之后保存写出的代数撞号。
-// 指纹用来认出 deckd 停着时的手改：重启时文件与记下的不一样，代数再前推一格，重启前打开的设置窗口拿着的代数都对不上。
-func genHighWaterPath(stateDir string) string { return filepath.Join(stateDir, "settings-generation") }
+// 设置代数按时间走（n057 rev 127，owner 选定）：deckd 打开设置、保存、读入手改时都用 nextGen 取新代数。
+// 不记状态文件，没有可损坏、可丢失的东西（attempt 2 的 settings-generation，评审 2 R1）。系统时钟回拨不在此列。
+//
+// genClock 是当前时间（微秒；十六位数，JSON 里按浮点读也不失真）。测试可以换掉它。
+var genClock = func() int { return int(time.Now().UnixMicro()) }
 
-func readGenHighWater(stateDir string) (int, string) {
-	b, err := os.ReadFile(genHighWaterPath(stateDir))
-	if err != nil {
-		return 0, ""
+// nextGen 返回比 floor 大、也不小于当前时间的新代数，并等时钟走到它再返回（最多等 2 毫秒）：
+// 发出去的代数都不超过发出时的时钟，deckd 重启时取的「当前时间 +1」一定比重启前发出的都大，与重启多快无关
+// （评审 2 探针：同一毫秒里读入手改又重启，按毫秒取会撞号）。floor 远在未来（手改写了很大的代数）时不等，照样 +1。
+func nextGen(floor int) int {
+	g := max(floor, genClock()) + 1
+	for deadline := time.Now().Add(2 * time.Millisecond); g > genClock() && time.Now().Before(deadline); {
+		time.Sleep(time.Microsecond)
 	}
-	f := strings.Fields(string(b))
-	if len(f) == 0 {
-		return 0, ""
-	}
-	n, err := strconv.Atoi(f[0])
-	if err != nil || n < 0 {
-		return 0, ""
-	}
-	if len(f) > 1 {
-		return n, f[1]
-	}
-	return n, ""
-}
-
-func writeGenHighWater(stateDir string, gen int, filesHash string) error {
-	if old, _ := readGenHighWater(stateDir); old > gen {
-		gen = old
-	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return err
-	}
-	return writeAtomic(genHighWaterPath(stateDir), []byte(strconv.Itoa(gen)+"\n"+filesHash+"\n"))
+	return g
 }

@@ -24,9 +24,10 @@ type fakeSettingsAPI struct {
 func (f *fakeSettingsAPI) Load(context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
 	return f.set, f.trust, nil
 }
-func (f *fakeSettingsAPI) Save(_ context.Context, s deckstore.Settings) error {
+func (f *fakeSettingsAPI) Save(_ context.Context, s deckstore.Settings) (int, error) {
 	f.saved = append(f.saved, s)
-	return s.Validate() // 与 deckd 同一套校验
+	// 存下的代数不是 +1（n057 rev 127：deckd 按时间前推）：界面要用回来的这个
+	return s.Generation + 1000, s.Validate() // 与 deckd 同一套校验
 }
 func (f *fakeSettingsAPI) Revoke(_ context.Context, project, tool string) error {
 	f.revoked = append(f.revoked, project+"/"+tool)

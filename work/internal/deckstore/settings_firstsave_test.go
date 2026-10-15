@@ -52,8 +52,8 @@ func TestFirstSaveHalfWrittenIsRefused(t *testing.T) {
 	if err := SaveSettings(d.Config, set); err != nil {
 		t.Fatal(err)
 	}
-	if got, err = LoadSettings(d.Config); err != nil || len(got.Projects) != 1 || genOf(t, a) != 1 {
-		t.Fatalf("完整保存后应是第 1 代、带新项目：%+v %v", got.Projects, err)
+	if got, err = LoadSettings(d.Config); err != nil || len(got.Projects) != 1 || genOf(t, a) <= 0 {
+		t.Fatalf("完整保存后应比第 0 代新、带新项目：%+v %v", got.Projects, err)
 	}
 }
 

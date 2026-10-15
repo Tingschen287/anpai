@@ -219,7 +219,7 @@ func TestSettingsSelfCheckFixes(t *testing.T) {
 	_, save := m.Update(keyMsg("s"))
 	press(m, " ") // 保存还没回来又改了一处
 	m.Update(save())
-	if m.set.Generation != 8 || len(api.saved) != 1 || api.saved[0].Generation != 7 {
+	if m.set.Generation != 1007 || len(api.saved) != 1 || api.saved[0].Generation != 7 {
 		t.Fatalf("保存回来后代数跟上：%d", m.set.Generation)
 	}
 	// R 再 q：q 仍要确认
