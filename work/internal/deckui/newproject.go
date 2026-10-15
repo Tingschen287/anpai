@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
@@ -229,12 +230,12 @@ func (m *Settings) createProject() tea.Cmd {
 		return nil
 	}
 	m.set = next
+	m.switchPage(pageProject) // 先换页（各页光标各自记着），再把光标放到新项目第一行（n059 自查）
 	m.proj, m.cur = len(m.set.Projects)-1, 0
-	m.switchPage(pageProject)
 	m.form = nil
 	m.touch() // Update 看到改动就自动保存（n059）
 	m.msg = T("form.created", sanitize(p.Name))
-	m.hint = T("form.next", sanitize(p.Name))
+	m.hint, m.hintEdits = T("form.next", sanitize(p.Name)), m.edits // 存上了含这个项目的那次保存才提示去侧栏
 	return nil
 }
 
@@ -271,8 +272,14 @@ func (m *Settings) formView() string {
 		}
 	} else {
 		b.WriteString(m.titleLine(" "+T("form.confirm.title"), T("form.confirm.keys")))
-		fmt.Fprintf(&b, "   %s  %s\n", T("form.dir"), sanitize(f.chosen))
-		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", T("form.id"), sanitize(f.id))
+		labels := []string{T("form.dir"), T("form.id"), T("form.agents"), T("form.main")}
+		lw := 0
+		for _, l := range labels {
+			lw = max(lw, ansi.StringWidth(l))
+		}
+		label := func(l string) string { return l + strings.Repeat(" ", lw-ansi.StringWidth(l)) } // 按显示宽度对齐（n059 自查）
+		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitize(f.chosen))
+		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", label(T("form.id")), sanitize(f.id))
 		p := m.defaultProject(f.id, f.chosen)
 		main := dimOn + T("form.noagent") + reset
 		if p.MainAgent.Agent != "" {
@@ -282,8 +289,8 @@ func (m *Settings) formView() string {
 		for _, id := range p.Agents {
 			names = append(names, m.agentName(id))
 		}
-		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", T("form.agents"), sanitize(strings.Join(names, T("sep.list"))), T("form.main"), main)
-		b.WriteString(dimOn + "   " + T("form.later") + reset + "\n")
+		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitize(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
+		b.WriteString(" " + m.note(T("form.later")))
 	}
 	if f.err != "" {
 		b.WriteString("\n\x1b[38;5;196m " + oneLine(deckstore.Clean(f.err, 240)) + "\x1b[0m\n")

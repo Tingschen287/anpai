@@ -168,6 +168,11 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc", "q":
 		m.sub = nil // 提示留着（例如清单变了、主 agent 自动换了）
 		return nil
+	case "R":
+		// 冲突提示让按 R：子视图里也认，回到页面照页面的规矩重读（有没存上的改动时要再按一次）（n059 自查）
+		m.sub = nil
+		_, cmd := m.key("R")
+		return cmd
 	case "ctrl+c":
 		return tea.Quit
 	case "up", "k":
@@ -230,7 +235,7 @@ func (m *Settings) addView() (string, []string) {
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
-		line := fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state)
+		line := m.fit(fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state), 3)
 		if i == m.sub.cur {
 			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
 		} else {
@@ -382,10 +387,9 @@ func (m *Settings) agentView() (string, []string) {
 	if in := m.sub.input; in != nil {
 		in.limit = 12
 		if m.height > 0 {
-			fixed := 1 + 1 + 1 + len(m.msgFoot()) // fitHeight 加的空行、输入行、说明行、提示
-			if in.note != "" {
-				fixed++
-			}
+			// 先量不带候选时底部要几行（说明折行后可能不止一行），剩下的才给候选
+			in.limit = 0
+			fixed := 1 + strings.Count(m.inputView(), "\n") + len(m.msgFoot()) // fitHeight 加的空行、输入框与说明、提示
 			in.limit = max(0, min(12, m.height-strings.Count(title, "\n")-fixed-3))
 		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
@@ -396,13 +400,30 @@ func (m *Settings) agentView() (string, []string) {
 // msgFoot 是子视图底部的提示行（拒绝原因、「再按一次确认」、保存没成等）：固定显示，不随列表滚走（n057 attempt 2 自查）。
 func (m *Settings) msgFoot() []string {
 	var out []string
-	if m.conflict {
+	switch {
+	case m.conflict:
 		out = append(out, orange+" "+m.saveErr+reset)
-	} else if m.saveErr != "" {
+	case m.saveErr != "":
 		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
+	case m.saving || m.dirty:
+		out = append(out, dimOn+" "+T("status.saving")+reset)
+	case m.saved:
+		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
 	if m.msg != "" {
 		out = append(out, " "+oneLine(deckstore.Clean(m.msg, 240)))
+	}
+	return m.wrapFoot(out)
+}
+
+// wrapFoot 把底部的几行按窗口宽度折行（n059 自查：冲突提示、确认提示在窄窗口被截掉）。
+func (m *Settings) wrapFoot(lines []string) []string {
+	if m.width <= 1 {
+		return lines
+	}
+	var out []string
+	for _, l := range lines {
+		out = append(out, strings.Split(ansi.Wrap(l, m.width-1, ""), "\n")...)
 	}
 	return out
 }
@@ -518,7 +539,7 @@ func (m *Settings) inputView() string {
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitize(in.text) + reset + "▏\n")
 	if in.note != "" {
-		b.WriteString(dimOn + "  " + oneLine(deckstore.Clean(in.note, 160)) + reset + "\n")
+		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, 160))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {
@@ -532,9 +553,9 @@ func (m *Settings) inputView() string {
 			}
 			fmt.Fprintf(&b, "   %s %s%s\n", cur, sanitize(s), taken)
 		}
-		b.WriteString(dimOn + "  " + T("input.addkeys") + reset + "\n")
+		b.WriteString(m.note(T("input.addkeys")))
 	} else {
-		b.WriteString(dimOn + "  " + T("input.renamekeys") + reset + "\n")
+		b.WriteString(m.note(T("input.renamekeys")))
 	}
 	return b.String()
 }

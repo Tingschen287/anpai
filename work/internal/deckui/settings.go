@@ -140,14 +140,18 @@ type Settings struct {
 	conflict bool   // 别处改过（409）：不再自动保存，等 owner 按 R 重新读取
 	saveErr  string // 上一次保存没成的原因
 	saved    bool   // 存成过（底部显示「已保存」）
+	reloads  int    // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
 	// 再按一次确认：q（有没存上的改动时关闭）、R（丢掉没存上的改动重读）、d（撤销授权）各自确认（n057 自查：不能共用）
 	quitAsked   bool
 	reloadAsked bool
-	revokeAsked bool
-	msg         string
-	loaded      bool
-	width       int
-	height      int
+	// revokeAsked：按过一次 d 要撤销的那一条（n059 自查：只记「按过」的话，列表刷新后第二次 d 会撤销另一条）
+	revokeAsked *deckstore.TrustGrant
+	// hintEdits：新建项目那一刻的改动计数；存上了含这次改动的保存才显示「去侧栏按 m」（n059 自查）
+	hintEdits int
+	msg       string
+	loaded    bool
+	width     int
+	height    int
 	// Start 是新建项目时目录浏览的起点（deck settings 进程的当前目录，即 deck up 所在的目录，n055）
 	Start string
 	form  *projectForm // 不为 nil：正在新建项目
@@ -164,12 +168,13 @@ type loadedMsg struct {
 	force     bool // owner 按 R 重新读取：丢掉没存上的改动
 }
 type doneMsg struct {
-	what  string
-	err   error
-	save  bool // 是保存（不是撤销授权）
-	edits int  // 保存时的改动计数
-	gen   int  // 保存时带的代数
-	saved int  // 存下的代数（deckd 回的）
+	what    string
+	err     error
+	save    bool // 是保存（不是撤销授权）
+	edits   int  // 保存时的改动计数
+	gen     int  // 保存时带的代数
+	saved   int  // 存下的代数（deckd 回的）
+	reloads int  // 发出时的重读次数
 }
 
 func (m *Settings) Init() tea.Cmd { return m.load }
@@ -395,13 +400,16 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.trustOnly {
 			m.trust = msg.trust
+			m.revokeAsked = nil // 列表变了：要撤销哪一条重新确认
 			return m, nil
 		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
 		if msg.force {
-			m.edits++ // 路上那次保存回来时不再当成「存上了现在的设置」
-			m.sub, m.msg = nil, T("reload.done")
+			m.edits++   // 路上那次保存回来时不再当成「存上了现在的设置」
+			m.reloads++ // 路上那次保存回来时认得出是重读之前发的
+			m.sub, m.msg, m.hint = nil, T("reload.done"), ""
 			m.conflict, m.saveErr, m.pending, m.saved = false, "", false, false
+			m.revokeAsked = nil
 		}
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
@@ -468,18 +476,29 @@ func (m *Settings) save() tea.Cmd {
 		m.saveErr = errText(err)
 		return nil
 	}
-	edits := m.edits
+	edits, reloads := m.edits, m.reloads
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		saved, err := m.API.Save(ctx, set)
-		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved}
+		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved, reloads: reloads}
 	}
 }
 
 // saveDone 处理一次保存的结果：存上了就记下 deckd 回的代数；路上又改了就接着存；别处改过就停下等 R。
 func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 	m.saving = false
+	if msg.reloads != m.reloads {
+		// 重读之前发出的：失败（包括 409）不算数，不把刚读到的设置标成冲突；成功时只跟上代数（重读可能读在它存上之前）
+		if msg.err == nil && m.set.Generation == msg.gen {
+			m.set.Generation = msg.saved
+		}
+		if m.pending {
+			m.pending = false
+			return m.autosave()
+		}
+		return nil
+	}
 	if msg.err != nil {
 		m.hint = ""
 		var de *deckclient.Error
@@ -500,7 +519,7 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 	if m.set.Generation == msg.gen {
 		m.set.Generation = msg.saved // 下一次保存带存下的代数（rev 127 起代数不是 +1，用 deckd 回的）
 	}
-	if m.hint != "" {
+	if m.hint != "" && msg.edits >= m.hintEdits {
 		m.msg, m.hint = m.hint, ""
 	}
 	if msg.edits == m.edits {
@@ -519,7 +538,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		m.reloadAsked = false
 	}
 	if k != "d" {
-		m.revokeAsked = false
+		m.revokeAsked = nil
 	}
 	rs := m.rows()
 	m.cur = max(0, min(m.cur, len(rs)-1)) // 列表可能变短或为空
@@ -582,16 +601,21 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			break
 		}
 		g := rs[m.cur].trust
-		if !m.revokeAsked {
-			m.revokeAsked = true
+		if a := m.revokeAsked; a == nil || a.Project != g.Project || a.Tool != g.Tool {
+			m.revokeAsked = &g
 			m.msg = T("trust.confirm", g.Project, g.Tool)
 			return m, nil
 		}
-		m.revokeAsked = false
+		m.revokeAsked = nil
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			return doneMsg{what: T("trust.revoke", g.Project, g.Tool), err: m.API.Revoke(ctx, g.Project, g.Tool)}
+		}
+	case "s":
+		// 存不上（不是冲突，例如 deckd 一时连不上）时手动重试；平时改动自动保存，用不着它（n059 自查）
+		if m.dirty && !m.saving && !m.conflict && m.saveErr != "" {
+			return m, m.autosave()
 		}
 	case "R":
 		if m.dirty && !m.reloadAsked {
@@ -676,6 +700,14 @@ const (
 	tabOn = "\x1b[1;38;5;16;48;2;180;245;70m"
 )
 
+// fit 把一行截到窗口宽（留出行首 lead 格），截掉的地方写「…」。
+func (m *Settings) fit(s string, lead int) string {
+	if m.width > lead+1 && ansi.StringWidth(s) > m.width-lead-1 {
+		return ansi.Truncate(s, m.width-lead-1, "…")
+	}
+	return s
+}
+
 // note 是一段灰色说明：按窗口宽度折行（子视图底部的长说明，以前超宽就被截掉），每行缩进两格。
 func (m *Settings) note(s string) string {
 	if m.width > 4 {
@@ -748,27 +780,35 @@ func (m *Settings) View() string {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String()
 	}
-	line := 0
+	line, lastSel := 0, false
 	// row 画一行能移光标的行：光标所在行前面是「›」并整行加底色
 	row := func(s string) string {
 		defer func() { line++ }()
-		if line == m.cur {
+		lastSel = line == m.cur
+		if lastSel {
 			return m.hl(" " + brand + "›" + reset + " " + s)
 		}
 		return "   " + s
 	}
+	// cont 画上一行折下来的续行：光标在那一行时续行也加底色（n059 自查）
+	cont := func(s string) string {
+		if lastSel {
+			return m.hl(s)
+		}
+		return s
+	}
 	switch m.page {
 	case pageProject:
-		m.projectPage(&b, row)
+		m.projectPage(&b, row, cont)
 	case pageAgents:
-		m.agentsPage(&b, row)
+		m.agentsPage(&b, row, cont)
 	case pageTrust:
 		m.trustPage(&b, row)
 	}
 	return fitHeight(b.String(), m.foot(), m.height)
 }
 
-func (m *Settings) projectPage(b *strings.Builder, row func(string) string) {
+func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string) {
 	p := m.project()
 	if p == nil {
 		b.WriteString(dimOn + "   " + T("project.empty") + reset + "\n")
@@ -777,6 +817,9 @@ func (m *Settings) projectPage(b *strings.Builder, row func(string) string) {
 	fmt.Fprintf(b, " %s  %s‹ %s ›%s  %s\n\n", bold+T("project.label")+reset, bold+brand, sanitize(p.Name), reset,
 		dimOn+fmt.Sprintf("%d/%d", m.proj+1, len(m.set.Projects))+reset)
 	b.WriteString(" " + bold + T("project.agents") + reset + "\n")
+	if len(m.set.Agents) == 0 {
+		b.WriteString(dimOn + "   " + T("project.noagents") + reset + "\n")
+	}
 	for _, a := range m.set.Agents {
 		box := dimOn + "·" + reset
 		if picked(p, a.ID) {
@@ -802,20 +845,32 @@ func (m *Settings) projectPage(b *strings.Builder, row func(string) string) {
 	b.WriteString(" " + bold + T("project.tiers") + reset + "\n")
 	for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
 		t := deckstore.Tiers[i]
-		v := dimOn + T("tier.unset") + reset
+		toks := []string{dimOn + T("tier.unset") + reset}
 		if list := p.Models[t]; len(list) > 0 {
-			var parts []string
-			for _, model := range list {
-				parts = append(parts, sanitize(model))
+			toks = nil
+			for i, model := range list {
+				if i > 0 {
+					toks = append(toks, dimOn+" → "+reset+sanitize(model))
+				} else {
+					toks = append(toks, sanitize(model))
+				}
 			}
-			v = strings.Join(parts, dimOn+" → "+reset)
 		}
-		b.WriteString(row(tierLabel(t)+"  "+v) + "\n")
+		lead := tierLabel(t) + "  "
+		width := 0
+		if m.width > 0 {
+			width = m.width - 3 - ansi.StringWidth(lead)
+		}
+		lines := wrapTokens(toks, width) // 多选的模型多时折行，不截掉（n059 自查）
+		b.WriteString(row(lead+lines[0]) + "\n")
+		for _, l := range lines[1:] {
+			b.WriteString(cont(strings.Repeat(" ", 3+ansi.StringWidth(lead))+l) + "\n")
+		}
 	}
 }
 
 // agentsPage：每个全局 agent 一行，全部模型按档位分组、分色列出（owner 选「保持全部列出」），放不下就折行、不截断。
-func (m *Settings) agentsPage(b *strings.Builder, row func(string) string) {
+func (m *Settings) agentsPage(b *strings.Builder, row, cont func(string) string) {
 	if len(m.set.Agents) == 0 {
 		b.WriteString(dimOn + "   " + T("agents.empty") + reset + "\n")
 	}
@@ -834,14 +889,15 @@ func (m *Settings) agentsPage(b *strings.Builder, row func(string) string) {
 		if m.width > 0 {
 			width = m.width - 3 - ansi.StringWidth(lead) // 行首「 › 」或三个空格
 		}
-		lines := wrapTokens(modelTokens(a), width)
+		toks := modelTokens(a)
 		if note != "" {
-			lines[len(lines)-1] += dimOn + note + reset
+			toks = append(toks, dimOn+note+reset) // 「（没装）」也算进宽度（n059 自查：以前接在折完的行后面，窄窗口被截掉）
 		}
+		lines := wrapTokens(toks, width)
 		b.WriteString(row(lead+lines[0]) + "\n")
 		indent := strings.Repeat(" ", 3+ansi.StringWidth(lead))
 		for _, l := range lines[1:] {
-			b.WriteString(indent + l + "\n")
+			b.WriteString(cont(indent+l) + "\n")
 		}
 	}
 	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n")
@@ -875,14 +931,21 @@ func modelTokens(a deckstore.AgentDef) []string {
 	return toks
 }
 
-// wrapTokens 把 token 接成行，一行放不下就换行（width<=0 不折）；换行时去掉 token 开头的分隔。
+// wrapTokens 把 token 接成行，一行放不下就换行（width<=0 不折）；换行时去掉 token 开头的分隔；
+// 单个 token 比一整行还宽就按宽度硬折（n059 自查：很长的模型 id 在窄窗口被截掉）。
 func wrapTokens(toks []string, width int) []string {
 	lines := []string{""}
 	for _, t := range toks {
 		cur := lines[len(lines)-1]
 		if width > 0 && cur != "" && ansi.StringWidth(cur)+ansi.StringWidth(t) > width {
 			t = strings.TrimLeft(strings.TrimPrefix(t, T("sep.list")), " ")
-			lines = append(lines, t)
+			lines = append(lines, "")
+			cur = ""
+		}
+		if width > 0 && cur == "" && ansi.StringWidth(t) > width {
+			parts := strings.Split(ansi.Hardwrap(t, width, true), "\n")
+			lines[len(lines)-1] = parts[0]
+			lines = append(lines, parts[1:]...)
 			continue
 		}
 		lines[len(lines)-1] = cur + t
@@ -891,13 +954,14 @@ func wrapTokens(toks []string, width int) []string {
 }
 
 func (m *Settings) trustPage(b *strings.Builder, row func(string) string) {
-	b.WriteString(" " + bold + T("trust.title") + reset + dimOn + "  " + T("trust.about") + reset + "\n\n")
+	b.WriteString(" " + bold + T("trust.title") + reset + "\n" + m.note(T("trust.about")) + "\n")
 	if len(m.trust) == 0 {
 		b.WriteString(dimOn + "   " + T("trust.empty") + reset + "\n")
 	}
 	for _, g := range m.trust {
-		b.WriteString(row(fmt.Sprintf("%s · %s · %s · %s", sanitize(g.Project), sanitize(g.Tool), sanitize(g.Dir),
-			g.ApprovedAt.Local().Format("01-02 15:04"))) + "\n")
+		// 日期放前面，目录放最后：太长时截掉的是目录的尾巴（n059 自查：以前截掉的是日期）
+		b.WriteString(row(m.fit(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitize(g.Project),
+			sanitize(g.Tool), sanitize(g.Dir)), 3)) + "\n")
 	}
 }
 
