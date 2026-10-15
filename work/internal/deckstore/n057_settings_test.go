@@ -450,3 +450,28 @@ func TestHandEditInvalidatesEveryStaleWindowWithoutClock(t *testing.T) {
 	defer func() { genClock = old }()
 	TestHandEditInvalidatesEveryStaleWindow(t)
 }
+
+// 自查补测（n057 attempt 3）：手改的代数是负数或超过 2^53（加一会溢出成负数、之后每次保存都被拒），读取时明确报错。
+func TestGenerationOutOfRangeIsRefused(t *testing.T) {
+	for _, gen := range []string{"-1", "9223372036854775807", "9007199254740993"} {
+		d := testDirs(t)
+		os.MkdirAll(d.Config, 0o700)
+		for _, name := range []string{"agents.yaml", "projects.yaml"} {
+			os.WriteFile(filepath.Join(d.Config, name), []byte("generation: "+gen+"\n"), 0o600)
+		}
+		if _, err := LoadSettings(d.Config); err == nil || !strings.Contains(err.Error(), "改成 0") {
+			t.Fatalf("generation %s 应报错并说怎么改：%v", gen, err)
+		}
+		if _, err := Open(d); err == nil {
+			t.Fatalf("generation %s：deckd 不应启动", gen)
+		}
+	}
+	d := testDirs(t)
+	os.MkdirAll(d.Config, 0o700)
+	for _, name := range []string{"agents.yaml", "projects.yaml"} {
+		os.WriteFile(filepath.Join(d.Config, name), []byte("generation: 9007199254740992\n"), 0o600)
+	}
+	if _, err := LoadSettings(d.Config); err != nil {
+		t.Fatalf("2^53 本身可以：%v", err)
+	}
+}

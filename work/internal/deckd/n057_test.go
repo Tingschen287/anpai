@@ -325,3 +325,41 @@ func TestPutSettingsReturnsSavedGeneration(t *testing.T) {
 		t.Fatalf("用回的代数接着存：%d %s", code, b)
 	}
 }
+
+// 自查补测：PUT 落盘之后、回包之前另一处（另一个窗口、deck project add）接着存了，回包仍是这次存下的代数；
+// 界面拿它再存应被拒（以前回的是保存后再读的当前设置，会拿到别人的代数、接着盖掉别人的保存）。
+func TestPutSettingsResponseIsNotTheNextWindowsGeneration(t *testing.T) {
+	f := newFixture(t)
+	s := getSettings(t, f)
+	g := s.Generation
+	other, fired := 0, false
+	f.store.OnChange(func(e deckstore.Event) {
+		if e.Kind != "settings" || fired {
+			return
+		}
+		fired = true // 这次保存本身也会触发 hook：只插一次
+		cur := f.store.Settings()
+		cur.Projects[0].Name = "OTHER"
+		gen, err := f.store.ReplaceSettingsAtGen(cur, cur.Generation)
+		if err != nil {
+			t.Errorf("另一个窗口保存：%v", err)
+		}
+		other = gen
+	})
+	code, b := putSettings(f, s, &g)
+	if code != 200 {
+		t.Fatalf("保存：%d %s", code, b)
+	}
+	var out deckstore.Settings
+	if err := json.Unmarshal([]byte(b), &out); err != nil {
+		t.Fatal(err)
+	}
+	if other == 0 || out.Generation == other || out.Generation <= g {
+		t.Fatalf("回包应是这次存下的代数，不是紧接着另一处存的：回 %d、另一处 %d、读到 %d", out.Generation, other, g)
+	}
+	f.store.OnChange(nil)
+	next := out.Generation
+	if code, b := putSettings(f, s, &next); code != 409 {
+		t.Fatalf("另一处存过之后，拿回包的代数再存应 409：%d %s", code, b)
+	}
+}

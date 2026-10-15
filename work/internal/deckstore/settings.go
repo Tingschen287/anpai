@@ -422,7 +422,7 @@ func (s Settings) ResolveModel(projectID, model string) (Resolved, error) {
 
 // LoadSettings 从配置目录读 agents.yaml 与 projects.yaml。agents.yaml 不存在时用 DefaultAgents 并写出来，
 // 方便 owner 在设置界面或文件里改；projects.yaml 不存在就是没有项目。
-// 两份设置文件的代际标记（n049，承接 n050 评审建议）：每次保存两份文件都写同一个 generation（上一代 +1），
+// 两份设置文件的代际标记（n049，承接 n050 评审建议）：每次保存两份文件都写同一个 generation（比上一代大，按时间走，见 nextGen），
 // 并先把上一代留成 .prev。保存在两次写之间失败，会留下一新一旧两份：读取时代数不一致就拒绝，
 // 不会把「各自合法、组合起来新旧混合」的配置当成有效配置用上。手改时保持两份的 generation 一样即可。
 
@@ -478,6 +478,16 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 	default:
 		if err := yaml.Unmarshal(data, &p); err != nil {
 			return a, p, false, fmt.Errorf("projects.yaml 解析不了：%w", err)
+		}
+	}
+	// 代数范围（n057 attempt 3 自查）：手改写了负数或很大的数（加一会溢出成负数，之后每次保存都被拒），
+	// 明确报错、deckd 不启动，免得悄悄存不了
+	for _, g := range []struct {
+		name string
+		gen  int
+	}{{"agents.yaml", a.Generation}, {"projects.yaml", p.Generation}} {
+		if g.gen < 0 || g.gen > maxGeneration {
+			return a, p, false, fmt.Errorf("%s 的 generation %d 不对（应在 0 到 %d 之间）：两份都改成 0 再启动 deck", g.name, g.gen, maxGeneration)
 		}
 	}
 	if haveAgents && a.Generation != p.Generation {
@@ -610,9 +620,13 @@ func saveYAML(path string, v any) error {
 // genClock 是当前时间（微秒；十六位数，JSON 里按浮点读也不失真）。测试可以换掉它。
 var genClock = func() int { return int(time.Now().UnixMicro()) }
 
+// maxGeneration 是文件里代数的上限（2^53：JSON 按浮点读也不失真，离 int 溢出很远；微秒时钟要到约 2255 年才到）。
+const maxGeneration = 1 << 53
+
 // nextGen 返回比 floor 大、也不小于当前时间的新代数，并等时钟走到它再返回（最多等 2 毫秒）：
 // 发出去的代数都不超过发出时的时钟，deckd 重启时取的「当前时间 +1」一定比重启前发出的都大，与重启多快无关
-// （评审 2 探针：同一毫秒里读入手改又重启，按毫秒取会撞号）。floor 远在未来（手改写了很大的代数）时不等，照样 +1。
+// （评审 2 探针：同一毫秒里读入手改又重启，按毫秒取会撞号）。floor 远在未来（手改写了比现在还大的代数，或写入后时钟往回拨）时
+// 不等，照样 +1，这时重启不再保证旧窗口作废（README 写明，与时钟回拨同列）。
 func nextGen(floor int) int {
 	g := max(floor, genClock()) + 1
 	for deadline := time.Now().Add(2 * time.Millisecond); g > genClock() && time.Now().Before(deadline); {
