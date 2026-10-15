@@ -235,11 +235,16 @@ func (m *Settings) addView() (string, []string) {
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
-		line := m.fit(fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state), 3)
-		if i == m.sub.cur {
-			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
-		} else {
-			b.WriteString("   " + line + "\n")
+		lines := m.wrap(fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state), 3) // 长路径折行、不截短
+		for j, l := range lines {
+			switch {
+			case i == m.sub.cur && j == 0:
+				b.WriteString(m.hl(" "+brand+"›"+reset+" "+l) + "\n")
+			case i == m.sub.cur:
+				b.WriteString(m.hl("   "+l) + "\n")
+			default:
+				b.WriteString("   " + l + "\n")
+			}
 		}
 	}
 	b.WriteString("\n" + m.note(T("add.about")))

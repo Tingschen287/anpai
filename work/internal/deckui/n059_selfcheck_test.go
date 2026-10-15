@@ -116,7 +116,7 @@ func TestNewProjectHintFollowsItsOwnSave(t *testing.T) {
 	m3.Start = filepath.Join(root, "ai")
 	press(m3, "down")
 	_, first := m3.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 勾 codex：保存发出，先不让它回来
-	press(m3, "n", "down", "right", "enter", "enter")    // 建项目：保存在路上，记下回来再存
+	press(m3, "n", "down", "right", "enter", "enter")     // 建项目：保存在路上，记下回来再存
 	_, second := m3.Update(first())
 	if strings.Contains(m3.msg, "按 m 起主 agent") || second == nil {
 		t.Fatalf("不含新项目的那次保存回来时不该提示：%q", m3.msg)
@@ -219,5 +219,53 @@ func TestNewProjectCursorsAndLabels(t *testing.T) {
 	press(m, "enter")
 	if m.page != pageProject || m.cur != 0 || m.curs[pageAgents] != 1 {
 		t.Fatalf("建好后：项目页光标在第一行、全局 agent 页光标留着：page=%d cur=%d agents=%d", m.page, m.cur, m.curs[pageAgents])
+	}
+}
+
+// 80×24 及以上（验收）：各页、子视图与加入页每行不超宽、总行数不超高、不截短；很长的授权目录与 CLI 路径折到下一行（n059 自查）。
+func TestStandardSizesNothingTruncated(t *testing.T) {
+	long := "/home/linux/ai/05.code/github/Tingschen287/terminal-deck/work"
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {140, 40}} {
+		m, api := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		m.project().Agents = []string{"claude", "codex"}
+		m.project().Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gpt-6.1-sol"}
+		m.trust = []deckstore.TrustGrant{{Project: "deck", Tool: "codex", Dir: long, ApprovedAt: time.Now()}}
+		for i := range api.tools {
+			api.tools[i].Path = "/home/linux/.local/share/some-very-long-install-prefix/bin/" + api.tools[i].Binary
+		}
+		check := func(what string, must ...string) {
+			t.Helper()
+			v := plainView(m)
+			ls := strings.Split(v, "\n")
+			if len(ls) > size[1] {
+				t.Fatalf("%dx%d %s：超高 %d 行：\n%s", size[0], size[1], what, len(ls), v)
+			}
+			for _, l := range ls {
+				if ansi.StringWidth(l) > size[0] || strings.Contains(l, "…") {
+					t.Fatalf("%dx%d %s：超宽或截短：%q", size[0], size[1], what, l)
+				}
+			}
+			flat := strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "")
+			for _, w := range must {
+				if !strings.Contains(flat, w) {
+					t.Fatalf("%dx%d %s：缺 %q：\n%s", size[0], size[1], what, w, v)
+				}
+			}
+		}
+		check("项目页", "q关闭")
+		press(m, "3")
+		check("授权页", long)
+		press(m, "2", "enter")
+		check("agent 编辑", "esc返回")
+		press(m, "+")
+		check("输入模型 id", "esc取消")
+		press(m, "esc", "esc", "a")
+		check("加入", "some-very-long-install-prefix/bin/grok", "esc返回")
+		press(m, "esc", "1")
+		goRow(t, m, rowTier, "", deckstore.Frontier)
+		press(m, "enter")
+		check("档位多选", "esc返回")
+		press(m, "esc")
 	}
 }

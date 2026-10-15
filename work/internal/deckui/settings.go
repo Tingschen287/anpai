@@ -700,12 +700,12 @@ const (
 	tabOn = "\x1b[1;38;5;16;48;2;180;245;70m"
 )
 
-// fit 把一行截到窗口宽（留出行首 lead 格），截掉的地方写「…」。
-func (m *Settings) fit(s string, lead int) string {
-	if m.width > lead+1 && ansi.StringWidth(s) > m.width-lead-1 {
-		return ansi.Truncate(s, m.width-lead-1, "…")
+// wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
+func (m *Settings) wrap(s string, lead int) []string {
+	if m.width <= lead+1 {
+		return []string{s}
 	}
-	return s
+	return strings.Split(ansi.Wrap(s, m.width-lead-1, ""), "\n")
 }
 
 // note 是一段灰色说明：按窗口宽度折行（子视图底部的长说明，以前超宽就被截掉），每行缩进两格。
@@ -803,7 +803,7 @@ func (m *Settings) View() string {
 	case pageAgents:
 		m.agentsPage(&b, row, cont)
 	case pageTrust:
-		m.trustPage(&b, row)
+		m.trustPage(&b, row, cont)
 	}
 	return fitHeight(b.String(), m.foot(), m.height)
 }
@@ -953,15 +953,19 @@ func wrapTokens(toks []string, width int) []string {
 	return lines
 }
 
-func (m *Settings) trustPage(b *strings.Builder, row func(string) string) {
+func (m *Settings) trustPage(b *strings.Builder, row, cont func(string) string) {
 	b.WriteString(" " + bold + T("trust.title") + reset + "\n" + m.note(T("trust.about")) + "\n")
 	if len(m.trust) == 0 {
 		b.WriteString(dimOn + "   " + T("trust.empty") + reset + "\n")
 	}
 	for _, g := range m.trust {
-		// 日期放前面，目录放最后：太长时截掉的是目录的尾巴（n059 自查：以前截掉的是日期）
-		b.WriteString(row(m.fit(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitize(g.Project),
-			sanitize(g.Tool), sanitize(g.Dir)), 3)) + "\n")
+		// 太长时折行、不截短（n059 自查：80 列下很长的目录被截掉，验收要求 80×24 及以上无截断）
+		lines := m.wrap(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitize(g.Project),
+			sanitize(g.Tool), sanitize(g.Dir)), 3)
+		b.WriteString(row(lines[0]) + "\n")
+		for _, l := range lines[1:] {
+			b.WriteString(cont("   "+l) + "\n")
+		}
 	}
 }
 
