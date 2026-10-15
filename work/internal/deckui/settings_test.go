@@ -19,12 +19,17 @@ type fakeSettingsAPI struct {
 	revoked []string
 	tools   []ToolInfo
 	models  map[string][]string
+	fail    error // 不为 nil：保存返回这个错误（n059：测自动保存失败、冲突）
 }
 
 func (f *fakeSettingsAPI) Load(context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
-	return f.set, f.trust, nil
+	set, err := cloneSettings(f.set) // 与 deckd 一样给一份新的：界面上的改动不能改到「deckd 那边」
+	return set, f.trust, err
 }
 func (f *fakeSettingsAPI) Save(_ context.Context, s deckstore.Settings) (int, error) {
+	if f.fail != nil {
+		return 0, f.fail
+	}
 	f.saved = append(f.saved, s)
 	// 存下的代数不是 +1（n057 rev 127：deckd 按时间前推）：界面要用回来的这个
 	return s.Generation + 1000, s.Validate() // 与 deckd 同一套校验
@@ -65,31 +70,68 @@ func press(m *Settings, keys ...string) {
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		}
 		_, cmd := m.Update(msg)
-		if cmd != nil {
-			if out := cmd(); out != nil {
-				if _, isQuit := out.(tea.QuitMsg); !isQuit {
-					m.Update(out)
-				}
-			}
-		}
+		run(m, cmd)
 	}
 }
 
+// run 执行一个命令并把结果交回界面（Batch 拆开逐个执行；自动保存的命令也在这里同步跑完）。
+func run(m *Settings, cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	out := cmd()
+	switch out := out.(type) {
+	case nil, tea.QuitMsg:
+	case tea.BatchMsg:
+		for _, c := range out {
+			run(m, c)
+		}
+	default:
+		_, next := m.Update(out)
+		run(m, next)
+	}
+}
+
+// n059：分三页（项目、全局 agent、授权），Tab 切换；档位用中文；全局 agent 页列全部模型、没有命令名一列。
 func TestSettingsViewShowsInstalledAndProject(t *testing.T) {
 	m, _ := settingsFixture()
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"全局可用的 agent", "Claude Code", "（没装）", "项目：Agent Deck", "frontier  claude-opus-5-5", "主 agent  claude · frontier", "deck · codex · /tmp/deck"} {
+	for _, want := range []string{"设置", "项目", "全局 agent", "授权 1", "项目  ‹ Agent Deck ›", "用哪些 agent", "✓ Claude Code",
+		"最强  claude-opus-5-5", "主 agent  Claude Code · 最强  起来时用 claude-opus-5-5", "Tab 换页"} {
 		if !strings.Contains(v, want) {
-			t.Fatalf("缺 %q：\n%s", want, v)
+			t.Fatalf("项目页缺 %q：\n%s", want, v)
+		}
+	}
+	for _, bad := range []string{"frontier", "balanced", "economy", "s 保存", "有没保存的改动"} {
+		if strings.Contains(v, bad) {
+			t.Fatalf("项目页不该有 %q：\n%s", bad, v)
+		}
+	}
+	press(m, "tab")
+	v = ansi.Strip(m.View())
+	for _, want := range []string{"Claude Code", "最强 claude-opus-5-5", "日常 claude-sonnet-5-5", "+ 加入本机的 agent"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("全局 agent 页缺 %q：\n%s", want, v)
 		}
 	}
 	for _, l := range strings.Split(v, "\n") {
 		if strings.Contains(l, "Claude Code") && strings.Contains(l, "没装") {
 			t.Fatalf("装了的不应标没装：%q", l)
 		}
-		if strings.Contains(l, "Codex") && strings.Contains(l, " codex ") && !strings.Contains(l, "没装") {
+		if strings.Contains(l, "Codex") && !strings.Contains(l, "没装") && !strings.HasPrefix(strings.TrimSpace(l), "最强") {
 			t.Fatalf("没装的应标出：%q", l)
 		}
+		if strings.Contains(l, " claude  ") || strings.Contains(l, " codex  ") {
+			t.Fatalf("不该有命令名一列：%q", l)
+		}
+	}
+	press(m, "tab")
+	if v = ansi.Strip(m.View()); !strings.Contains(v, "deck · codex · /tmp/deck") || !strings.Contains(v, "d 撤销") {
+		t.Fatalf("授权页：\n%s", v)
+	}
+	press(m, "tab")
+	if m.page != pageProject {
+		t.Fatal("Tab 转一圈回到项目页")
 	}
 }
 
@@ -109,8 +151,8 @@ func TestSettingsPickCycleAndSave(t *testing.T) {
 	// 勾选 kimi，balanced 档轮换到 kimi 的模型
 	m.cur = idx(rowAgentPick, "kimi", "")
 	press(m, " ")
-	if !picked(m.project(), "kimi") || !m.dirty {
-		t.Fatal("应勾上 kimi")
+	if !picked(m.project(), "kimi") || m.dirty || len(api.saved) != 1 {
+		t.Fatal("应勾上 kimi，并已自动保存")
 	}
 	m.cur = idx(rowTier, "", deckstore.Balanced)
 	for i := 0; i < 5 && !strings.HasPrefix(m.project().Models[deckstore.Balanced].First(), "kimi"); i++ {
@@ -145,29 +187,38 @@ func TestSettingsPickCycleAndSave(t *testing.T) {
 	if picked(m.project(), "kimi") || strings.HasPrefix(m.project().Models[deckstore.Balanced].First(), "kimi") || m.project().MainAgent.Agent == "kimi" {
 		t.Fatalf("取消 kimi 后应清掉引用：%+v", *m.project())
 	}
-	press(m, "s")
-	if len(api.saved) != 1 || api.saved[0].Validate() != nil {
-		t.Fatalf("保存的设置应能通过校验：%v", api.saved)
+	// n059：每改一处就自动保存，最后存下的就是界面上的这份，能通过校验，底部显示已保存
+	if len(api.saved) == 0 || m.dirty || m.saveErr != "" {
+		t.Fatalf("应自动保存：%d 次，dirty=%v，%q", len(api.saved), m.dirty, m.saveErr)
 	}
-	if !strings.Contains(m.msg, "保存完成") {
-		t.Fatalf("应提示保存完成：%q", m.msg)
+	last := api.saved[len(api.saved)-1]
+	if last.Validate() != nil || last.Projects[0].MainAgent != m.project().MainAgent || len(last.Projects[0].Agents) != len(m.project().Agents) {
+		t.Fatalf("最后存下的应是界面上的这份：%+v", last.Projects[0])
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "✓ 已保存") {
+		t.Fatalf("应显示已保存：\n%s", ansi.Strip(m.View()))
 	}
 }
 
 func TestSettingsRevokeTrustAndQuitGuard(t *testing.T) {
 	m, api := settingsFixture()
-	m.cur = len(m.rows()) - 1 // 最后一行是授权
+	press(m, "3") // 授权页
+	press(m, "d")
+	if len(api.revoked) != 0 || !strings.Contains(m.msg, "再按一次 d") {
+		t.Fatalf("第一次 d 只提醒（n059：撤销要确认）：%v %q", api.revoked, m.msg)
+	}
 	press(m, "d")
 	if len(api.revoked) != 1 || api.revoked[0] != "deck/codex" {
 		t.Fatalf("应撤销 deck 的 codex 授权：%v", api.revoked)
 	}
-	// 有改动时按 q：先提示，再按一次才关（勾选一个 agent 算改动）
+	// 有改动还没存上时按 q：先提示，再按一次才关（保存还在路上）
+	press(m, "1")
 	for i, r := range m.rows() {
 		if r.kind == rowAgentPick && r.agent == "codex" {
 			m.cur = i
 		}
 	}
-	press(m, " ")
+	m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")}) // 自动保存的命令先不执行：保存在路上
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd != nil {
 		t.Fatal("有没保存的改动时，第一次 q 不应关闭")

@@ -13,7 +13,7 @@ import (
 )
 
 // 设置界面的子视图（n057）：编辑一个全局 agent（模型增删、改 id、标档位、移出）、从本机工具里加入 agent、
-// 编辑项目某一档的模型清单（多选、排顺序）。全部只改界面上的设置，按 s 才整份保存。
+// 编辑项目某一档的模型清单（多选、排顺序）。改动照样自动保存（n059）。
 
 type subKind int
 
@@ -42,6 +42,7 @@ type modelInput struct {
 	loading bool
 	note    string
 	cur     int // 候选里的光标；-1 = 用输入的文字
+	limit   int // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
 }
 
 type toolsMsg struct {
@@ -70,7 +71,7 @@ func (m *Settings) openAgent(id string) tea.Cmd {
 }
 
 func (m *Settings) openAdd() tea.Cmd {
-	m.sub, m.msg = &subView{kind: subAdd}, "正在查本机装了哪些 agent CLI……"
+	m.sub, m.msg = &subView{kind: subAdd}, T("add.loading")
 	return m.fetchTools()
 }
 
@@ -86,7 +87,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case toolsMsg:
 		if msg.err != nil {
-			m.msg = "读不到工具目录：" + errText(msg.err)
+			m.msg = T("tools.fail", errText(msg.err))
 			return nil
 		}
 		m.tools = msg.tools
@@ -103,12 +104,12 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		in := m.sub.input
 		in.loading = false
 		if msg.err != nil {
-			in.note = "列不出模型（" + oneLine(deckstore.Clean(errText(msg.err), 120)) + "）：手填 id"
+			in.note = T("input.listfail", oneLine(deckstore.Clean(errText(msg.err), 120)))
 			return nil
 		}
 		in.all = msg.models
 		if len(msg.models) == 0 {
-			in.note = "这个 CLI 没有列模型的命令：手填 id"
+			in.note = T("input.nolist")
 		}
 	}
 	return nil
@@ -196,11 +197,11 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	}
 	t := opts[m.sub.cur]
 	if !t.Installed {
-		m.msg = t.Name + " 没装（PATH 里找不到 " + t.Binary + "）：先装好再加"
+		m.msg = T("add.missing", t.Name, t.Binary)
 		return nil
 	}
 	if !deckstore.ValidID(t.Tool) || m.agentPtr(t.Tool) != nil {
-		m.msg = "已有 id 为 " + t.Tool + " 的 agent"
+		m.msg = T("add.taken", t.Tool)
 		return nil
 	}
 	a := deckstore.AgentDef{ID: t.Tool, Name: t.Name, Tool: t.Tool, Binary: t.Binary, Agent: t.Agent,
@@ -208,34 +209,35 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	m.set.Agents = append(m.set.Agents, a)
 	m.touch()
 	m.sub = &subView{kind: subAgent, agent: a.ID}
-	m.msg = "已加入 " + t.Name + "（带默认模型，可在这里改）；按 esc 回去在项目里勾选它，按 s 保存"
+	m.msg = T("add.done", t.Name)
 	return nil
 }
 
 func (m *Settings) addView() (string, []string) {
 	var b strings.Builder
-	b.WriteString(m.titleLine(" 加入本机的 agent", "↑↓ 选  ⏎ 加入  esc 返回"))
+	b.WriteString(m.titleLine(" "+T("add.title"), T("add.keys")))
 	if m.tools == nil {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String(), nil
 	}
 	opts := m.addable()
 	if len(opts) == 0 {
-		b.WriteString(dimOn + "  安排 Anpai 认识的 agent 都已加入了" + reset + "\n")
+		b.WriteString(dimOn + "  " + T("add.none") + reset + "\n")
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {
-		cur := " "
-		if i == m.sub.cur {
-			cur = brand + "›" + reset
-		}
 		state := green + "●" + reset + " " + dimOn + sanitize(t.Path) + "  " + sanitize(t.Version) + reset
 		if !t.Installed {
-			state = dimOn + "○ 没装" + reset
+			state = dimOn + "○ " + T("agent.missing") + reset
 		}
-		fmt.Fprintf(&b, " %s %-12s %-11s %s\n", cur, sanitize(t.Name), sanitize(t.Binary), state)
+		line := fmt.Sprintf("%-12s %-11s %s", sanitize(t.Name), sanitize(t.Binary), state)
+		if i == m.sub.cur {
+			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
+		} else {
+			b.WriteString("   " + line + "\n")
+		}
 	}
-	b.WriteString("\n" + dimOn + "  加入时带一份默认模型与档位，加入后可改。命令与启动额外参数不能在这里改。" + reset + "\n")
+	b.WriteString("\n" + m.note(T("add.about")))
 	return b.String(), m.msgFoot()
 }
 
@@ -257,16 +259,16 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		md := &a.Models[m.sub.cur]
 		next := nextTier(md.Tier)
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			m.msg = fmt.Sprintf("%s 在项目「%s」的档位清单里：先在项目里拿掉它，再改档位", md.ID, strings.Join(users, "、"))
+			m.msg = T("model.inuse.tier", md.ID, strings.Join(users, T("sep.list")))
 			return nil
 		}
 		md.Tier = next
 		m.touch()
 	case "+", "a":
-		in := &modelInput{cur: -1}
+		in := &modelInput{cur: -1, limit: 12} // 画面时再按窗口高度缩减
 		m.sub.input = in
 		if t, ok := m.toolInfo(a.Tool); ok && t.CanList {
-			in.loading, in.note = true, "正在问 "+t.Binary+" 有哪些模型……"
+			in.loading, in.note = true, T("input.asking", t.Binary)
 			tool := a.Tool
 			return func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -275,33 +277,33 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 				return toolModelsMsg{tool: tool, models: ms, err: err}
 			}
 		}
-		in.note = "手填模型 id"
+		in.note = T("input.manual")
 	case "e":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
-		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: "改 id（项目档位清单里的也一并改）"}
+		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: T("input.renamenote")}
 	case "x", "delete":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
 		if users := m.projectsWithModel(id); len(users) > 0 {
-			m.msg = fmt.Sprintf("%s 在项目「%s」的档位清单里：先在项目里拿掉它，再删", id, strings.Join(users, "、"))
+			m.msg = T("model.inuse.del", id, strings.Join(users, T("sep.list")))
 			return nil
 		}
 		a.Models = append(a.Models[:m.sub.cur], a.Models[m.sub.cur+1:]...)
 		m.touch()
-		m.msg = "已删掉 " + id
+		m.msg = T("model.deleted", id)
 	case "r":
 		if users := m.projectsUsing(a.ID); len(users) > 0 {
-			m.msg = fmt.Sprintf("项目「%s」勾选了 %s：先在这些项目里取消勾选，再移出", strings.Join(users, "、"), a.Name)
+			m.msg = T("agent.inuse", strings.Join(users, T("sep.list")), a.Name)
 			return nil
 		}
 		if len(a.ExtraArgs) > 0 && !m.sub.confirm {
 			m.sub.confirm = true
-			m.msg = a.Name + " 有手写的启动额外参数，移出后就没了（再加回来也不会恢复，要手改 agents.yaml）：再按一次 r 确认移出"
+			m.msg = T("agent.remove.confirm", a.Name)
 			return nil
 		}
 		name := a.Name
@@ -313,7 +315,7 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		}
 		m.set.Agents = keep
 		m.touch()
-		m.sub, m.msg = nil, "已把 "+name+" 移出全局可用清单（按 s 保存）"
+		m.sub, m.msg = nil, T("agent.removed", name)
 	}
 	return nil
 }
@@ -334,90 +336,99 @@ func (m *Settings) agentView() (string, []string) {
 		return "", nil
 	}
 	var b strings.Builder
-	b.WriteString(m.titleLine(" "+sanitize(a.Name)+"（"+sanitize(a.ID)+"）", "↑↓ 选  ⏎ 换档位  + 加模型  e 改 id  x 删模型  r 移出全局  esc 返回"))
-	cmd := "命令 " + sanitize(a.Binary)
+	title := m.titleLine(" "+T("agent.title", sanitize(a.Name), sanitize(a.ID)), T("agent.keys"))
+	b.WriteString(title)
+	cmd := T("agent.cmd", sanitize(a.Binary))
 	if t, ok := m.toolInfo(a.Tool); ok {
 		if t.Installed {
 			cmd += "  " + sanitize(t.Version)
 		} else {
-			cmd += "  " + orange + "没装" + reset + dimOn
+			cmd += "  " + orange + T("agent.missing") + reset + dimOn
 		}
 	}
-	b.WriteString(dimOn + "  " + cmd + "  · agent-deck 工具 " + sanitize(a.Tool) + reset + "\n")
+	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitize(a.Tool)) + reset + "\n")
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
 			parts = append(parts, sanitize(strings.Join(g, " ")))
 		}
-		b.WriteString(dimOn + "  启动额外参数（安全白名单，只读；要改请手改 ~/.config/deck/agents.yaml）：" + strings.Join(parts, "；") + reset + "\n")
+		b.WriteString(m.note(T("agent.extra", strings.Join(parts, T("sep.semi")))))
 	}
 	b.WriteString("\n")
 	if len(a.Models) == 0 {
-		b.WriteString(dimOn + "  还没有模型：按 + 加" + reset + "\n")
+		b.WriteString(dimOn + "  " + T("agent.nomodels") + reset + "\n")
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(a.Models)-1))
 	for i, md := range a.Models {
-		cur := " "
-		if i == m.sub.cur && m.sub.input == nil {
-			cur = brand + "›" + reset
-		}
 		use := ""
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			use = dimOn + "  项目在用：" + sanitize(strings.Join(users, "、")) + reset
+			use = dimOn + "  " + T("model.used", sanitize(strings.Join(users, T("sep.list")))) + reset
 		}
-		fmt.Fprintf(&b, " %s %-34s %s%s\n", cur, sanitize(md.ID), string(md.Tier), use)
+		id := sanitize(md.ID)
+		if pad := 34 - ansi.StringWidth(id); pad > 0 {
+			id += strings.Repeat(" ", pad)
+		}
+		line := id + " " + tierLabel(md.Tier) + use
+		if i == m.sub.cur && m.sub.input == nil {
+			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
+		} else {
+			b.WriteString("   " + line + "\n")
+		}
 	}
-	b.WriteString("\n" + dimOn + "  档位：frontier 最强、balanced 日常、economy 便宜；项目每档的清单只能放同一档的模型。" + reset)
-	// 输入框、候选与提示固定在底部（n057 attempt 2 自查：模型多时滚动会把输入框滚出屏幕）
+	b.WriteString("\n" + strings.TrimRight(m.note(T("agent.tiers")), "\n"))
+	// 输入框、候选与提示固定在底部（n057 attempt 2 自查：模型多时滚动会把输入框滚出屏幕）；
+	// 候选个数随窗口高度缩减，输入框与顶部「esc 返回」始终放得下（n059，n057 评审 2、3 的已知问题）
 	var foot []string
-	if m.sub.input != nil {
+	if in := m.sub.input; in != nil {
+		in.limit = 12
+		if m.height > 0 {
+			fixed := 1 + 1 + 1 + len(m.msgFoot()) // fitHeight 加的空行、输入行、说明行、提示
+			if in.note != "" {
+				fixed++
+			}
+			in.limit = max(0, min(12, m.height-strings.Count(title, "\n")-fixed-3))
+		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
 	}
 	return b.String(), append(foot, m.msgFoot()...)
 }
 
-// msgFoot 是子视图底部的提示行（拒绝原因、「再按一次确认」等）：固定显示，不随列表滚走（n057 attempt 2 自查）。
+// msgFoot 是子视图底部的提示行（拒绝原因、「再按一次确认」、保存没成等）：固定显示，不随列表滚走（n057 attempt 2 自查）。
 func (m *Settings) msgFoot() []string {
-	if m.msg == "" {
-		return nil
+	var out []string
+	if m.conflict {
+		out = append(out, orange+" "+m.saveErr+reset)
+	} else if m.saveErr != "" {
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
 	}
-	return []string{" " + oneLine(deckstore.Clean(m.msg, 240))}
+	if m.msg != "" {
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, 240)))
+	}
+	return out
 }
 
-// titleLine 是子视图的标题：窄窗口时按键提示另起一行（n057 attempt 2 自查：「esc 返回」被截掉）。
+// titleLine 是子视图的标题：窄窗口时按键提示另起一行，再放不下按组折行（n057 attempt 2 自查：「esc 返回」被截掉）。
 func (m *Settings) titleLine(title, keys string) string {
 	if m.width <= 0 || ansi.StringWidth(title)+3+ansi.StringWidth(keys) <= m.width {
 		return bold + brand + title + reset + dimOn + "   " + keys + reset + "\n\n"
 	}
-	// 按键提示另起一行；还放不下就按「一组按键」折成几行
-	var lines []string
-	cur := ""
-	for _, k := range strings.Split(keys, "  ") {
-		if cur != "" && ansi.StringWidth(cur)+2+ansi.StringWidth(k) > m.width-1 {
-			lines, cur = append(lines, cur), ""
-		}
-		if cur != "" {
-			cur += "  "
-		}
-		cur += k
-	}
-	lines = append(lines, cur)
-	return bold + brand + title + reset + "\n" + dimOn + " " + strings.Join(lines, "\n ") + reset + "\n\n"
+	return bold + brand + title + reset + "\n" + dimOn + " " + strings.Join(wrapKeys(keys, m.width), "\n ") + reset + "\n\n"
 }
 
 // ---------------- 输入模型 id ----------------
 
+// matches 是按输入过滤后的候选（最多 limit 个）。
 func (in *modelInput) matches() []string {
 	var out []string
 	q := strings.ToLower(in.text)
 	for _, s := range in.all {
+		if len(out) >= in.limit {
+			break
+		}
 		if in.rename == "" && q != "" && !strings.Contains(strings.ToLower(s), q) {
 			continue
 		}
 		out = append(out, s)
-		if len(out) >= 12 {
-			break
-		}
 	}
 	return out
 }
@@ -456,16 +467,16 @@ func (m *Settings) inputKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// applyModelInput 加一个模型（档位按光标所在模型的档位，没有就 balanced），或改一个模型的 id（项目档位清单里的一并改）。
+// applyModelInput 加一个模型（档位按光标所在模型的档位，没有就日常），或改一个模型的 id（项目档位清单里的一并改）。
 func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) string {
 	if a == nil {
-		return "agent 不见了"
+		return T("input.gone")
 	}
 	if !deckstore.ValidModelID(id) {
-		return "模型 id 只能是字母数字和 . _ / : @ + -，不能有空格"
+		return T("input.badid")
 	}
 	if owner := m.ownerOf(id); owner != "" && !(rename == id) {
-		return id + " 已是 " + owner + " 的模型"
+		return T("input.taken", id, owner)
 	}
 	if rename != "" {
 		for i := range a.Models {
@@ -484,7 +495,7 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 			}
 		}
 		m.touch()
-		m.msg = rename + " 改成了 " + id
+		m.msg = T("model.renamed", rename, id)
 		return ""
 	}
 	tier := deckstore.Balanced
@@ -494,18 +505,18 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 	a.Models = append(a.Models, deckstore.ModelDef{ID: id, Tier: tier})
 	m.sub.cur = len(a.Models) - 1
 	m.touch()
-	m.msg = "加了 " + id + "（" + string(tier) + "，⏎ 换档位）"
+	m.msg = T("model.added", id, tierName(tier))
 	return ""
 }
 
 func (m *Settings) inputView() string {
 	in := m.sub.input
 	var b strings.Builder
-	title := "加模型"
+	title := T("input.add")
 	if in.rename != "" {
-		title = "改 " + sanitize(in.rename) + " 的 id"
+		title = T("input.rename", sanitize(in.rename))
 	}
-	fmt.Fprintf(&b, "  %s：%s%s▏\n", title, bold, sanitize(in.text)+reset)
+	b.WriteString("  " + T("input.prompt", title) + bold + sanitize(in.text) + reset + "▏\n")
 	if in.note != "" {
 		b.WriteString(dimOn + "  " + oneLine(deckstore.Clean(in.note, 160)) + reset + "\n")
 	}
@@ -517,13 +528,13 @@ func (m *Settings) inputView() string {
 			}
 			taken := ""
 			if o := m.ownerOf(s); o != "" {
-				taken = dimOn + "（已有）" + reset
+				taken = dimOn + T("input.has") + reset
 			}
 			fmt.Fprintf(&b, "   %s %s%s\n", cur, sanitize(s), taken)
 		}
-		b.WriteString(dimOn + "  打字过滤，↑↓ 选候选，⏎ 加入（不选候选就用输入的文字），esc 取消" + reset + "\n")
+		b.WriteString(dimOn + "  " + T("input.addkeys") + reset + "\n")
 	} else {
-		b.WriteString(dimOn + "  ⏎ 确定，esc 取消" + reset + "\n")
+		b.WriteString(dimOn + "  " + T("input.renamekeys") + reset + "\n")
 	}
 	return b.String()
 }
@@ -607,27 +618,31 @@ func (m *Settings) tierView() (string, []string) {
 	}
 	t := m.sub.tier
 	var b strings.Builder
-	b.WriteString(m.titleLine(" "+sanitize(p.Name)+" · "+string(t)+" 档", "↑↓ 选  ⏎/空格 放进/拿掉  [ ] 或 K J 调顺序  esc 返回"))
+	b.WriteString(m.titleLine(" "+T("tierview.title", sanitize(p.Name), tierName(t)), T("tierview.keys")))
 	opts := m.tierOptions(p, t)
 	if len(opts) == 0 {
-		b.WriteString(dimOn + "  勾选的 agent 里没有 " + string(t) + " 档的模型：先在项目里勾选 agent，或在全局 agent 里把模型标成这一档" + reset + "\n")
+		b.WriteString(dimOn + "  " + T("tierview.empty", tierName(t)) + reset + "\n")
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, id := range opts {
-		cur := " "
-		if i == m.sub.cur {
-			cur = brand + "›" + reset
-		}
 		mark := "   "
 		for j, x := range p.Models[t] {
 			if x == id {
 				mark = fmt.Sprintf("%2d.", j+1)
 			}
 		}
-		fmt.Fprintf(&b, " %s %s %-34s %s\n", cur, mark, sanitize(id), dimOn+sanitize(m.ownerOf(id))+reset)
+		name := sanitize(id)
+		if pad := 34 - ansi.StringWidth(name); pad > 0 {
+			name += strings.Repeat(" ", pad)
+		}
+		line := mark + " " + name + " " + dimOn + sanitize(m.agentName(m.ownerOf(id))) + reset
+		if i == m.sub.cur {
+			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
+		} else {
+			b.WriteString("   " + line + "\n")
+		}
 	}
-	b.WriteString("\n" + dimOn + "  只说档位派活时，按序号取第一个额度没显示用尽的；额度未知照常用；全部用尽就不派并说明。\n" +
-		"  点名某个模型时不看这里：勾选的 agent 的模型都能点名用。" + reset + "\n")
+	b.WriteString("\n" + m.note(T("tierview.about")))
 	return b.String(), m.msgFoot()
 }
 

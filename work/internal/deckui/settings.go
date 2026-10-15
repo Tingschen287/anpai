@@ -3,7 +3,9 @@ package deckui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -12,15 +14,18 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
 // agent 设置界面（架构稿 §14.2，n049；n057 owner：「我没看到哪里可以配置我全局可用的agent和模型，还有每个主会话可用的agent和模型」）：
-//   - 全局可用的 agent：从本机装了的 CLI 里加入、移出；每个 agent 的模型增删、改 id、标档位（⏎ 打开 agent）；
-//   - 每个项目（每个主会话）：勾选可用的 agent，三档各一个有顺序的模型清单（可多选、可跨 agent），选主 agent；
-//   - 撤销已记住的 Codex 授权。
+//   - 「项目」页：每个项目（每个主会话）勾选可用的 agent，选主 agent，三档各一个有顺序的模型清单（可多选、可跨 agent）；
+//   - 「全局 agent」页：从本机装了的 CLI 里加入、移出；每个 agent 的模型增删、改 id、标档位（⏎ 打开 agent）；
+//   - 「授权」页：撤销已记住的 Codex 授权。
+// n059（owner：「UIUE能不能再优化得更舒服一点。更简单点」）：分页（Tab 切换）、改完自动保存、档位用中文、
+// 底部一行随光标变化的说明、光标行整行高亮；界面文字都从文字表取（settings_text.go）。
 // 数据与校验在 deckd（n050），这里只编辑并整份 PUT 回去（带上读到的代数，别处改过就拒绝）。
 // 启动额外参数（extra_args）、命令（binary）、agent 标记不在界面里改，只显示并说明去哪改。
 
@@ -105,19 +110,40 @@ type row struct {
 	trust deckstore.TrustGrant
 }
 
+// page 是设置的一页（n059，owner 选「分页，Tab 切换」）：一页只做一件事。
+type page int
+
+const (
+	pageProject page = iota // 这个项目用哪些 agent、主 agent、三档模型
+	pageAgents              // 全局可用的 agent 与它们的模型
+	pageTrust               // 已记住的 Codex 授权
+	pageCount
+)
+
+var pageText = [pageCount]string{"page.project", "page.agents", "page.trust"}
+
 // Settings 是设置界面的 Bubble Tea 模型。
 type Settings struct {
 	API       SettingsAPI
 	Installed func(binary string) bool // 判断一个 agent 是否已装（默认查 PATH）
 	set       deckstore.Settings
 	trust     []deckstore.TrustGrant
-	proj      int // 正在编辑的项目
-	cur       int // 光标所在的行（rows 下标）
-	dirty     bool
-	edits     int // 每次改动加一：保存回来时据此判断保存期间有没有新改动
-	quitAsked bool
-	// reloadAsked：按过一次 R、等确认（与 q 的确认分开：先 R 再 q 不能不提醒就退出，n057 自查）
+	proj      int            // 正在编辑的项目
+	page      page           // 当前页
+	cur       int            // 当前页里光标所在的行（rows 下标）
+	curs      [pageCount]int // 各页离开时的光标，回来时还在原处
+	// 自动保存（n059，owner 选「改完自动保存」）：每改一处就整份保存；同一时间只有一次在路上，路上又改了就回来再存。
+	dirty    bool   // 有改动还没存上
+	edits    int    // 每次改动加一：保存回来时据此判断保存期间有没有新改动
+	saving   bool   // 有一次保存在路上
+	pending  bool   // 保存在路上时又改了
+	conflict bool   // 别处改过（409）：不再自动保存，等 owner 按 R 重新读取
+	saveErr  string // 上一次保存没成的原因
+	saved    bool   // 存成过（底部显示「已保存」）
+	// 再按一次确认：q（有没存上的改动时关闭）、R（丢掉没存上的改动重读）、d（撤销授权）各自确认（n057 自查：不能共用）
+	quitAsked   bool
 	reloadAsked bool
+	revokeAsked bool
 	msg         string
 	loaded      bool
 	width       int
@@ -125,7 +151,7 @@ type Settings struct {
 	// Start 是新建项目时目录浏览的起点（deck settings 进程的当前目录，即 deck up 所在的目录，n055）
 	Start string
 	form  *projectForm // 不为 nil：正在新建项目
-	hint  string       // 下一次保存成功后附在「保存完成」后面的提示（新建项目后的下一步）
+	hint  string       // 下一次保存成功后显示的提示（新建项目后的下一步）
 	sub   *subView     // 不为 nil：正在编辑一个 agent、加入 agent、编辑某一档清单（n057）
 	tools []ToolInfo   // 工具目录（打开「加入」或 agent 时读）
 }
@@ -135,8 +161,7 @@ type loadedMsg struct {
 	trust     []deckstore.TrustGrant
 	err       error
 	trustOnly bool // 只换授权列表，不动正在编辑的设置
-	edits     int  // 发起重读时的改动计数：回来时又有改动，就不拿重读的设置盖掉它们
-	force     bool // owner 按 R 重新读取：丢掉没保存的改动
+	force     bool // owner 按 R 重新读取：丢掉没存上的改动
 }
 type doneMsg struct {
 	what  string
@@ -156,23 +181,14 @@ func (m *Settings) load() tea.Msg {
 	return loadedMsg{set: s, trust: g, err: err}
 }
 
-// reloadAfterSave 保存成功后重读。记下发起时的改动计数：重读回来之前又改了，回来时不覆盖（n049 评审 2 B7）。
-func (m *Settings) reloadAfterSave(edits int) tea.Cmd {
-	return func() tea.Msg {
-		msg := m.load().(loadedMsg)
-		msg.edits = edits
-		return msg
-	}
-}
-
-// loadTrust 重读授权列表，保留没保存的编辑。
+// loadTrust 重读授权列表，保留界面上的设置。
 func (m *Settings) loadTrust() tea.Msg {
 	msg := m.load().(loadedMsg)
 	msg.trustOnly = true
 	return msg
 }
 
-// touch 记一次编辑。
+// touch 记一次编辑（Update 看到改动计数变了就自动保存）。
 func (m *Settings) touch() {
 	m.dirty = true
 	m.edits++
@@ -197,26 +213,39 @@ func (m *Settings) project() *deckstore.ProjectDef {
 	return &m.set.Projects[m.proj]
 }
 
-// rows 是能移光标的行，与画面同序：项目（每个主会话）在上，全局可用的 agent 在下，最后是记住的授权。
+// rows 是当前页能移光标的行，与画面同序。
 func (m *Settings) rows() []row {
 	var rs []row
-	if p := m.project(); p != nil {
+	switch m.page {
+	case pageProject:
+		if p := m.project(); p != nil {
+			for _, a := range m.set.Agents {
+				rs = append(rs, row{kind: rowAgentPick, agent: a.ID})
+			}
+			rs = append(rs, row{kind: rowMain})
+			for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
+				rs = append(rs, row{kind: rowTier, tier: deckstore.Tiers[i]})
+			}
+		}
+	case pageAgents:
 		for _, a := range m.set.Agents {
-			rs = append(rs, row{kind: rowAgentPick, agent: a.ID})
+			rs = append(rs, row{kind: rowGlobal, agent: a.ID})
 		}
-		for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
-			rs = append(rs, row{kind: rowTier, tier: deckstore.Tiers[i]})
+		rs = append(rs, row{kind: rowAddAgent})
+	case pageTrust:
+		for _, g := range m.trust {
+			rs = append(rs, row{kind: rowTrust, trust: g})
 		}
-		rs = append(rs, row{kind: rowMain})
-	}
-	for _, a := range m.set.Agents {
-		rs = append(rs, row{kind: rowGlobal, agent: a.ID})
-	}
-	rs = append(rs, row{kind: rowAddAgent})
-	for _, g := range m.trust {
-		rs = append(rs, row{kind: rowTrust, trust: g})
 	}
 	return rs
+}
+
+// switchPage 换页（Tab、Shift+Tab、数字键）：各页的光标各自记着。
+func (m *Settings) switchPage(to page) {
+	m.curs[m.page] = m.cur
+	m.page = (to%pageCount + pageCount) % pageCount
+	m.cur = m.curs[m.page]
+	m.msg = ""
 }
 
 func (m *Settings) agent(id string) (deckstore.AgentDef, bool) {
@@ -226,6 +255,14 @@ func (m *Settings) agent(id string) (deckstore.AgentDef, bool) {
 		}
 	}
 	return deckstore.AgentDef{}, false
+}
+
+// agentName 是 agent 的显示名（找不到就用 id）。
+func (m *Settings) agentName(id string) string {
+	if a, ok := m.agent(id); ok && a.Name != "" {
+		return a.Name
+	}
+	return id
 }
 
 // modelsFor 是项目某一档可选的模型：本项目勾选的 agent 里，属于这一档的模型（按勾选顺序、模型登记顺序）。
@@ -334,7 +371,7 @@ func (m *Settings) cycleMain() {
 	p := m.project()
 	opts := m.mainOptions(p)
 	if len(opts) == 0 {
-		m.msg = "先在某一档清单里放进一个勾选的 agent 的模型，主 agent 才有得选"
+		m.msg = T("main.none")
 		return
 	}
 	next := opts[0]
@@ -353,22 +390,18 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
 		if msg.err != nil {
-			m.msg = "读不到设置：" + errText(msg.err)
+			m.msg = T("load.fail", errText(msg.err))
 			return m, nil
 		}
 		if msg.trustOnly {
 			m.trust = msg.trust
 			return m, nil
 		}
-		if !msg.force && msg.edits != m.edits {
-			m.trust = msg.trust // 重读途中又改了：设置以界面上的为准，仍标为没保存
-			m.msg = "保存完成（之后又有改动，还没保存）"
-			return m, nil
-		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
 		if msg.force {
-			m.edits++
-			m.sub, m.msg = nil, "已重新读取设置"
+			m.edits++ // 路上那次保存回来时不再当成「存上了现在的设置」
+			m.sub, m.msg = nil, T("reload.done")
+			m.conflict, m.saveErr, m.pending, m.saved = false, "", false, false
 		}
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
@@ -376,52 +409,63 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolsMsg, toolModelsMsg:
 		return m, m.subMsg(msg)
 	case doneMsg:
+		if msg.save {
+			return m, m.saveDone(msg)
+		}
 		if msg.err != nil {
-			m.msg = msg.what + "失败：" + errText(msg.err)
-			if msg.save {
-				m.hint = ""
-				if strings.Contains(msg.err.Error(), "改过") {
-					m.msg += "；按 R 重新读取（会丢掉这里没保存的改动）"
-				}
-			}
+			m.msg = T("action.fail", msg.what, errText(msg.err))
 			return m, nil
 		}
-		m.msg = msg.what + "完成"
-		if msg.save && m.set.Generation == msg.gen {
-			// 保存期间又改了、不重读时，下一次保存带上存下的代数（n057 自查；rev 127 起代数不再是 +1，用 deckd 回的）
-			m.set.Generation = msg.saved
-		}
-		if msg.save {
-			m.msg += "：对之后起的会话生效，已在跑的会话不变"
-		}
-		if msg.save && m.hint != "" {
-			m.msg += "；" + m.hint
-			m.hint = ""
-		}
-		if msg.save && msg.edits == m.edits {
-			return m, m.reloadAfterSave(m.edits)
-		}
-		if msg.save {
-			m.msg += "（保存期间又有改动，还没保存）"
-		}
-		return m, m.loadTrust // 撤销授权不能丢掉没保存的编辑
+		m.msg = T("action.done", msg.what)
+		return m, m.loadTrust
 	case tea.KeyMsg:
-		if m.form != nil {
-			return m, m.formKey(msg)
+		before := m.edits
+		var cmd tea.Cmd
+		switch {
+		case m.form != nil:
+			cmd = m.formKey(msg)
+		case m.sub != nil:
+			cmd = m.subKey(msg)
+		default:
+			_, cmd = m.key(msg.String())
 		}
-		if m.sub != nil {
-			return m, m.subKey(msg)
+		if m.edits != before {
+			cmd = batchCmd(cmd, m.autosave())
 		}
-		return m.key(msg.String())
+		return m, cmd
 	}
 	return m, nil
+}
+
+func batchCmd(a, b tea.Cmd) tea.Cmd {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	}
+	return tea.Batch(a, b)
+}
+
+// autosave 发起一次保存；已有一次在路上就记下，回来后再存（保存是整份的，存最新的那份即可）。
+func (m *Settings) autosave() tea.Cmd {
+	if !m.loaded || m.conflict {
+		return nil
+	}
+	if m.saving {
+		m.pending = true
+		return nil
+	}
+	m.saving = true
+	return m.save()
 }
 
 // save 整份保存（在后台跑，继续编辑不能改到正在发出的那份）。
 func (m *Settings) save() tea.Cmd {
 	set, err := cloneSettings(m.set)
 	if err != nil {
-		m.msg = "保存失败：" + errText(err)
+		m.saving = false
+		m.saveErr = errText(err)
 		return nil
 	}
 	edits := m.edits
@@ -429,8 +473,42 @@ func (m *Settings) save() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		saved, err := m.API.Save(ctx, set)
-		return doneMsg{what: "保存", err: err, save: true, edits: edits, gen: set.Generation, saved: saved}
+		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved}
 	}
+}
+
+// saveDone 处理一次保存的结果：存上了就记下 deckd 回的代数；路上又改了就接着存；别处改过就停下等 R。
+func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
+	m.saving = false
+	if msg.err != nil {
+		m.hint = ""
+		var de *deckclient.Error
+		if errors.As(msg.err, &de) && de.Status == http.StatusConflict {
+			m.conflict, m.pending = true, false
+			m.saveErr = T("save.conflict")
+			return nil
+		}
+		m.saveErr = errText(msg.err)
+		if m.pending && m.edits != msg.edits { // 之后的改动可能已经把它改对了
+			m.pending = false
+			return m.autosave()
+		}
+		m.pending = false
+		return nil
+	}
+	m.saveErr, m.saved = "", true
+	if m.set.Generation == msg.gen {
+		m.set.Generation = msg.saved // 下一次保存带存下的代数（rev 127 起代数不是 +1，用 deckd 回的）
+	}
+	if m.hint != "" {
+		m.msg, m.hint = m.hint, ""
+	}
+	if msg.edits == m.edits {
+		m.dirty, m.pending = false, false
+		return nil
+	}
+	m.pending = false
+	return m.autosave()
 }
 
 func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
@@ -440,26 +518,39 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 	if k != "R" {
 		m.reloadAsked = false
 	}
+	if k != "d" {
+		m.revokeAsked = false
+	}
 	rs := m.rows()
 	m.cur = max(0, min(m.cur, len(rs)-1)) // 列表可能变短或为空
 	switch k {
 	case "q", "esc", "ctrl+c":
-		if m.dirty && !m.quitAsked && k != "ctrl+c" {
+		if (m.dirty || m.saving) && !m.quitAsked && k != "ctrl+c" {
 			m.quitAsked = true
-			m.msg = "有没保存的改动：按 s 保存，或再按一次 q 放弃并关闭"
+			why := m.saveErr
+			if why == "" {
+				why = T("quit.saving")
+			}
+			m.msg = T("quit.unsaved", why)
 			return m, nil
 		}
 		return m, tea.Quit
+	case "tab":
+		m.switchPage(m.page + 1)
+	case "shift+tab":
+		m.switchPage(m.page - 1)
+	case "1", "2", "3":
+		m.switchPage(page(k[0] - '1'))
 	case "up", "k":
 		m.cur = max(0, m.cur-1)
 	case "down", "j":
 		m.cur = max(0, min(len(rs)-1, m.cur+1))
 	case "left", "h":
-		if len(m.set.Projects) > 0 {
+		if m.page == pageProject && len(m.set.Projects) > 0 {
 			m.proj = (m.proj + len(m.set.Projects) - 1) % len(m.set.Projects)
 		}
 	case "right", "l":
-		if len(m.set.Projects) > 0 {
+		if m.page == pageProject && len(m.set.Projects) > 0 {
 			m.proj = (m.proj + 1) % len(m.set.Projects)
 		}
 	case " ", "enter":
@@ -487,22 +578,25 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, m.openAdd()
 		}
 	case "d":
-		if m.cur < len(rs) && rs[m.cur].kind == rowTrust {
-			g := rs[m.cur].trust
-			return m, func() tea.Msg {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				return doneMsg{what: "撤销 " + g.Project + " 的 " + g.Tool + " 授权", err: m.API.Revoke(ctx, g.Project, g.Tool)}
-			}
+		if m.page != pageTrust || m.cur >= len(rs) {
+			break
 		}
-	case "s":
-		if m.loaded {
-			return m, m.save()
+		g := rs[m.cur].trust
+		if !m.revokeAsked {
+			m.revokeAsked = true
+			m.msg = T("trust.confirm", g.Project, g.Tool)
+			return m, nil
+		}
+		m.revokeAsked = false
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return doneMsg{what: T("trust.revoke", g.Project, g.Tool), err: m.API.Revoke(ctx, g.Project, g.Tool)}
 		}
 	case "R":
 		if m.dirty && !m.reloadAsked {
 			m.reloadAsked = true
-			m.msg = "重新读取会丢掉没保存的改动：再按一次 R 确认"
+			m.msg = T("reload.confirm")
 			return m, nil
 		}
 		m.reloadAsked = false
@@ -524,7 +618,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// cycleTier 是在项目区按空格的快捷操作：这一档清单只留一个模型，在可选模型之间轮换；最后一个之后是「不设」。
+// cycleTier 是在项目页按空格的快捷操作：这一档清单只留一个模型，在可选模型之间轮换；最后一个之后是「不设」。
 // 要多选、排顺序按 ⏎ 打开这一档。
 func (m *Settings) cycleTier(tier deckstore.Tier) {
 	p := m.project()
@@ -558,14 +652,15 @@ func (m *Settings) fixMain(p *deckstore.ProjectDef) {
 	if opts := m.mainOptions(p); len(opts) > 0 {
 		p.MainAgent = opts[0]
 	}
-	m.msg = fmt.Sprintf("%s · %s 这一档清单里没有 %s 的模型了：主 agent 改为 %s", old.Agent, old.Tier, old.Agent, mainText(p.MainAgent))
+	m.msg = T("main.moved", m.agentName(old.Agent), tierName(old.Tier), m.mainText(p.MainAgent))
 }
 
-func mainText(ma deckstore.MainAgent) string {
+// mainText 是「agent · 档位」的显示（未选时写明）。
+func (m *Settings) mainText(ma deckstore.MainAgent) string {
 	if ma.Agent == "" {
-		return "（未选）"
+		return T("main.unset")
 	}
-	return ma.Agent + " · " + string(ma.Tier)
+	return m.agentName(ma.Agent) + " · " + tierName(ma.Tier)
 }
 
 const (
@@ -575,7 +670,69 @@ const (
 	reset  = "\x1b[0m"
 	green  = "\x1b[38;5;42m"
 	orange = "\x1b[38;5;214m"
+	// selBg 是光标所在行整行的底色（n059：以前只有一个小「›」，看不出选的是哪一行）
+	selBg = "\x1b[48;5;237m"
+	// tabOn 是当前页签：品牌青柠底、黑字
+	tabOn = "\x1b[1;38;5;16;48;2;180;245;70m"
 )
+
+// note 是一段灰色说明：按窗口宽度折行（子视图底部的长说明，以前超宽就被截掉），每行缩进两格。
+func (m *Settings) note(s string) string {
+	if m.width > 4 {
+		s = ansi.Wrap(s, m.width-3, "")
+	}
+	return dimOn + "  " + strings.ReplaceAll(s, "\n", "\n  ") + reset + "\n"
+}
+
+// tierName 是档位的中文名（n059，owner：「先中文」）：文件、命令行 --tier 与 deckd 接口仍用英文。
+func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }
+
+// tierColor 是档位的颜色：三档一眼分得开。
+func tierColor(t deckstore.Tier) string {
+	switch t {
+	case deckstore.Frontier:
+		return "\x1b[38;5;213m"
+	case deckstore.Balanced:
+		return "\x1b[38;5;81m"
+	}
+	return "\x1b[38;5;150m"
+}
+
+// tierLabel 是带颜色的档位名。
+func tierLabel(t deckstore.Tier) string { return tierColor(t) + tierName(t) + reset }
+
+// hl 给光标所在行整行加底色（行内的 reset 之后补回底色，补满到窗口宽）。
+func (m *Settings) hl(s string) string {
+	s = selBg + strings.ReplaceAll(s, reset, reset+selBg)
+	if m.width > 0 {
+		if w := ansi.StringWidth(s); w < m.width {
+			s += strings.Repeat(" ", m.width-w)
+		}
+	}
+	return s + reset
+}
+
+// tabBar 是顶部：标题与三个页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
+func (m *Settings) tabBar() string {
+	var tabs []string
+	for i, key := range pageText {
+		name := " " + T(key) + " "
+		if page(i) == pageTrust && len(m.trust) > 0 {
+			name = " " + T(key) + fmt.Sprintf(" %d ", len(m.trust))
+		}
+		if page(i) == m.page {
+			tabs = append(tabs, tabOn+name+reset)
+		} else {
+			tabs = append(tabs, dimOn+name+reset)
+		}
+	}
+	w := 64
+	if m.width > 0 {
+		w = min(m.width, 96)
+	}
+	return bold + brand + " " + T("title") + reset + "   " + strings.Join(tabs, " ") + "\n" +
+		dimOn + strings.Repeat("─", w) + reset + "\n\n"
+}
 
 func (m *Settings) View() string {
 	if m.form != nil {
@@ -586,92 +743,260 @@ func (m *Settings) View() string {
 		return fitHeight(body, foot, m.height)
 	}
 	var b strings.Builder
-	keys := "↑↓ 选  ⏎ 打开/改  空格 勾选/轮换  ←→ 换项目  a 加 agent  n 新建项目  d 撤销授权  s 保存  R 重读  q 关闭"
-	if m.width > 0 && m.width < 112 {
-		b.WriteString(bold + brand + " agent 设置" + reset + "\n" + dimOn + " " + keys + reset + "\n\n") // 窄窗口：按键提示另起一行
-	} else {
-		b.WriteString(bold + brand + " agent 设置" + reset + dimOn + "   " + keys + reset + "\n\n")
-	}
+	b.WriteString(m.tabBar())
 	if !m.loaded {
 		b.WriteString("  " + m.msg + "\n")
 		return b.String()
 	}
 	line := 0
-	cursor := func() string {
+	// row 画一行能移光标的行：光标所在行前面是「›」并整行加底色
+	row := func(s string) string {
 		defer func() { line++ }()
 		if line == m.cur {
-			return brand + "›" + reset
+			return m.hl(" " + brand + "›" + reset + " " + s)
 		}
-		return " "
+		return "   " + s
 	}
-	if p := m.project(); p != nil {
-		fmt.Fprintf(&b, bold+" 项目：%s"+reset+dimOn+"（%d/%d，←→ 换）"+reset+"\n", sanitize(p.Name), m.proj+1, len(m.set.Projects))
-		for _, a := range m.set.Agents {
-			box := "[ ]"
-			if picked(p, a.ID) {
-				box = green + "[x]" + reset
-			}
-			fmt.Fprintf(&b, " %s %s %s\n", cursor(), box, sanitize(a.Name))
-		}
-		for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
-			t := deckstore.Tiers[i]
-			v := dimOn + "（不设）" + reset
-			if list := p.Models[t]; len(list) > 0 {
-				var parts []string
-				for _, model := range list {
-					parts = append(parts, sanitize(model))
-				}
-				v = strings.Join(parts, dimOn+" → "+reset)
-			}
-			fmt.Fprintf(&b, " %s %-9s %s\n", cursor(), string(t), v)
-		}
-		main := dimOn + "（未选）" + reset
-		if p.MainAgent.Agent != "" {
-			main = sanitize(p.MainAgent.Agent) + " · " + string(p.MainAgent.Tier)
-			if model := m.mainModel(p); model != "" {
-				main += dimOn + "（起来时用 " + sanitize(model) + "）" + reset
-			} else {
-				main += orange + "（这一档清单里没有它的模型：保存会被拒）" + reset
-			}
-		}
-		fmt.Fprintf(&b, " %s 主 agent  %s\n", cursor(), main)
-		b.WriteString(dimOn + "   勾选的 agent 的模型都能点名用；每档清单是只说档位时的挑选顺序，额度显示用尽的跳过、额度未知照常用。\n" +
-			"   档位行按 ⏎ 多选、排顺序，按空格只留一个并轮换。" + reset + "\n")
-	} else {
-		b.WriteString(dimOn + " 还没有项目：按 n 新建（选一个目录）" + reset + "\n")
+	switch m.page {
+	case pageProject:
+		m.projectPage(&b, row)
+	case pageAgents:
+		m.agentsPage(&b, row)
+	case pageTrust:
+		m.trustPage(&b, row)
 	}
-	b.WriteString("\n")
-	b.WriteString(bold + " 全局可用的 agent" + reset + dimOn + "（⏎ 打开：改模型与档位、移出）" + reset + "\n")
-	if len(m.set.Agents) == 0 {
-		b.WriteString(dimOn + "   还没有：按 a 从本机装了的 CLI 里加入" + reset + "\n")
-	}
-	for _, a := range m.set.Agents {
-		mark, style := green+"●"+reset, ""
-		note := ""
-		if !m.installed(a) {
-			mark, style, note = dimOn+"○"+reset, dimOn, "（没装）"
-		}
-		fmt.Fprintf(&b, " %s %s %s%-12s %-11s %s%s%s\n", cursor(), mark, style, sanitize(a.Name), sanitize(a.Tool), modelsSummary(a), note, reset)
-	}
-	fmt.Fprintf(&b, " %s %s\n", cursor(), dimOn+"+ 加入本机的 agent（a）"+reset)
-	b.WriteString("\n" + bold + " 已记住的 Codex 授权" + reset + "\n")
-	if len(m.trust) == 0 {
-		b.WriteString(dimOn + "   （没有）" + reset + "\n")
-	}
-	for _, g := range m.trust {
-		fmt.Fprintf(&b, " %s %s · %s · %s · %s\n", cursor(), sanitize(g.Project), sanitize(g.Tool), sanitize(g.Dir), g.ApprovedAt.Local().Format("01-02 15:04"))
-	}
-	var foot []string
-	if m.dirty {
-		foot = append(foot, orange+" 有没保存的改动（s 保存）"+reset)
-	}
-	if m.msg != "" {
-		foot = append(foot, " "+oneLine(deckstore.Clean(m.msg, 240)))
-	}
-	return fitHeight(b.String(), foot, m.height)
+	return fitHeight(b.String(), m.foot(), m.height)
 }
 
-// fitHeight 让主界面放得进窗口（n057 自查：矮窗口时顶部按键提示与光标行被裁掉）：顶部标题（到第一个空行为止）与底部提示固定，
+func (m *Settings) projectPage(b *strings.Builder, row func(string) string) {
+	p := m.project()
+	if p == nil {
+		b.WriteString(dimOn + "   " + T("project.empty") + reset + "\n")
+		return
+	}
+	fmt.Fprintf(b, " %s  %s‹ %s ›%s  %s\n\n", bold+T("project.label")+reset, bold+brand, sanitize(p.Name), reset,
+		dimOn+fmt.Sprintf("%d/%d", m.proj+1, len(m.set.Projects))+reset)
+	b.WriteString(" " + bold + T("project.agents") + reset + "\n")
+	for _, a := range m.set.Agents {
+		box := dimOn + "·" + reset
+		if picked(p, a.ID) {
+			box = green + "✓" + reset
+		}
+		note := ""
+		if !m.installed(a) {
+			note = dimOn + "  " + T("agent.missing") + reset
+		}
+		b.WriteString(row(box+" "+sanitize(a.Name)+note) + "\n")
+	}
+	b.WriteString("\n")
+	main := dimOn + T("main.unset") + reset
+	if p.MainAgent.Agent != "" {
+		main = sanitize(m.mainText(p.MainAgent))
+		if model := m.mainModel(p); model != "" {
+			main += dimOn + "  " + T("main.uses", sanitize(model)) + reset
+		} else {
+			main += orange + "  " + T("main.nomodel") + reset
+		}
+	}
+	b.WriteString(row(bold+T("main.label")+reset+"  "+main) + "\n\n")
+	b.WriteString(" " + bold + T("project.tiers") + reset + "\n")
+	for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
+		t := deckstore.Tiers[i]
+		v := dimOn + T("tier.unset") + reset
+		if list := p.Models[t]; len(list) > 0 {
+			var parts []string
+			for _, model := range list {
+				parts = append(parts, sanitize(model))
+			}
+			v = strings.Join(parts, dimOn+" → "+reset)
+		}
+		b.WriteString(row(tierLabel(t)+"  "+v) + "\n")
+	}
+}
+
+// agentsPage：每个全局 agent 一行，全部模型按档位分组、分色列出（owner 选「保持全部列出」），放不下就折行、不截断。
+func (m *Settings) agentsPage(b *strings.Builder, row func(string) string) {
+	if len(m.set.Agents) == 0 {
+		b.WriteString(dimOn + "   " + T("agents.empty") + reset + "\n")
+	}
+	const nameW = 14
+	for _, a := range m.set.Agents {
+		mark, style, note := green+"●"+reset, "", ""
+		if !m.installed(a) {
+			mark, style, note = dimOn+"○"+reset, dimOn, "  "+T("agent.missing")
+		}
+		name := sanitize(a.Name)
+		if pad := nameW - ansi.StringWidth(name); pad > 0 {
+			name += strings.Repeat(" ", pad)
+		}
+		lead := mark + " " + style + name + reset + " "
+		width := 0
+		if m.width > 0 {
+			width = m.width - 3 - ansi.StringWidth(lead) // 行首「 › 」或三个空格
+		}
+		lines := wrapTokens(modelTokens(a), width)
+		if note != "" {
+			lines[len(lines)-1] += dimOn + note + reset
+		}
+		b.WriteString(row(lead+lines[0]) + "\n")
+		indent := strings.Repeat(" ", 3+ansi.StringWidth(lead))
+		for _, l := range lines[1:] {
+			b.WriteString(indent + l + "\n")
+		}
+	}
+	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n")
+}
+
+// modelTokens 把一个 agent 的模型按档位从高到低分组：每组第一个带档位名，组内用「、」接，组间空三格。折行只在这些地方断。
+func modelTokens(a deckstore.AgentDef) []string {
+	var toks []string
+	for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
+		t := deckstore.Tiers[i]
+		first := true
+		for _, md := range a.Models {
+			if md.Tier != t {
+				continue
+			}
+			if first {
+				sep := ""
+				if len(toks) > 0 {
+					sep = "   "
+				}
+				toks = append(toks, sep+tierLabel(t)+" "+sanitize(md.ID))
+				first = false
+			} else {
+				toks = append(toks, T("sep.list")+sanitize(md.ID))
+			}
+		}
+	}
+	if len(toks) == 0 {
+		toks = append(toks, dimOn+T("agents.nomodels")+reset)
+	}
+	return toks
+}
+
+// wrapTokens 把 token 接成行，一行放不下就换行（width<=0 不折）；换行时去掉 token 开头的分隔。
+func wrapTokens(toks []string, width int) []string {
+	lines := []string{""}
+	for _, t := range toks {
+		cur := lines[len(lines)-1]
+		if width > 0 && cur != "" && ansi.StringWidth(cur)+ansi.StringWidth(t) > width {
+			t = strings.TrimLeft(strings.TrimPrefix(t, T("sep.list")), " ")
+			lines = append(lines, t)
+			continue
+		}
+		lines[len(lines)-1] = cur + t
+	}
+	return lines
+}
+
+func (m *Settings) trustPage(b *strings.Builder, row func(string) string) {
+	b.WriteString(" " + bold + T("trust.title") + reset + dimOn + "  " + T("trust.about") + reset + "\n\n")
+	if len(m.trust) == 0 {
+		b.WriteString(dimOn + "   " + T("trust.empty") + reset + "\n")
+	}
+	for _, g := range m.trust {
+		b.WriteString(row(fmt.Sprintf("%s · %s · %s · %s", sanitize(g.Project), sanitize(g.Tool), sanitize(g.Dir),
+			g.ApprovedAt.Local().Format("01-02 15:04"))) + "\n")
+	}
+}
+
+// foot 是底部：保存状态、上一个动作的结果、随光标变化的一行说明、这一页能按的键。窗口矮时先省按键行、再省说明行。
+func (m *Settings) foot() []string {
+	var out []string
+	switch {
+	case m.conflict:
+		out = append(out, orange+" "+m.saveErr+reset)
+	case m.saving || (m.dirty && m.saveErr == ""):
+		out = append(out, dimOn+" "+T("status.saving")+reset)
+	case m.saveErr != "":
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
+	case m.saved:
+		out = append(out, green+" "+T("status.saved")+reset)
+	}
+	if m.msg != "" {
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, 240)))
+	}
+	if m.height <= 0 || m.height >= 13 {
+		if h := m.rowHelp(); h != "" {
+			out = append(out, dimOn+" "+h+reset)
+		}
+	}
+	if m.height <= 0 || m.height >= 16 {
+		for _, l := range wrapKeys(m.pageKeys(), m.width) {
+			out = append(out, dimOn+" "+l+reset)
+		}
+	}
+	if m.width <= 0 {
+		return out
+	}
+	var wrapped []string // 窄窗口：提示折行，不截掉（按键行已按组折过）
+	for _, l := range out {
+		wrapped = append(wrapped, strings.Split(ansi.Wrap(l, m.width-1, ""), "\n")...)
+	}
+	return wrapped
+}
+
+// rowHelp 是光标所在行的一行说明（n059：代替以前固定的大段灰字）。
+func (m *Settings) rowHelp() string {
+	rs := m.rows()
+	if len(rs) == 0 {
+		switch m.page {
+		case pageProject:
+			return T("help.noproject")
+		case pageAgents:
+			return T("help.add")
+		}
+		return ""
+	}
+	switch r := rs[max(0, min(m.cur, len(rs)-1))]; r.kind {
+	case rowAgentPick:
+		return T("help.pick")
+	case rowMain:
+		return T("help.main")
+	case rowTier:
+		return T("help.tier")
+	case rowGlobal:
+		return T("help.agent")
+	case rowAddAgent:
+		return T("help.add")
+	case rowTrust:
+		return T("help.trust")
+	}
+	return ""
+}
+
+// pageKeys 是这一页能按的键（两个空格分组，窄窗口按组折行）。
+func (m *Settings) pageKeys() string {
+	switch m.page {
+	case pageProject:
+		return T("keys.project")
+	case pageAgents:
+		return T("keys.agents")
+	}
+	return T("keys.trust")
+}
+
+// wrapKeys 把按键提示按「一组按键」（两个空格分隔）折成放得下的几行（n057 attempt 2 自查：窄窗口「esc 返回」被截掉）。
+func wrapKeys(keys string, width int) []string {
+	if width <= 0 || ansi.StringWidth(keys)+1 <= width {
+		return []string{keys}
+	}
+	var lines []string
+	cur := ""
+	for _, k := range strings.Split(keys, "  ") {
+		if cur != "" && ansi.StringWidth(cur)+2+ansi.StringWidth(k) > width-1 {
+			lines, cur = append(lines, cur), ""
+		}
+		if cur != "" {
+			cur += "  "
+		}
+		cur += k
+	}
+	return append(lines, cur)
+}
+
+// fitHeight 让画面放得进窗口（n057 自查：矮窗口时顶部按键提示与光标行被裁掉）：顶部标题（到第一个空行为止）与底部提示固定，
 // 中间按光标所在行（「›」）滚动，上下还有内容时写明。
 func fitHeight(body string, foot []string, height int) string {
 	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
@@ -701,26 +1026,10 @@ func fitHeight(body string, foot []string, height int) string {
 	start := max(0, min(at-show/2, len(rest)-show))
 	end := min(len(rest), start+show)
 	out := append([]string{}, lines[:head]...)
-	out = append(out, dimOn+fmt.Sprintf("   ↑ 上面还有 %d 行", start)+reset)
+	out = append(out, dimOn+"   "+T("scroll.up", start)+reset)
 	out = append(out, rest[start:end]...)
-	out = append(out, dimOn+fmt.Sprintf("   ↓ 下面还有 %d 行", len(rest)-end)+reset)
+	out = append(out, dimOn+"   "+T("scroll.down", len(rest)-end)+reset)
 	return strings.Join(append(out, foot...), "\n")
-}
-
-// modelsSummary 是全局区一行里的模型摘要：档位首字母 + 模型 id，按档位从高到低。
-func modelsSummary(a deckstore.AgentDef) string {
-	var models []string
-	for i := len(deckstore.Tiers) - 1; i >= 0; i-- {
-		for _, md := range a.Models {
-			if md.Tier == deckstore.Tiers[i] {
-				models = append(models, string(md.Tier)[:1]+":"+sanitize(md.ID))
-			}
-		}
-	}
-	if len(models) == 0 {
-		return dimOn + "（还没有模型：⏎ 打开后按 + 加）" + reset
-	}
-	return strings.Join(models, " ")
 }
 
 // RunSettings 跑设置界面（布局里按 F9 开的窗口，关掉就回到布局）。

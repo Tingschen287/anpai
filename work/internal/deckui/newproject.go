@@ -14,7 +14,7 @@ import (
 )
 
 // 设置界面里新建项目（n055）：按 n 打开目录浏览，从 deck up 所在的目录开始；选好目录后确认项目 id（按目录名生成，可改），
-// 回车即建好并保存。agent、三档模型、主 agent 先按全局清单给默认值，之后在原来的几行里改。
+// 回车即建好，随即自动保存（n059）。agent、三档模型、主 agent 先按全局清单给默认值，之后在「项目」页里改。
 
 // projectForm 是新建项目的表单。
 type projectForm struct {
@@ -38,7 +38,7 @@ func (f *projectForm) enter(dir string) {
 	dir = filepath.Clean(dir)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		f.err = "读不了 " + dir + "：" + errText(err)
+		f.err = T("form.cantread", dir, errText(err))
 		if f.dir == "" { // 起点就读不了：从家目录开始
 			if home, herr := os.UserHomeDir(); herr == nil && home != dir {
 				f.enter(home)
@@ -137,7 +137,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 	if f.chosen == "" { // 浏览目录
 		switch k {
 		case "esc", "q", "ctrl+c":
-			m.form, m.msg = nil, "没有新建项目"
+			m.form, m.msg = nil, T("form.cancel")
 		case "up", "k":
 			f.cur = max(0, f.cur-1)
 		case "down", "j":
@@ -190,7 +190,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 func (m *Settings) choose(dir string) {
 	f := m.form
 	if err := deckstore.CheckPath(dir); err != nil {
-		f.err = "这个目录不能用作项目目录：" + errText(err)
+		f.err = T("form.badpath", errText(err))
 		return
 	}
 	taken := map[string]bool{}
@@ -202,7 +202,7 @@ func (m *Settings) choose(dir string) {
 	}
 	for _, p := range m.set.Projects {
 		if real(p.Path) == real(dir) {
-			f.err = fmt.Sprintf("这个目录已经是项目「%s」了", sanitize(p.Name))
+			f.err = T("form.taken", sanitize(p.Name))
 			return
 		}
 		taken[p.ID] = true
@@ -210,11 +210,11 @@ func (m *Settings) choose(dir string) {
 	f.chosen, f.id, f.err = dir, projectIDFor(dir, taken), ""
 }
 
-// createProject 按表单建项目：先在本地按 deckd 的同一套规则校验（不合规就说明、不写盘），再整份保存。
+// createProject 按表单建项目：先在本地按 deckd 的同一套规则校验（不合规就说明、不写盘），通过后由自动保存整份保存。
 func (m *Settings) createProject() tea.Cmd {
 	f := m.form
 	if st, err := os.Stat(f.chosen); err != nil || !st.IsDir() {
-		f.err = "目录不在了：" + f.chosen
+		f.err = T("form.gone", f.chosen)
 		return nil
 	}
 	next, err := cloneSettings(m.set)
@@ -225,16 +225,17 @@ func (m *Settings) createProject() tea.Cmd {
 	p := m.defaultProject(f.id, f.chosen)
 	next.Projects = append(next.Projects, p)
 	if err := next.Validate(); err != nil {
-		f.err = "建不了：" + errText(err)
+		f.err = T("form.invalid", errText(err))
 		return nil
 	}
 	m.set = next
 	m.proj, m.cur = len(m.set.Projects)-1, 0
+	m.switchPage(pageProject)
 	m.form = nil
-	m.touch()
-	m.msg = fmt.Sprintf("已建项目「%s」，正在保存……", sanitize(p.Name))
-	m.hint = fmt.Sprintf("已建项目「%s」，回到侧栏选中它按 m 起主 agent", sanitize(p.Name))
-	return m.save()
+	m.touch() // Update 看到改动就自动保存（n059）
+	m.msg = T("form.created", sanitize(p.Name))
+	m.hint = T("form.next", sanitize(p.Name))
+	return nil
 }
 
 // formView 画表单。
@@ -242,9 +243,9 @@ func (m *Settings) formView() string {
 	f := m.form
 	var b strings.Builder
 	if f.chosen == "" {
-		b.WriteString("\x1b[1;38;2;180;245;70m 新建项目 · 选目录\x1b[0m\x1b[38;5;242m   ↑↓ 选  → 或 ⏎ 进入  ← 上一级  在「用这个目录」上按 ⏎ 选定  esc 取消\x1b[0m\n\n")
+		b.WriteString(m.titleLine(" "+T("form.browse.title"), T("form.browse.keys")))
 		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitize(f.dir))
-		rows := []string{"\x1b[38;5;42m[用这个目录]\x1b[0m"}
+		rows := []string{green + T("form.usethis") + reset}
 		for _, s := range f.subdirs {
 			rows = append(rows, sanitize(s)+"/")
 		}
@@ -266,19 +267,23 @@ func (m *Settings) formView() string {
 			fmt.Fprintf(&b, " %s %s\n", mark, rows[i])
 		}
 		if len(f.subdirs) == 0 {
-			b.WriteString("\x1b[38;5;242m   （没有子目录）\x1b[0m\n")
+			b.WriteString(dimOn + "   " + T("form.nosub") + reset + "\n")
 		}
 	} else {
-		b.WriteString("\x1b[1;38;2;180;245;70m 新建项目 · 确认\x1b[0m\x1b[38;5;242m   输入改项目 id  ⏎ 建好并保存  esc 回到选目录\x1b[0m\n\n")
-		fmt.Fprintf(&b, "   目录     %s\n", sanitize(f.chosen))
-		fmt.Fprintf(&b, "   项目 id  \x1b[4m%s\x1b[0m▏\n", sanitize(f.id))
+		b.WriteString(m.titleLine(" "+T("form.confirm.title"), T("form.confirm.keys")))
+		fmt.Fprintf(&b, "   %s  %s\n", T("form.dir"), sanitize(f.chosen))
+		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", T("form.id"), sanitize(f.id))
 		p := m.defaultProject(f.id, f.chosen)
-		main := "\x1b[38;5;242m（没有可用的 agent）\x1b[0m"
+		main := dimOn + T("form.noagent") + reset
 		if p.MainAgent.Agent != "" {
-			main = sanitize(p.MainAgent.Agent) + " · " + string(p.MainAgent.Tier)
+			main = sanitize(m.mainText(p.MainAgent))
 		}
-		fmt.Fprintf(&b, "   agent    %s\n   主 agent %s\n", sanitize(strings.Join(p.Agents, "、")), main)
-		b.WriteString("\x1b[38;5;242m   （agent、三档模型、主 agent 建好后可以在设置里改）\x1b[0m\n")
+		var names []string
+		for _, id := range p.Agents {
+			names = append(names, m.agentName(id))
+		}
+		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", T("form.agents"), sanitize(strings.Join(names, T("sep.list"))), T("form.main"), main)
+		b.WriteString(dimOn + "   " + T("form.later") + reset + "\n")
 	}
 	if f.err != "" {
 		b.WriteString("\n\x1b[38;5;196m " + oneLine(deckstore.Clean(f.err, 240)) + "\x1b[0m\n")

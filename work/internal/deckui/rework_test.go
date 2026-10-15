@@ -1,11 +1,14 @@
 package deckui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
@@ -44,8 +47,9 @@ func TestEmptySettingsKeysDoNotPanic(t *testing.T) {
 
 func TestCursorClampsWhenListShrinks(t *testing.T) {
 	m, api := settingsFixture()
+	press(m, "3")             // 授权页
 	m.cur = len(m.rows()) + 5 // 例如授权被撤销后列表变短
-	press(m, "d")
+	press(m, "d", "d")        // n059：撤销要再按一次确认
 	if len(api.revoked) != 1 || m.cur != len(m.rows())-1 {
 		t.Fatalf("光标应收回到最后一行（授权行）再撤销：cur=%d revoked=%v", m.cur, api.revoked)
 	}
@@ -83,69 +87,81 @@ func TestSingleLineFieldsDropNewlinesAndTabs(t *testing.T) {
 
 func TestRevokeKeepsUnsavedEdits(t *testing.T) {
 	m, api := settingsFixture()
-	press(m, "down", "enter") // 勾上第二个 agent（codex），未保存
+	api.fail = errors.New("deckd 不在") // 存不上：改动留在界面上
+	press(m, "down", "enter")         // 勾上第二个 agent（codex）
 	if !picked(m.project(), "codex") || !m.dirty {
-		t.Fatal("前提：有一处没保存的改动")
+		t.Fatal("前提：有一处没存上的改动")
 	}
+	api.fail = nil
 	api.trust = nil // deckd 那边撤销后授权列表变空
-	m.cur = len(m.rows()) - 1
+	press(m, "3")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	drain(m, cmd)
 	if len(api.revoked) != 1 || len(m.trust) != 0 {
 		t.Fatalf("应撤销并刷新授权列表：revoked=%v trust=%v", api.revoked, m.trust)
 	}
 	if !picked(m.project(), "codex") || !m.dirty {
-		t.Fatal("撤销授权丢掉了没保存的改动")
+		t.Fatal("撤销授权丢掉了没存上的改动")
 	}
 }
 
+// n059 自动保存：保存在路上时又改了，发出去的仍是那一刻的设置；回来后自动把最新的再存一次，存完才算干净。
 func TestSaveSendsSnapshotAndKeepsLaterEdits(t *testing.T) {
 	m, api := settingsFixture()
-	press(m, "down", "enter") // 勾 codex
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	press(m, "down", "enter") // 保存还没回来时又勾一个
+	press(m, "down")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 勾 codex：自动保存发出
+	press(m, "down")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 保存还没回来时又勾一个
+	if !m.pending || len(api.saved) != 0 {
+		t.Fatal("保存在路上时不发第二个，记下回来再存")
+	}
 	drain(m, cmd)
-	if len(api.saved) != 1 {
-		t.Fatalf("应保存一次：%d", len(api.saved))
+	if len(api.saved) != 2 {
+		t.Fatalf("应存两次：%d", len(api.saved))
 	}
-	sent := api.saved[0].Projects[0].Agents
-	if strings.Join(sent, ",") != "claude,codex" {
-		t.Fatalf("发出去的应是按 s 那一刻的设置，后来的编辑不能混进去：%v", sent)
+	if sent := strings.Join(api.saved[0].Projects[0].Agents, ","); sent != "claude,codex" {
+		t.Fatalf("第一次发出去的应是那一刻的设置，后来的编辑不能混进去：%v", sent)
 	}
-	if len(m.project().Agents) != 3 || !m.dirty || !strings.Contains(m.msg, "还没保存") {
-		t.Fatalf("保存期间的改动应留着并标为没保存：agents=%v dirty=%v msg=%q", m.project().Agents, m.dirty, m.msg)
-	}
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	drain(m, cmd)
-	if m.dirty || len(api.saved) != 2 {
-		t.Fatalf("再存一次后应干净：dirty=%v saved=%d", m.dirty, len(api.saved))
+	if len(api.saved[1].Projects[0].Agents) != 3 || api.saved[1].Generation != api.saved[0].Generation+1000 || m.dirty || m.saving {
+		t.Fatalf("第二次存最新的、带存下的代数，之后干净：%v dirty=%v", api.saved[1].Projects[0].Agents, m.dirty)
 	}
 }
 
-// n049 评审 2 B7：保存成功后的重读还没回来时又改了：重读回来不覆盖新改动，仍标为没保存。
-func TestReloadAfterSaveKeepsEditsMadeMeanwhile(t *testing.T) {
+// n059：别处改过（409）就停下自动保存、提示按 R；按 R 重读后恢复自动保存。存不上时之后的改动照样再试。
+func TestConflictStopsAutosaveUntilReload(t *testing.T) {
 	m, api := settingsFixture()
-	press(m, "down", "enter") // 勾 codex
-	_, save := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	done := save()
-	api.set, _ = cloneSettings(api.saved[0]) // deckd 那边存下的是按 s 那一刻的设置
-	_, reload := m.Update(done)
-	if reload == nil {
-		t.Fatal("保存成功后应重读")
+	api.fail = &deckclient.Error{Status: 409, Message: "changed"}
+	press(m, "down", "enter")
+	if !m.conflict || !strings.Contains(ansi.Strip(m.View()), "按 R 重新读取") {
+		t.Fatalf("冲突要停下并提示按 R：\n%s", ansi.Strip(m.View()))
 	}
-	press(m, "down", "enter") // 重读回来之前又勾了一个
-	agents := strings.Join(m.project().Agents, ",")
-	m.Update(reload())
-	if strings.Join(m.project().Agents, ",") != agents || !m.dirty || !strings.Contains(m.msg, "还没保存") {
-		t.Fatalf("重读覆盖了新改动：%v（之前 %s）dirty=%v msg=%q", m.project().Agents, agents, m.dirty, m.msg)
+	api.fail = nil
+	press(m, "down", "enter")
+	if len(api.saved) != 0 {
+		t.Fatal("冲突后不再自动保存（会盖掉别处的改动）")
 	}
-	// 没有新改动时，重读照常换成 deckd 存下的设置、清掉 dirty
-	_, save = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	done = save()
-	api.set, _ = cloneSettings(api.saved[1])
-	_, reload = m.Update(done)
-	m.Update(reload())
-	if m.dirty || strings.Join(m.project().Agents, ",") != agents {
-		t.Fatalf("没有新改动时重读应照常：%v dirty=%v", m.project().Agents, m.dirty)
+	press(m, "R")
+	if !strings.Contains(m.msg, "再按一次 R") {
+		t.Fatalf("有没存上的改动时 R 要确认：%q", m.msg)
+	}
+	press(m, "R")
+	if m.conflict || m.dirty || picked(m.project(), "codex") {
+		t.Fatal("R 重读后丢掉没存上的改动、恢复正常")
+	}
+	press(m, "up", "up", "down", "enter")
+	if len(api.saved) != 1 || m.dirty {
+		t.Fatalf("重读后改动又能自动保存：%d", len(api.saved))
+	}
+	// 存不上（不是冲突）：显示原因，下一处改动再试
+	api.fail = errors.New("坏了")
+	press(m, "enter")
+	if !m.dirty || m.conflict || !strings.Contains(ansi.Strip(m.View()), "没存上：坏了") {
+		t.Fatalf("存不上要显示原因：\n%s", ansi.Strip(m.View()))
+	}
+	api.fail = nil
+	press(m, "enter")
+	if m.dirty || len(api.saved) != 2 {
+		t.Fatalf("下一处改动再试就存上：%d", len(api.saved))
 	}
 }

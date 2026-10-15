@@ -60,7 +60,7 @@ func TestNewProjectFromDirectoryBrowser(t *testing.T) {
 		t.Fatalf("选定目录、按目录名生成 id：%+v", m.form)
 	}
 	v = ansi.Strip(m.View())
-	if !strings.Contains(v, "项目 id  alpha-proj") || !strings.Contains(v, "主 agent claude · frontier") {
+	if !strings.Contains(v, "项目 id  alpha-proj") || !strings.Contains(v, "主 agent  Claude Code · 最强") {
 		t.Fatalf("确认页：\n%s", v)
 	}
 	backspace(m, 5)
