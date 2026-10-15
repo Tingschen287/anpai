@@ -407,8 +407,12 @@ func (m *Settings) agentView() (string, []string) {
 				foot := m.fitLines(append(strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n"), m.msgFoot()...))
 				return strings.Count(m.fitWidth(title), "\n")+1+len(foot)+3 <= m.height
 			}
-			for in.limit > 0 && !fits() {
-				in.limit--
+			in.limit = 0
+			if fits() {
+				for in.limit = 12; in.limit > 0 && !fits(); in.limit-- {
+				}
+			} else {
+				in.limit = 12 // 一个候选都不列也放不下（底部很长）：整块一起滚，候选照常列出、PgDn 翻得到（attempt 2 自查）
 			}
 		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")

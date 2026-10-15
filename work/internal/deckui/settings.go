@@ -1226,7 +1226,8 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	// 不把底部当成光标块（attempt 2 自查：以前 ↑↓ 选行时看不见光标行）；没有光标（输入框打开时）就从底部第一行看起
 	at, blockEnd, cursor := 0, 0, false
 	for i := 0; i < bodyLen; i++ {
-		if strings.Contains(rest[i], "›") {
+		// 认「品牌色 + ›」：数据（模型 id、项目名）经 Clean 去掉了转义码，里面的「›」不会被当成光标（attempt 2 自查）
+		if strings.Contains(rest[i], brand+"›") {
 			at, cursor = i, true
 		}
 	}
@@ -1265,7 +1266,7 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	st.off = start - base
 	end := min(len(rest), start+show)
 	window := rest[start:end]
-	if sticky && st.off == 0 && start > at {
+	if sticky && show > 1 && st.off == 0 && start > at { // 只剩 1 行时不固定，否则块里一行也看不到（attempt 2 自查）
 		window = append([]string{rest[at]}, rest[start+1:end]...)
 	}
 	out := append([]string{}, lines[:head]...)

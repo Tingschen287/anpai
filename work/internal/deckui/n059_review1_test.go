@@ -457,3 +457,58 @@ func TestScrollingCancelsConfirm(t *testing.T) {
 		t.Fatalf("块内 ↓ 后不再算确认：cur=%d asked=%v", m.cur, m.reloadAsked)
 	}
 }
+
+// attempt 2 自查：正文窗口只剩 1 行时块内翻页不固定光标行，否则块里一行也看不到。
+func TestTallBlockWithOneLineWindowShowsContent(t *testing.T) {
+	body := "title\n\n" + selBg + " " + brand + "›" + reset + selBg + " head" + reset + "\n"
+	for i := 0; i < 10; i++ {
+		body += selBg + fmt.Sprintf("   c%d", i) + reset + "\n"
+	}
+	st := scrollState{blockOff: 3}
+	v := ansi.Strip(fitHeightState(body, []string{"foot"}, 7, 1, &st))
+	if st.show != 1 || !strings.Contains(v, "c2") {
+		t.Fatalf("只剩 1 行时显示块里的内容：show=%d\n%s", st.show, v)
+	}
+}
+
+// attempt 2 自查：数据（模型 id）里带「›」时不被当成光标行，窗口仍跟着真正的光标。
+func TestCursorMarkInDataIsIgnored(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	a := m.agentPtr("claude")
+	for i := 0; i < 40; i++ {
+		a.Models = append(a.Models, deckstore.ModelDef{ID: fmt.Sprintf("model-%02d", i), Tier: deckstore.Frontier})
+	}
+	a.Models = append(a.Models, deckstore.ModelDef{ID: "evil›model", Tier: deckstore.Frontier})
+	goRow(t, m, rowGlobal, "claude", "")
+	press(m, "enter")
+	if v := plainView(m); m.sub == nil || m.sub.cur != 0 || !strings.Contains(v, "› claude-opus-5-5") {
+		t.Fatalf("光标在第一个模型、窗口跟着它：\n%s", v)
+	}
+}
+
+// attempt 2 自查：底部很长、整块一起滚时，加模型的候选照常列出（缩到 0 也放不下就不缩），PgDn 翻得到。
+func TestCandidatesKeptWhenFootOverflows(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	goRow(t, m, rowGlobal, "claude", "")
+	press(m, "enter", "+")
+	var cands []string
+	for i := 0; i < 30; i++ {
+		cands = append(cands, fmt.Sprintf("cand-%02d", i))
+	}
+	m.sub.input.all = cands
+	m.saveErr = strings.Repeat("一时存不上的原因；", 70) + "到此为止"
+	seen := ""
+	for i := 0; i < 14; i++ {
+		v := plainView(m)
+		if len(strings.Split(v, "\n")) > 24 {
+			t.Fatal("超高")
+		}
+		seen += strings.ReplaceAll(v, " ", "")
+		m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	}
+	if m.sub.input.limit == 0 || !strings.Contains(seen, "cand-00") || !strings.Contains(seen, "到此为止") {
+		t.Fatalf("候选照常列出、报错全文翻得到：limit=%d", m.sub.input.limit)
+	}
+}
