@@ -416,7 +416,7 @@ func idle() {
 				signal.Stop(sig)
 				syscall.Exec(self, os.Args, os.Environ()) // 成功就不回来；失败（新文件还没写完等）照旧跑
 				signal.Notify(sig, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
-				started, _ = os.Stat(self) // 同一个文件不再反复试
+				// 不记下这次失败的文件：写完后下一轮再试（n058 自查：记下了就永远不换）；坏文件每 3 秒试一次，代价可忽略
 			}
 		}
 	}
