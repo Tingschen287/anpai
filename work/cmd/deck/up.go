@@ -20,6 +20,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/termprobe"
@@ -347,6 +348,20 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 	logf("client %d：30 秒内没能通知 deckd（%s；client 已列出：%v）", pid, op, seen)
 }
 
+// idleLines 是空闲页的文字（第一行是产品名，窄时只写「Anpai」，n058）。
+func idleLines(w int) []string {
+	lines := []string{
+		deckui.BrandFor(w),
+		"",
+		"左栏点一个会话，它就显示在这里；会话放回后台照常运行。",
+		"",
+	}
+	for _, k := range layout.Keys {
+		lines = append(lines, fmt.Sprintf("%-6s %s", k.Key, k.What))
+	}
+	return lines
+}
+
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
 func idle() {
 	draw := func() {
@@ -359,15 +374,7 @@ func idle() {
 		if im := logo.Deck(); im != nil && h >= 12+8+2 && w >= 20 {
 			art = logo.Blocks(im, 16, 8) // 高度放不下就不画，免得挤掉按键说明（n056 自查）
 		}
-		lines := []string{
-			"Agent Deck",
-			"",
-			"左栏点一个会话，它就显示在这里；会话放回后台照常运行。",
-			"",
-		}
-		for _, k := range layout.Keys {
-			lines = append(lines, fmt.Sprintf("%-6s %s", k.Key, k.What))
-		}
+		lines := idleLines(w)
 		fmt.Print("\x1b[2J\x1b[?25l")
 		top := max(1, (h-len(lines)-len(art)-1)/2)
 		for i, l := range art {

@@ -1,6 +1,6 @@
 package agentdeck
 
-// Agent Deck v1 的 tmux 操作（n049，架构稿 §1、§2、§7）。
+// 「安排 Anpai」v1 的 tmux 操作（n049，架构稿 §1、§2、§7）。
 //
 // 两台 server：
 //   - 布局 server（deck 自己的，socket 默认 $TMUX_TMPDIR/tmux-UID/deck）：拼左/中/右/下布局、显隐面板、选中窗格、

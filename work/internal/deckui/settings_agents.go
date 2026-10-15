@@ -221,7 +221,7 @@ func (m *Settings) addView() (string, []string) {
 	}
 	opts := m.addable()
 	if len(opts) == 0 {
-		b.WriteString(dimOn + "  Agent Deck 认识的 agent 都已加入了" + reset + "\n")
+		b.WriteString(dimOn + "  安排 Anpai 认识的 agent 都已加入了" + reset + "\n")
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {

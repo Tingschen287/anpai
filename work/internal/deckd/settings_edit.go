@@ -33,7 +33,7 @@ func checkAgentEdits(cur, next deckstore.Settings) error {
 		t, ok := CatalogTool(a.Tool)
 		switch {
 		case !ok:
-			return fmt.Errorf("新加的 agent %s 用的工具 %q 不在 Agent Deck 认识的工具里", a.ID, a.Tool)
+			return fmt.Errorf("新加的 agent %s 用的工具 %q 不在安排 Anpai 认识的工具里", a.ID, a.Tool)
 		case a.Binary != t.Binary || a.Agent != t.Agent:
 			return fmt.Errorf("新加的 agent %s 的命令与 agent 标记须照工具目录（%s）", a.ID, t.Binary)
 		case len(a.ExtraArgs) > 0:

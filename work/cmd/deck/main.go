@@ -1,4 +1,4 @@
-// Command deck 是 Agent Deck v1 的入口（n050 起）。
+// Command deck 是「安排 Anpai」（原名 Agent Deck，adr_032）v1 的入口（n050 起）。
 //
 //	deck up                     打开四区布局（没有 deckd 就在布局后台窗口里起它）
 //	deck daemon                 启动后台服务 deckd

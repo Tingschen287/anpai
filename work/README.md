@@ -134,7 +134,12 @@ worker rounds、frontier calls、tokens 和 cost 四列，没有耗时；命令�
 只读子命令会把它吐出来。从事件时间戳自己推一个出来是猜，所以这里不猜。上限能读到，
 照常显示。
 
-## Agent Deck v1：deck 与 deckd（n050 起，建设中）
+## 安排 Anpai v1：deck 与 deckd（n050 起，建设中）
+
+**产品名**（n058，adr_032）：本产品公开名是「安排 Anpai」（侧栏窄处只写「Anpai」；字标 Anpai 用 Geist SemiBold，「安排」用思源黑体，logo 仍是 A4）。
+原名 Agent Deck 与 upstream agent-deck（`github.com/asheshgoplani/agent-deck`）撞名，2026-10-15 owner 选定新名。只改了界面上看得到的名字：命令 `deck`、`deckd`、
+配置与状态路径（`$XDG_CONFIG_HOME/deck`、`$XDG_STATE_HOME/deck`）、环境变量、键位、tmux socket 与会话名、Go 包名 `internal/agentdeck`（它指 upstream agent-deck 的适配层）都没变。
+本节下面凡写 agent-deck 的都是指上游那个程序。上文与 `internal/agentdeck` 里说的「本仓自己那个同名的 Agent Deck」指旧的 Python 启动器，它不在这次改名范围内。
 
 `work` 是旧界面，n052 前保留。新的 `deck` 命令（`cmd/deck`）是 v1 的入口，设计见项目 `1.design/2026-10-10-agent-deck-v1-architecture.md`。
 
@@ -187,7 +192,7 @@ agent-deck tmux server 的嵌套 client（`deck center`），右栏与下栏是�
   - 项目目录同样进 scope，所以设置里项目 `path` 最长 300 字节。
 - **agent 设置**：`$XDG_CONFIG_HOME/deck/agents.yaml`（全局可用的 agent 与模型档位，首次运行生成默认值）、`projects.yaml`（每个项目选用哪些 agent、三档各用哪个模型、预算包络）、`panels.yaml`（面板开关）。
   - 两份文件每次保存写同一个 `generation`（比上一代大，按时间走，是十几位的数），并把上一代留成 `.prev`。保存在两次写之间失败会留下一新一旧：读取时代数不一致就拒绝（deckd 不启动），按提示把较新的那份换回 `.prev`（没有 `.prev` 说明它是第一次写，删掉即回到默认），或核对后把两份的 generation 改成一样。第一次保存时 `projects.yaml` 还不存在，缺的那份按第 0 代算，同样能识别。手改时保持两份的 generation 一样即可；旧文件两份都没有这个字段，算同一代。
-  - **在设置界面里改**（n057）：全局 agent 可加入（只列 Agent Deck 认识、本机装了的 CLI：claude、codex、opencode、grok、Antigravity 的 `agy`、gemini，带一份默认模型；kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）、移出（有项目勾选着就不让）；每个 agent 的模型可增删、改 id（项目清单里的一并改）、换档位（项目在用的先拿掉才能改）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（用该 CLI 自己的登录与网络，20 秒为限），claude、codex 手填。命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
+  - **在设置界面里改**（n057）：全局 agent 可加入（只列安排 Anpai 认识、本机装了的 CLI：claude、codex、opencode、grok、Antigravity 的 `agy`、gemini，带一份默认模型；kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）、移出（有项目勾选着就不让）；每个 agent 的模型可增删、改 id（项目清单里的一并改）、换档位（项目在用的先拿掉才能改）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（用该 CLI 自己的登录与网络，20 秒为限），claude、codex 手填。命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
   - **每档有序多选**（n057，owner：「排第一的优先，额度用尽就换下一个」）：`projects.yaml` 的 `models` 每档是一个列表（旧的一档一个字符串照读，保存时写成列表）。只说档位派活时按顺序取第一个额度没显示用尽的（看板确知用尽才跳过，未知照常用）；frontier 全都用尽时照用第一个、交给原有的额度门上报 owner，其他档位说明原因、不派。点名某个模型时不看清单：勾选的 agent 的模型都能点名用。主 agent 用它那一档清单里它自己的第一个模型（用尽就取它的下一个）。`deck agent` 起子 agent 前问 deckd（`GET /v1/resolve`）这一档现在会派哪个，指纹按它算。
   - **保存**：整份保存要带上读到的 `generation`，别处（另一个设置窗口、`deck project add`）在这期间存过就拒绝（409），按 R 重新读取。手改了两份文件（deckd 运行时或停着时都算），界面保存也拒绝、不盖掉手改：运行时 deck 读入改过的那份，按 R 看到后再改；deck（deckd）每次启动后，启动前打开的设置窗口第一次保存都会被拒，按 R 重新读取再存，所以停着时的手改也不会被盖掉。代数按时间走（微秒），只增不减，不另记状态文件；系统时钟往回拨、或文件里的 generation 比现在的时间还大（手写了很大的数）时，这条保证不成立。generation 手改成负数或超过 2^53，deck 不启动并提示改成 0。模型 id 只能是字母数字和 `. _ / : @ + -`（它会进 CLI 的命令行），保存时与派工时都查。主 agent 那一档清单里没有它的模型也拒绝。保存后对之后起的会话生效，已在跑的会话不变。
   - **grok、Antigravity**（n057）：不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。上游 launch 不接受自定义工具的 `--model`，deck 按 `-c "grok --model <模型>"` 传；上游没登记时会把它认成别的工具起，deck 发现后停掉、不送任务。确认登记的命令不是 codex、没声明 codex 兼容时，Codex trust 门不再问。

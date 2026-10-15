@@ -611,7 +611,7 @@ func withDeckCommand(brief string) string {
 
 // subBrief 是送给子 agent 的第一条消息：任务正文，加上收尾时必须上报的约定（§14.4）。
 func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
-	return fmt.Sprintf(withDeckCommand(`你是项目「%s」的子 agent（%s），由主 agent 通过 Agent Deck 派出。
+	return fmt.Sprintf(withDeckCommand(`你是项目「%s」的子 agent（%s），由主 agent 通过「安排 Anpai」派出。
 
 任务：
 %s
@@ -626,7 +626,7 @@ func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
 // MainBrief 是送给主 agent 的第一条消息：项目、工具用法与规矩（§5）。
 func MainBrief(p deckstore.ProjectDef) string {
 	env := p.Envelope
-	return fmt.Sprintf(withDeckCommand(`你是项目「%s」（%s，目录 %s）的主 agent，通过 Agent Deck 工作。
+	return fmt.Sprintf(withDeckCommand(`你是项目「%s」（%s，目录 %s）的主 agent，通过「安排 Anpai」工作。
 
 规矩：
 - 只和 owner 对接。方案先与 owner 确认，再开子 agent。
@@ -866,7 +866,7 @@ func projectctlGraphStart(script string) GraphStartFunc {
 	return func(ctx context.Context, p deckstore.ProjectDef, node, actor, model string, route deckstore.Tier) (int, error) {
 		c := projectctl.NewClient(p.GraphRoot, script)
 		res, err := c.Start(ctx, projectctl.StartRequest{NodeID: node, Actor: actor, Role: "workbench_executor",
-			RouteClass: string(route), Model: model, Reason: "Agent Deck 主 agent 派出"})
+			RouteClass: string(route), Model: model, Reason: "安排 Anpai 主 agent 派出"})
 		if err != nil {
 			return 0, err
 		}

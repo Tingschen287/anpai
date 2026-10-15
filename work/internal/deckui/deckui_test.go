@@ -183,7 +183,7 @@ func TestSidebarSixelReservesSpaceAndPlacesImages(t *testing.T) {
 		sess = append(sess, im)
 	}
 	if head < 0 || f.Images[head].Col != 1 || !strings.HasPrefix(f.Images[head].Data, "\x1bP0;1;0q\"1;1;18;18") ||
-		!strings.HasPrefix(ansi.Strip(f.Lines[0]), "    Agent Deck") {
+		!strings.HasPrefix(ansi.Strip(f.Lines[0]), "    安排 Anpai") || strings.Contains(f.Lines[0], "Agent Deck") {
 		t.Fatalf("标题前应有 deck logo 并留出两格：%q", ansi.Strip(f.Lines[0]))
 	}
 	if len(sess) != 3 { // claude、codex、kimi 有素材；grok 也有——启动中的会话同样画
@@ -200,7 +200,7 @@ func TestSidebarSixelReservesSpaceAndPlacesImages(t *testing.T) {
 		}
 	}
 	none := (&Sidebar{Data: sample(), Mode: "none"}).Render(40, 30)
-	if len(none.Images) != 0 || !strings.HasPrefix(ansi.Strip(none.Lines[0]), " Agent Deck") || !strings.Contains(none.Lines[0], "38;2;180;245;70") {
+	if len(none.Images) != 0 || !strings.HasPrefix(ansi.Strip(none.Lines[0]), " 安排 Anpai") || strings.Contains(none.Lines[0], "Agent Deck") || !strings.Contains(none.Lines[0], "38;2;180;245;70") {
 		t.Fatalf("字母徽章模式：不画图，标题是品牌色文字：%q", none.Lines[0])
 	}
 	blocks := (&Sidebar{Data: sample(), Mode: "blocks"}).Render(40, 30)

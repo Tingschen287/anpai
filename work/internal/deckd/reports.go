@@ -254,7 +254,7 @@ func (s *Server) reportText(rep deckstore.Report) string {
 	} else if rep.Source == deckstore.ReportGraph {
 		label = "账本提醒"
 	}
-	return fmt.Sprintf("［Agent Deck 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
+	return fmt.Sprintf("［安排 Anpai 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
 }
 
 // maxWait 是 deck agent wait 一次最多等多久。

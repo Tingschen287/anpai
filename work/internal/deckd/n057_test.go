@@ -101,7 +101,7 @@ func TestPutSettingsKeepsLaunchFieldsOutOfUI(t *testing.T) {
 	try("改工具名", func(s *deckstore.Settings) { s.Agents[idx(s, "codex")].Tool = "claude" }, 400, "工具名")
 	try("新加目录外的工具", func(s *deckstore.Settings) {
 		s.Agents = append(s.Agents, deckstore.AgentDef{ID: "evil", Name: "E", Tool: "bash", Binary: "bash", Agent: true})
-	}, 400, "不在 Agent Deck 认识的工具里")
+	}, 400, "不在安排 Anpai 认识的工具里")
 	// 默认清单里没有 gemini：按目录加入，但命令不照目录
 	try("新加的命令不照目录", func(s *deckstore.Settings) {
 		s.Agents = append(s.Agents, deckstore.AgentDef{ID: "gemini", Name: "G", Tool: "gemini", Binary: "/tmp/gemini"})

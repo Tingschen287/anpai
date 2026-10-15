@@ -312,10 +312,10 @@ func (s *Sidebar) Render(w, h int) Frame {
 	var images []Image
 	// 标题：能画 sixel 时前面放 deck 自己的 logo（1 行 × 2 格），否则只有品牌色文字（n056，adr_031）
 	if im := s.deckIcon(); im != "" {
-		lines = append(lines, Fit("    \x1b[1;38;2;180;245;70mAgent Deck\x1b[0m", w), "")
+		lines = append(lines, Fit("    \x1b[1;38;2;180;245;70m"+BrandFor(w-4)+"\x1b[0m", w), "")
 		images = append(images, Image{Row: 0, Col: 1, Data: im})
 	} else {
-		lines = append(lines, Fit("\x1b[1;38;2;180;245;70m Agent Deck\x1b[0m", w), "")
+		lines = append(lines, Fit("\x1b[1;38;2;180;245;70m "+BrandFor(w-1)+"\x1b[0m", w), "")
 	}
 	s.normalize()
 	ordered := s.Data.Ordered()

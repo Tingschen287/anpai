@@ -9,7 +9,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
-// 工具目录（n057）：设置界面「加入本机的 agent」从这里挑。每一项是 Agent Deck 认识、能经 agent-deck 起会话的终端 agent CLI：
+// 工具目录（n057）：设置界面「加入本机的 agent」从这里挑。每一项是安排 Anpai 认识、能经 agent-deck 起会话的终端 agent CLI：
 // 上游内置的（claude、codex、opencode、gemini），以及在 agent-deck 配置里登记成自定义工具、模型经命令传的（grok、antigravity）。
 // kimi 不在这里（n057 自查）：它也是自定义工具，但 deck 没核实过它的模型参数，上游 launch 又不接受自定义工具的 --model。
 // binary 与 agent 标记固定在这里，界面不能改（checkAgentEdits）；模型清单只是加入时的初值，加入后可在界面里改。
@@ -34,7 +34,7 @@ const (
 	ec = deckstore.Economy
 )
 
-// Catalog 是 Agent Deck 认识的工具。默认模型取自 2026-10-15 各 CLI 的 models 输出与 owner 现用的配置。
+// Catalog 是安排 Anpai 认识的工具。默认模型取自 2026-10-15 各 CLI 的 models 输出与 owner 现用的配置。
 var Catalog = []CatalogEntry{
 	{Tool: "claude", Name: "Claude Code", Binary: "claude",
 		Models: []deckstore.ModelDef{md("claude-opus-5-5", fr), md("claude-fable-5-1", fr), md("claude-sonnet-5-5", ba), md("claude-haiku-5-5", ec)}},

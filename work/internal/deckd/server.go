@@ -1,4 +1,4 @@
-// Package deckd 是 Agent Deck 的后台服务（n050，架构稿 §3）：unix socket 上的 HTTP + JSON，另有一条 SSE。
+// Package deckd 是「安排 Anpai」的后台服务（n050，架构稿 §3）：unix socket 上的 HTTP + JSON，另有一条 SSE。
 //
 // 它是全部 deck 状态的唯一写入者，按调用者身份（identity 包）分配权限。界面（侧栏、标签条、面板）与主 agent 的
 // deck agent 命令都通过它读写。Graph 写入边界不变：这里不调任何 projectctl 写命令。

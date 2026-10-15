@@ -1,4 +1,4 @@
-// Package panels 是 Agent Deck 的内置面板（n050，架构稿 §7）：需要你决策、额度、项目进度、通知、agent 在干嘛。
+// Package panels 是「安排 Anpai」的内置面板（n050，架构稿 §7）：需要你决策、额度、项目进度、通知、agent 在干嘛。
 //
 // 每个面板是布局 server 某个窗格里的一个独立程序，只经 deckd 读数据、做动作。这里的 Render* 是纯函数，
 // 便于测试；Run 把它们包成 bubbletea 程序，每 2 秒向 deckd 取一次。取不到就把原因显示出来，不显示旧数据冒充新数据。

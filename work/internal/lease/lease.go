@@ -89,7 +89,7 @@ const (
 	EventConfirm  = "handback_confirmed"
 	EventRenew    = "renewed"
 	EventExternal = "external_takeover" // 投递前查到不经 Work Deck 的接入
-	// EventAutoHandback 是 Agent Deck 的自动交还（owner 在 n048 验收时选择，架构稿 §14.1）：
+	// EventAutoHandback 是「安排 Anpai」的自动交还（owner 在 n048 验收时选择，架构稿 §14.1）：
 	// owner 离开被接管的会话、中间窗格已确认只读之后，记下摘要并立即交还，不再等确认。
 	EventAutoHandback = "auto_handback"
 )
@@ -303,7 +303,7 @@ func (s *Store) OwnerReturn(sessionID string, hb Handback) error {
 	return s.commitLocked(sessionID, &next, Event{At: s.now(), SessionID: sessionID, Kind: EventReturn, From: HolderOwner, To: HolderOwner, Reason: "owner 已回来，自动投递仍暂停，等确认交还"})
 }
 
-// OwnerHeld 列出由 owner 持有、且没有挂着待确认摘要的会话：Agent Deck 的接管中或交还未完成的会话。
+// OwnerHeld 列出由 owner 持有、且没有挂着待确认摘要的会话：安排 Anpai 的接管中或交还未完成的会话。
 // deckd 重启时用它恢复接管状态（n050 评审 R5）。
 func (s *Store) OwnerHeld() []Lease {
 	s.mu.Lock()
@@ -318,7 +318,7 @@ func (s *Store) OwnerHeld() []Lease {
 	return out
 }
 
-// AutoHandback 是 Agent Deck 的自动交还：会话须由 owner 持有；完整摘要随事件同一次落盘，写入权立即回到 workbench。
+// AutoHandback 是「安排 Anpai」的自动交还：会话须由 owner 持有；完整摘要随事件同一次落盘，写入权立即回到 workbench。
 // 调用方负责先确认 owner 的输入已关闭（中间窗格只读），再调这里。
 func (s *Store) AutoHandback(sessionID string, hb Handback) error {
 	s.mu.Lock()

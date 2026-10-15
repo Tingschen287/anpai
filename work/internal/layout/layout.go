@@ -1,4 +1,4 @@
-// Package layout 拼 Agent Deck v1 的四区布局（n049，架构稿 §1、§7）。
+// Package layout 拼「安排 Anpai」v1 的四区布局（n049，架构稿 §1、§7）。
 //
 //	┌────────┬──────────────────────────┬──────────┐
 //	│        │ 标签条（1 行，deck tabs） │          │
@@ -115,7 +115,7 @@ func (s Spec) panelCmd(p deckstore.PanelDef) string {
 func BaseConf(s Spec) string {
 	s = s.withDefaults()
 	var b strings.Builder
-	b.WriteString("# Agent Deck v1 布局 server（deck up 生成，勿手改）\n")
+	b.WriteString("# 安排 Anpai v1 布局 server（deck up 生成，勿手改）\n")
 	for _, line := range []string{
 		"set -g prefix None",
 		"set -g prefix2 None",
@@ -321,7 +321,7 @@ func BindingsConf(s Spec, b Built) string {
 		return "run-shell -b " + Quote(s.deckCmd(append([]string{"layout", "toggle", region}, s.sockets()...)...))
 	}
 	var w strings.Builder
-	w.WriteString("# Agent Deck v1 按键（deck up 生成，勿手改）\n")
+	w.WriteString("# 安排 Anpai v1 按键（deck up 生成，勿手改）\n")
 	fmt.Fprintf(&w, "bind -n F2 send-keys -t %s F2\n", b.Tabs)
 	// Ctrl-Q：放回后台。在布局 server 上截获、交给标签条按隐藏规则处理（架构稿 §7），只读与可写时都有效，
 	// 不靠 agent-deck 在它那台 server 上的 C-q 断开绑定、也不必断开重连中间 client（n049 真机演示后改）
