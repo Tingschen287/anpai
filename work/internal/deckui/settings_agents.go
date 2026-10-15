@@ -173,6 +173,10 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 		m.sub = nil
 		_, cmd := m.key("R")
 		return cmd
+	case "s":
+		// 存不上时底部让按 s 重试：子视图里也认（n059 自查 2）
+		_, cmd := m.key("s")
+		return cmd
 	case "ctrl+c":
 		return tea.Quit
 	case "up", "k":
@@ -231,7 +235,7 @@ func (m *Settings) addView() (string, []string) {
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {
-		state := green + "●" + reset + " " + dimOn + sanitize(t.Path) + "  " + sanitize(t.Version) + reset
+		state := green + "●" + reset + " " + dimOn + sanitizePath(t.Path) + "  " + sanitize(t.Version) + reset
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
@@ -378,11 +382,16 @@ func (m *Settings) agentView() (string, []string) {
 		if pad := 34 - ansi.StringWidth(id); pad > 0 {
 			id += strings.Repeat(" ", pad)
 		}
-		line := id + " " + tierLabel(md.Tier) + use
-		if i == m.sub.cur && m.sub.input == nil {
-			b.WriteString(m.hl(" "+brand+"›"+reset+" "+line) + "\n")
-		} else {
-			b.WriteString("   " + line + "\n")
+		lines := m.wrap(id+" "+tierLabel(md.Tier)+use, 3) // 用的项目多时折行、不截掉（n059 自查 2）
+		for j, l := range lines {
+			switch {
+			case i == m.sub.cur && m.sub.input == nil && j == 0:
+				b.WriteString(m.hl(" "+brand+"›"+reset+" "+l) + "\n")
+			case i == m.sub.cur && m.sub.input == nil:
+				b.WriteString(m.hl("   "+l) + "\n")
+			default:
+				b.WriteString("   " + l + "\n")
+			}
 		}
 	}
 	b.WriteString("\n" + strings.TrimRight(m.note(T("agent.tiers")), "\n"))
@@ -405,13 +414,13 @@ func (m *Settings) agentView() (string, []string) {
 // msgFoot 是子视图底部的提示行（拒绝原因、「再按一次确认」、保存没成等）：固定显示，不随列表滚走（n057 attempt 2 自查）。
 func (m *Settings) msgFoot() []string {
 	var out []string
-	switch {
+	switch { // 与页面底部（foot）同一顺序：正在重试时说「保存中」，不再说「没存上」（n059 自查 2）
 	case m.conflict:
 		out = append(out, orange+" "+m.saveErr+reset)
+	case m.saving || (m.dirty && m.saveErr == ""):
+		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
 		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, 200)))+reset)
-	case m.saving || m.dirty:
-		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}

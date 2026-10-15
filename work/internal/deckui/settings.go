@@ -489,9 +489,13 @@ func (m *Settings) save() tea.Cmd {
 func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 	m.saving = false
 	if msg.reloads != m.reloads {
-		// 重读之前发出的：失败（包括 409）不算数，不把刚读到的设置标成冲突；成功时只跟上代数（重读可能读在它存上之前）
+		// 重读之前发出的：失败（包括 409）不算数，不把刚读到的设置标成冲突。
+		// 成功且重读读在它存上之前（读到的代数就是它带的）：画面是它之前的内容、deckd 已是它——
+		// 跟上代数后把画面上的再存一次，两边一致（R 本来就是丢掉没存上的改动）（n059 自查 2）
 		if msg.err == nil && m.set.Generation == msg.gen {
 			m.set.Generation = msg.saved
+			m.dirty, m.pending = true, false
+			return m.autosave()
 		}
 		if m.pending {
 			m.pending = false
@@ -500,9 +504,9 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 		return nil
 	}
 	if msg.err != nil {
-		m.hint = ""
 		var de *deckclient.Error
 		if errors.As(msg.err, &de) && de.Status == http.StatusConflict {
+			m.hint = "" // 要重读，新项目会丢：不再提示去侧栏；一时存不上的留着，重试存上后照样提示（n059 自查 2）
 			m.conflict, m.pending = true, false
 			m.saveErr = T("save.conflict")
 			return nil
@@ -700,6 +704,23 @@ const (
 	tabOn = "\x1b[1;38;5;16;48;2;180;245;70m"
 )
 
+// fitWidth 是画面出口的兜底：哪一行比窗口宽就折下去，不让终端截掉（验收：80×24 及以上无截断；n059 自查）。
+func (m *Settings) fitWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if ansi.StringWidth(l) > m.width {
+			lines[i] = ansi.Wrap(l, m.width, "")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// sanitizePath 清理要显示的目录、路径：与 sanitize 一样去控制字符、打码，但不按 80 个字截短（折行显示全）。
+func sanitizePath(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
+
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
 func (m *Settings) wrap(s string, lead int) []string {
 	if m.width <= lead+1 {
@@ -768,11 +789,11 @@ func (m *Settings) tabBar() string {
 
 func (m *Settings) View() string {
 	if m.form != nil {
-		return m.formView()
+		return m.fitWidth(m.formView())
 	}
 	if m.sub != nil {
 		body, foot := m.subView() // 模型、候选多时也看得见光标行、顶部按键提示与底部的输入框和提示（n057 评审 1、attempt 2 自查）
-		return fitHeight(body, foot, m.height)
+		return fitHeight(m.fitWidth(body), foot, m.height)
 	}
 	var b strings.Builder
 	b.WriteString(m.tabBar())
@@ -805,7 +826,7 @@ func (m *Settings) View() string {
 	case pageTrust:
 		m.trustPage(&b, row, cont)
 	}
-	return fitHeight(b.String(), m.foot(), m.height)
+	return fitHeight(m.fitWidth(b.String()), m.foot(), m.height)
 }
 
 func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string) {
@@ -961,7 +982,7 @@ func (m *Settings) trustPage(b *strings.Builder, row, cont func(string) string) 
 	for _, g := range m.trust {
 		// 太长时折行、不截短（n059 自查：80 列下很长的目录被截掉，验收要求 80×24 及以上无截断）
 		lines := m.wrap(fmt.Sprintf("%s · %s · %s · %s", g.ApprovedAt.Local().Format("01-02 15:04"), sanitize(g.Project),
-			sanitize(g.Tool), sanitize(g.Dir)), 3)
+			sanitize(g.Tool), sanitizePath(g.Dir)), 3)
 		b.WriteString(row(lines[0]) + "\n")
 		for _, l := range lines[1:] {
 			b.WriteString(cont("   "+l) + "\n")

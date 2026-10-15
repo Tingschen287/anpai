@@ -2,6 +2,7 @@ package deckui
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,17 +223,28 @@ func TestNewProjectCursorsAndLabels(t *testing.T) {
 	}
 }
 
-// 80×24 及以上（验收）：各页、子视图与加入页每行不超宽、总行数不超高、不截短；很长的授权目录与 CLI 路径折到下一行（n059 自查）。
+// 80×24 及以上（验收）：各页、子视图、加入页与新建项目两页每行不超宽、总行数不超高、不截短；
+// 超过 80 个字的授权目录与 CLI 路径、很多项目在用同一个模型、很长的新建目录都折到下一行（n059 自查 1、2）。
 func TestStandardSizesNothingTruncated(t *testing.T) {
-	long := "/home/linux/ai/05.code/github/Tingschen287/terminal-deck/work"
+	long := "/home/linux/ai/05.code/github/Tingschen287/terminal-deck/.claude/worktrees/n049-a1/work" // 88 个字
+	newDir := filepath.Join(t.TempDir(), "a-quite-long-directory-name-for-the-size-check", "terminal-deck-worktrees-n049-a1-and-more")
+	if err := os.MkdirAll(filepath.Join(newDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, size := range [][2]int{{80, 24}, {100, 30}, {140, 40}} {
 		m, api := n057Fixture()
 		m.width, m.height = size[0], size[1]
+		m.Start = newDir
 		m.project().Agents = []string{"claude", "codex"}
 		m.project().Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gpt-6.1-sol"}
+		for _, id := range []string{"finance-reconcile-ai", "hr-resume-screen", "terminal-deck-main"} {
+			m.set.Projects = append(m.set.Projects, deckstore.ProjectDef{ID: id, Name: id, Path: "/tmp/" + id, Agents: []string{"claude"},
+				Models:    map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}},
+				MainAgent: deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}, Envelope: deckstore.DefaultEnvelope(id)})
+		}
 		m.trust = []deckstore.TrustGrant{{Project: "deck", Tool: "codex", Dir: long, ApprovedAt: time.Now()}}
 		for i := range api.tools {
-			api.tools[i].Path = "/home/linux/.local/share/some-very-long-install-prefix/bin/" + api.tools[i].Binary
+			api.tools[i].Path = "/home/linux/.local/share/some-very-long-install-prefix/with-another-level/bin/" + api.tools[i].Binary
 		}
 		check := func(what string, must ...string) {
 			t.Helper()
@@ -257,15 +269,84 @@ func TestStandardSizesNothingTruncated(t *testing.T) {
 		press(m, "3")
 		check("授权页", long)
 		press(m, "2", "enter")
-		check("agent 编辑", "esc返回")
+		check("agent 编辑", "esc返回", "项目在用：ai、finance-reconcile-ai、hr-resume-screen、terminal-deck-main")
 		press(m, "+")
 		check("输入模型 id", "esc取消")
 		press(m, "esc", "esc", "a")
-		check("加入", "some-very-long-install-prefix/bin/grok", "esc返回")
+		check("加入", "with-another-level/bin/grok", "esc返回")
 		press(m, "esc", "1")
 		goRow(t, m, rowTier, "", deckstore.Frontier)
 		press(m, "enter")
 		check("档位多选", "esc返回")
-		press(m, "esc")
+		press(m, "esc", "n")
+		check("新建项目 · 选目录", newDir, "sub/")
+		press(m, "enter")
+		check("新建项目 · 确认", newDir)
+		press(m, "esc", "esc")
+	}
+}
+
+// 子视图里存不上：底部让按 s 重试，子视图里按 s 就重试；重试在路上时子视图与页面一样说「保存中」（n059 自查 2）。
+func TestSubViewRetryAndSavingStatus(t *testing.T) {
+	m, api := n057Fixture()
+	goRow(t, m, rowTier, "", deckstore.Frontier)
+	press(m, "enter")
+	api.fail = errors.New("deckd down")
+	press(m, "down", "enter")
+	if !strings.Contains(plainView(m), "s 重试") || m.sub == nil {
+		t.Fatalf("子视图里写明 s 重试：\n%s", plainView(m))
+	}
+	api.fail = nil
+	n := len(api.saved)
+	_, retry := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if retry == nil || !m.saving || m.sub == nil {
+		t.Fatalf("子视图里按 s 重试：saving=%v sub=%v", m.saving, m.sub != nil)
+	}
+	if v := plainView(m); !strings.Contains(v, "保存中") || strings.Contains(v, "没存上") {
+		t.Fatalf("重试在路上：子视图说保存中，不再说没存上：\n%s", v)
+	}
+	m.Update(retry())
+	if len(api.saved) != n+1 || m.dirty || m.saveErr != "" || !strings.Contains(plainView(m), "✓ 已保存") {
+		t.Fatalf("重试存上：%d dirty=%v %q", len(api.saved)-n, m.dirty, m.saveErr)
+	}
+}
+
+// 重读读在路上那次保存存上之前、那次保存在重读之后成功回来：把画面上的再存一次，deckd 与画面一致（n059 自查 2：以前只跟上代数）。
+func TestSaveLandingAfterEarlierReloadIsOverwrittenByScreen(t *testing.T) {
+	m, api := settingsFixture()
+	press(m, "down")
+	_, save := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 勾 codex：保存发出，先不让它回来
+	press(m, "R", "R")                                  // 重读读到的是它存上之前的（假 deckd 不写回）
+	if picked(m.project(), "codex") {
+		t.Fatal("前提：重读后画面上没勾 codex")
+	}
+	_, again := m.Update(save()) // 它在重读之后成功回来
+	if again == nil {
+		t.Fatal("要把画面上的再存一次")
+	}
+	m.Update(again())
+	last := api.saved[len(api.saved)-1]
+	if len(api.saved) != 2 || picked(&last.Projects[0], "codex") || m.dirty || m.conflict {
+		t.Fatalf("deckd 与画面一致：%d codex=%v dirty=%v", len(api.saved), picked(&last.Projects[0], "codex"), m.dirty)
+	}
+	if last.Generation != api.saved[0].Generation+1000 {
+		t.Fatalf("再存带它存下的代数：%d", last.Generation)
+	}
+}
+
+// 新建项目那次保存一时存不上：提示留着，s 重试存上后照样提示去侧栏（n059 自查 2）。
+func TestNewProjectHintSurvivesTransientFailure(t *testing.T) {
+	root := tree(t)
+	m, api := settingsFixture()
+	m.Start = filepath.Join(root, "ai")
+	api.fail = errors.New("deckd down")
+	press(m, "n", "down", "right", "enter", "enter")
+	if m.hint == "" || strings.Contains(m.msg, "按 m 起主 agent") {
+		t.Fatalf("没存上：不提示去侧栏、提示留着：%q %q", m.msg, m.hint)
+	}
+	api.fail = nil
+	press(m, "s")
+	if !strings.Contains(m.msg, "按 m 起主 agent") {
+		t.Fatalf("重试存上后提示去侧栏：%q", m.msg)
 	}
 }

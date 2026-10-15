@@ -245,7 +245,7 @@ func (m *Settings) formView() string {
 	var b strings.Builder
 	if f.chosen == "" {
 		b.WriteString(m.titleLine(" "+T("form.browse.title"), T("form.browse.keys")))
-		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitize(f.dir))
+		fmt.Fprintf(&b, " \x1b[1m%s\x1b[0m\n\n", sanitizePath(f.dir))
 		rows := []string{green + T("form.usethis") + reset}
 		for _, s := range f.subdirs {
 			rows = append(rows, sanitize(s)+"/")
@@ -278,7 +278,7 @@ func (m *Settings) formView() string {
 			lw = max(lw, ansi.StringWidth(l))
 		}
 		label := func(l string) string { return l + strings.Repeat(" ", lw-ansi.StringWidth(l)) } // 按显示宽度对齐（n059 自查）
-		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitize(f.chosen))
+		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitizePath(f.chosen))
 		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", label(T("form.id")), sanitize(f.id))
 		p := m.defaultProject(f.id, f.chosen)
 		main := dimOn + T("form.noagent") + reset
