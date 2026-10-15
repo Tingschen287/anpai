@@ -99,15 +99,10 @@ func up(dirs deckstore.Dirs, args []string) {
 	mode := termprobe.Mode(strings.ToLower(*graphics), probe, native)
 	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: mode}
 	// 记下本次画法（在建布局之前：新起的窗格一开始就读到这次的，不先读到上次留下的；n056 评审 1 B2、attempt 2 自查）。
-	// 接不上、或退出时画法仍是自己写的，就恢复原来的：别的客户端还接着时回到它的画法
-	prevMode := logo.CurrentMode(dirs.State)
+	// 最后接上的说了算：退出或失败时都不恢复（n056 评审 2 R1、owner rev 124 选简化方案）。按字符串恢复分不清
+	// 文件是不是自己写的，较早的客户端退出会把后来者的画法改掉
 	if err := logo.WriteMode(dirs.State, mode); err != nil {
 		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
-	}
-	restoreMode := func() {
-		if logo.CurrentMode(dirs.State) == mode && prevMode != mode {
-			logo.WriteMode(dirs.State, prevMode)
-		}
 	}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
@@ -143,7 +138,6 @@ func up(dirs deckstore.Dirs, args []string) {
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
-		restoreMode()
 		fail("接不上布局：%v", err)
 	}
 	stop := func() {}
@@ -154,7 +148,6 @@ func up(dirs deckstore.Dirs, args []string) {
 	}
 	err = cmd.Wait()
 	stop()
-	restoreMode()
 	if err != nil {
 		fail("接不上布局：%v", err)
 	}

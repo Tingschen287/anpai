@@ -5,8 +5,11 @@ import (
 	"image"
 	"image/color"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -211,10 +214,49 @@ func TestWriteModeAtomic(t *testing.T) {
 	if err := WriteMode(dir, "sixel"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(ModeFile(dir) + ".tmp"); !os.IsNotExist(err) {
-		t.Fatal("临时文件应已改名")
+	if left, _ := filepath.Glob(filepath.Join(dir, "graphics.*.tmp")); len(left) != 0 {
+		t.Fatal("临时文件应已改名", left)
 	}
 	if CurrentMode(dir) != "sixel" {
 		t.Fatal("sixel")
+	}
+}
+
+// n056 评审 2 R3：几个 deck up 同时写画法时，不出错、读的一方不会读到空或半截内容、不留临时文件。
+func TestWriteModeConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteMode(dir, "sixel"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var errs, torn atomic.Int64
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 500 {
+				if err := WriteMode(dir, "sixel"); err != nil {
+					errs.Add(1)
+				}
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	for reading := true; reading; {
+		select {
+		case <-done:
+			reading = false
+		default:
+			if b, err := os.ReadFile(ModeFile(dir)); err != nil || string(b) != "sixel\n" {
+				torn.Add(1)
+			}
+		}
+	}
+	if errs.Load() != 0 || torn.Load() != 0 {
+		t.Fatalf("写出错 %d 次，读到无效内容 %d 次", errs.Load(), torn.Load())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "graphics.*.tmp")); len(left) != 0 {
+		t.Fatalf("留下了临时文件：%v", left)
 	}
 }

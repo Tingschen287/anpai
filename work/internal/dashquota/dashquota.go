@@ -255,6 +255,7 @@ var DisplayTools = []string{"claude", "codex", "grok", "antigravity", "opencode"
 //   - OpenCode 没有真实窗口、但看板有撞墙日均值：补估算的「日」窗口，标 Estimated（owner 要求按看板的均值逻辑显示）；
 //   - Claude 看板里没有窗口：读 owner 的 Claude Code 状态栏脚本缓存的官方用量（5 小时、7 天），标 Source；
 //   - Antigravity：看板顶层 quota.antigravity 的各额度池（Gemini、Claude），各成一条。
+//
 // 这些都不进 Tool：deckd 的额度门照旧只认看板的真实窗口（n056 自查）。
 func (c *Client) Display(ctx context.Context) []ToolQuota {
 	var out []ToolQuota

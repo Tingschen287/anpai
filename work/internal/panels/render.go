@@ -145,6 +145,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 			labelW = max(labelW, lipgloss.Width(windowLabel(w.Key)))
 		}
 	}
+	// 封顶：最多 8 格，且给百分比留够地方（前缀 6 + 空格 1 + 百分比 4 + 标签 ≤ 宽度，即标签 ≤ 宽度 − 12）；
+	// 更长的标签自己截短，不挤掉别的行的百分比（n056 评审 2 R2）
+	labelW = min(labelW, 8, max(3, width-12))
 	gap := 0
 	if resetW > 0 {
 		gap = 2
@@ -191,6 +194,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		lines = append(lines, " "+badge[0]+" "+head)
 		for i, w := range q.Windows {
 			label := windowLabel(w.Key)
+			if lipgloss.Width(label) > labelW {
+				label = ansi.Truncate(label, labelW, "…")
+			}
 			// 按显示宽度补齐：「周」「日」是全角，占两格，%-3s 按字节数补会错位
 			pad := max(0, labelW-lipgloss.Width(label))
 			prefix := " " + badge[1+i] + " "

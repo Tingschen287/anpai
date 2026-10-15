@@ -98,12 +98,27 @@ func WriteMode(stateDir, mode string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
-	// 先写临时文件再改名：读的一方不会读到截断到一半的文件（n056 attempt 2 自查）
-	tmp := ModeFile(stateDir) + ".tmp"
-	if err := os.WriteFile(tmp, []byte(mode+"\n"), 0o600); err != nil {
+	// 先写临时文件再改名：读的一方不会读到截断到一半的文件（n056 attempt 2 自查）。
+	// 临时文件每次各建一个：几个 deck up 同时写时互不改动对方的文件（n056 评审 2 R3）
+	f, err := os.CreateTemp(stateDir, "graphics.*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, ModeFile(stateDir))
+	tmp := f.Name()
+	if _, err := f.WriteString(mode + "\n"); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, ModeFile(stateDir)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // CurrentMode 读布局当前的画法；文件没有或内容不认识时按 Mode()（DECK_GRAPHICS 环境变量）。

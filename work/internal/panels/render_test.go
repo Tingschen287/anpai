@@ -205,3 +205,21 @@ func TestQuotaKeepsStatusAndLongKeys(t *testing.T) {
 		}
 	}
 }
+
+// n056 评审 2 R2：另一行的长窗口键（含全角）不挤掉别的行的百分比；15 列起每行百分比都完整。
+func TestQuotaLongKeyDoesNotSqueezeOtherRows(t *testing.T) {
+	for _, key := range []string{"monthly", "rolling_7day", "十二个汉字窗口显示名称测试"} {
+		for _, mode := range []string{"none", "sixel"} {
+			for w := 15; w <= 44; w++ {
+				qs := []dashquota.ToolQuota{{Tool: "codex", Status: dashquota.Exhausted,
+					Windows: []dashquota.Window{{Key: "5h", Pct: 100}, {Key: key, Pct: 7}}}}
+				lines, _ := QuotaLines(qs, w, mode)
+				short, long := plain(lines[2]), plain(lines[3])
+				if !strings.Contains(short, "100%") || !strings.Contains(long, "  7%") ||
+					ansi.StringWidth(short) > w || ansi.StringWidth(long) > w {
+					t.Errorf("键 %q 画法 %s 宽 %d：%q / %q", key, mode, w, short, long)
+				}
+			}
+		}
+	}
+}
