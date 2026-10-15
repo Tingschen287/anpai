@@ -43,3 +43,21 @@ func TestSidebarTitleUsesAnpaiName(t *testing.T) {
 		t.Fatalf("带 logo 的窄栏标题应是「Anpai」：%q", title)
 	}
 }
+
+// n058：整屏重画时每行先用窄空格铺满再回行首，行首是双宽汉字时也能把压在格子上的旧 sixel 图清掉
+// （e2e56「复用 sixel 布局、终端不支持 sixel」一步：不这样做，切成字母徽章后旧 logo 图留着、出占位）。
+func TestEncodeBlanksEachLineBeforeDrawing(t *testing.T) {
+	out := Frame{Lines: []string{" 安排 Anpai", "x"}}.Encode(12, 3)
+	rows := strings.Split(strings.TrimPrefix(out, "\x1b[?25l\x1b[H"), "\r\n")
+	if len(rows) != 3 {
+		t.Fatalf("应有 3 行：%q", out)
+	}
+	for i, r := range rows {
+		if !strings.HasPrefix(r, strings.Repeat(" ", 12)+"\r") {
+			t.Fatalf("第 %d 行没先铺空格：%q", i, r)
+		}
+	}
+	if !strings.Contains(rows[0], "\r 安排 Anpai") {
+		t.Fatalf("铺完空格后写原文：%q", rows[0])
+	}
+}
