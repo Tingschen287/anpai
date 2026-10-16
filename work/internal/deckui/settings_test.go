@@ -20,6 +20,8 @@ type fakeSettingsAPI struct {
 	tools   []ToolInfo
 	models  map[string][]string
 	fail    error // 不为 nil：保存返回这个错误（n059：测自动保存失败、冲突）
+	// modelsErr 不为 nil：问 CLI 有哪些模型时返回这个错误（n059 attempt 3）
+	modelsErr error
 }
 
 func (f *fakeSettingsAPI) Load(context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
@@ -40,7 +42,7 @@ func (f *fakeSettingsAPI) Revoke(_ context.Context, project, tool string) error 
 }
 func (f *fakeSettingsAPI) Tools(context.Context) ([]ToolInfo, error) { return f.tools, nil }
 func (f *fakeSettingsAPI) ToolModels(_ context.Context, tool string) ([]string, error) {
-	return f.models[tool], nil
+	return f.models[tool], f.modelsErr
 }
 
 func settingsFixture() (*Settings, *fakeSettingsAPI) {

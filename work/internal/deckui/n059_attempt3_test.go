@@ -3,6 +3,7 @@ package deckui
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -489,6 +490,151 @@ func TestPagingReturnsHome(t *testing.T) {
 		}
 		if size == [2]int{80, 24} && moved != 2 {
 			t.Fatalf("80×24 底部放不下时 PgUp、PgDn 都应翻得动，实际 %d 个", moved)
+		}
+	}
+}
+
+// ---------------- attempt 3 自查 2 ----------------
+
+// agent 名 1024 字时「主 agent」一行仍写出档位（项目页、新建项目确认页）：名字自己清理，档位接在后面。
+func TestMainLineKeepsTierWithLongName(t *testing.T) {
+	name := uniqueName(1024)
+	last := string(rune(0x4E00 + 1023))
+	m, _ := n057Fixture()
+	m.width, m.height = 100, 30
+	m.agentPtr("claude").Name = name
+	flat := strings.ReplaceAll(seenAll(t, m, nil), "\n", "")
+	if !strings.Contains(flat, last+" · "+tierName(deckstore.Frontier)) {
+		t.Fatal("项目页主 agent 一行丢了档位")
+	}
+	m.Start = t.TempDir()
+	review2Key(m, "n")
+	review2Key(m, "enter")
+	if m.form == nil || m.form.chosen == "" {
+		t.Fatal("没进确认页")
+	}
+	if flat = strings.ReplaceAll(seenAll(t, m, nil), "\n", ""); !strings.Contains(flat, last+" · ") {
+		t.Fatal("确认页主 agent 一行丢了档位")
+	}
+}
+
+// 嵌着长名字、长报错的提示整句显示：后半句的操作说明不被截掉（以前整句按 1000 字再截一次）。
+func TestComposedMessagesKeepTheirTail(t *testing.T) {
+	flat := func(v string) string { return strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "") }
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	m.msg = T("model.inuse.tier", "claude-opus-5-5", uniqueName(1024))
+	if v := flat(seenAll(t, m, nil)); !strings.Contains(v, "先在项目里拿掉它，再改档位") {
+		t.Fatal("页面底部的提示后半句被截掉")
+	}
+
+	m, api := n057Fixture()
+	m.width, m.height = 100, 60
+	api.tools[0].CanList = true
+	goRow(t, m, rowGlobal, "claude", "")
+	review2Key(m, "enter")
+	plainView(m)
+	_, slow := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	api.modelsErr = errors.New(strings.Repeat("误", 1000))
+	run(m, slow)
+	if v := flat(seenAll(t, m, nil)); !strings.Contains(v, "：手填id") {
+		t.Fatalf("「列不出模型…：手填 id」后半句被截掉（note 结尾 %q）", string([]rune(m.sub.input.note)[len([]rune(m.sub.input.note))-8:]))
+	}
+}
+
+// 候选请求的先后：先发的那次失败、后发的那次成功，先发的晚回来也不占掉新输入框，新输入框显示后发那次的候选。
+func TestModelListAnswersOnlyItsOwnInput(t *testing.T) {
+	m, api := n057Fixture()
+	m.width, m.height = 80, 24
+	api.tools[0].CanList = true
+	goRow(t, m, rowGlobal, "claude", "")
+	review2Key(m, "enter")
+	plainView(m)
+	api.modelsErr = errors.New("context deadline exceeded")
+	_, first := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	review2Key(m, "esc")
+	plainView(m)
+	_, second := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	firstMsg := first() // 先发的那次报错
+	api.modelsErr = nil
+	api.models["claude"] = []string{"claude-from-second"}
+	secondMsg := second()
+	m.Update(firstMsg) // 先发的先回来
+	m.Update(secondMsg)
+	v := plainView(m)
+	if len(m.sub.input.all) != 1 || strings.Contains(v, "列不出") || !strings.Contains(v, "claude-from-second") {
+		t.Fatalf("新输入框被上一次的结果占掉：all=%v note=%q\n%s", m.sub.input.all, m.sub.input.note, v)
+	}
+}
+
+// 合规模型 id（含连字符、≤128 字）的候选随机测：选中的候选折行后每段都不超宽、整段都带底色，选中块里是完整的 id；
+// 没选中的行不带底色（attempt 3 自查 2 的探针收为回归测试：以前带连字符的 id 折出超宽的一段，到出口再折时丢了底色）。
+func TestSelectedCandidateBlockHoldsWholeID(t *testing.T) {
+	const cs = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:@+-"
+	rng := rand.New(rand.NewSource(7))
+	bad := 0
+	for iter := 0; iter < 5000 && bad < 400; iter++ {
+		w := 80 + rng.Intn(61)
+		n := 1 + rng.Intn(128)
+		b := make([]byte, n)
+		for i := range b {
+			if rng.Intn(6) == 0 {
+				b[i] = "-./:"[rng.Intn(4)]
+			} else {
+				b[i] = cs[rng.Intn(len(cs))]
+			}
+		}
+		id := string(b)
+		if !strings.ContainsAny(id[:1], "abcdefghijklmnopqrstuvwxyz0123456789") {
+			id = "x" + id[1:]
+		}
+		if sanitizeFull(id) != id {
+			continue
+		}
+		m, _ := n057Fixture()
+		m.width, m.height = w, 60
+		goRow(t, m, rowGlobal, "claude", "")
+		press(m, "enter")
+		m.sub.input = &modelInput{cur: 0, limit: 12, all: []string{id, "other-model"}}
+		if rng.Intn(2) == 0 {
+			m.sub.input.all = []string{"claude-opus-5-5", id} // already-owned first
+			m.sub.input.cur = 1
+		}
+		lines := m.fitLines(strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n"))
+		sel := -1
+		for i, l := range lines {
+			if ansi.StringWidth(l) > w {
+				t.Errorf("w=%d id=%q line too wide %d", w, id, ansi.StringWidth(l))
+				bad++
+			}
+			if strings.TrimSpace(ansi.Strip(l)) == "" {
+				t.Errorf("w=%d id=%q blank line %d: %q", w, id, i, l)
+				bad++
+			}
+			if strings.Contains(l, brand+"›") {
+				sel = i
+			}
+		}
+		if sel < 0 {
+			t.Errorf("w=%d id=%q no selected line", w, id)
+			bad++
+			continue
+		}
+		got := ansi.Strip(lines[sel])
+		j := sel + 1
+		for ; j < len(lines) && strings.Contains(lines[j], selBg); j++ {
+			got += ansi.Strip(lines[j])
+		}
+		if !strings.Contains(strings.ReplaceAll(got, " ", ""), id) {
+			t.Errorf("w=%d id=%q selected bg block lacks id: %q next=%q", w, id, got, ansi.Strip(lines[min(j, len(lines)-1)]))
+			bad++
+		}
+		// unselected lines must not carry selBg
+		for k := j; k < len(lines); k++ {
+			if strings.Contains(lines[k], selBg) {
+				t.Errorf("w=%d id=%q stray selBg on line %d", w, id, k)
+				bad++
+			}
 		}
 	}
 }

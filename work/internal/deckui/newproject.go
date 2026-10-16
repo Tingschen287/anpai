@@ -283,7 +283,7 @@ func (m *Settings) formView() string {
 		p := m.defaultProject(f.id, f.chosen)
 		main := dimOn + T("form.noagent") + reset
 		if p.MainAgent.Agent != "" {
-			main = sanitizeFull(m.mainText(p.MainAgent))
+			main = m.mainText(p.MainAgent)
 		}
 		var names []string
 		for _, id := range p.Agents {
@@ -300,5 +300,5 @@ func (m *Settings) formFoot() []string {
 	if m.form.err == "" {
 		return nil
 	}
-	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Clean(m.form.err, textCap)) + "\x1b[0m"}
+	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Clean(m.form.err, msgCap)) + "\x1b[0m"}
 }

@@ -202,7 +202,7 @@ func TestReview1LongModelListFailureNote(t *testing.T) {
 	// attempt 3：只有还在等候选时回来的结果才算数（迟到的不覆盖），这里先回到「正在问」的状态再让它报错
 	gt, _ := m.toolInfo("grok")
 	m.sub.input.loading, m.sub.input.note = true, T("input.asking", gt.Binary)
-	m.Update(toolModelsMsg{tool: "grok", err: errors.New(strings.Repeat("无法连接模型服务；", 80) + "请重试")})
+	m.Update(toolModelsMsg{tool: "grok", req: m.sub.input.req, err: errors.New(strings.Repeat("无法连接模型服务；", 80) + "请重试")})
 	v := plainView(m)
 	if n := len(strings.Split(v, "\n")); n > m.height {
 		t.Fatalf("80x24: model-list error + input gives %d lines; input/return must fit:\n%s", n, v)

@@ -130,6 +130,7 @@ type Settings struct {
 	set       deckstore.Settings
 	trust     []deckstore.TrustGrant
 	proj      int            // 正在编辑的项目
+	modelReq  int            // 问 CLI 候选的次数：回来的结果只填进发出它的那个输入框（attempt 3 自查 2）
 	page      page           // 当前页
 	cur       int            // 当前页里光标所在的行（rows 下标）
 	curs      [pageCount]int // 各页离开时的光标，回来时还在原处
@@ -732,7 +733,8 @@ func (m *Settings) mainText(ma deckstore.MainAgent) string {
 	if ma.Agent == "" {
 		return T("main.unset")
 	}
-	return m.agentName(ma.Agent) + " · " + tierName(ma.Tier)
+	// 名字自己清理，档位接在后面：整串一起按 1024 字截时，长名字会把档位截掉（attempt 3 自查 2）
+	return sanitizeFull(m.agentName(ma.Agent)) + " · " + tierName(ma.Tier)
 }
 
 const (
@@ -802,6 +804,10 @@ func (m *Settings) fitLines(lines []string) []string {
 // textCap 是报错、提示原样显示的长度上限：只防异常长的文字，平常的都显示全、折行（验收：80×24 及以上无截断）。
 const textCap = 1000
 
+// msgCap 是拼好的提示（文字表里的句子嵌着名字、报错）显示时的上限：里面的名字（≤1024 字）、报错（≤1000 字）拼之前已各自清理，
+// 显示时只去控制字符，不再按 textCap 截（attempt 3 自查 2：嵌着长名字的拒绝原因、「列不出模型…：手填 id」后半句被截掉）。
+const msgCap = 16384
+
 // caretMark 是输入框的打字处：画面里写成 reset 后跟「▏」，fitHeightState 靠它让输入框始终在画面里。
 const caretMark = reset + "▏"
 
@@ -829,7 +835,18 @@ func (m *Settings) wrap(s string, lead int) []string {
 	if m.width <= lead+1 {
 		return []string{s}
 	}
-	return strings.Split(ansi.Wrap(s, m.width-lead-1, ""), "\n")
+	lim := m.width - lead - 1
+	var out []string
+	for _, p := range strings.Split(ansi.Wrap(s, lim, ""), "\n") {
+		// 与出口的 fitWidth 一样：Wrap 遇到某些带连字符的长词会折出超宽的一段，逐段再量、超宽的硬折
+		// （attempt 3 自查 2：选中候选的那段超宽，到出口再折出的续行没有底色，选中块认不全）
+		if ansi.StringWidth(p) > lim {
+			out = append(out, strings.Split(ansi.Hardwrap(p, lim, true), "\n")...)
+		} else {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // note 是一段灰色说明：按窗口宽度折行（子视图底部的长说明，以前超宽就被截掉），每行缩进两格。
@@ -964,7 +981,7 @@ func (m *Settings) projectPage(b *strings.Builder, row, cont func(string) string
 	b.WriteString("\n")
 	main := dimOn + T("main.unset") + reset
 	if p.MainAgent.Agent != "" {
-		main = sanitizeFull(m.mainText(p.MainAgent))
+		main = m.mainText(p.MainAgent)
 		if model := m.mainModel(p); model != "" {
 			main += dimOn + "  " + T("main.uses", sanitizeFull(model)) + reset
 		} else {
@@ -1108,12 +1125,12 @@ func (m *Settings) foot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, textCap)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.saved")+reset)
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, textCap)))
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
 	}
 	if m.height <= 0 || m.height >= 13 {
 		if h := m.rowHelp(); h != "" {

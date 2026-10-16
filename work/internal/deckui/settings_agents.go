@@ -43,6 +43,7 @@ type modelInput struct {
 	note    string
 	cur     int // 候选里的光标；-1 = 用输入的文字
 	limit   int // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
+	req     int // 这个输入框发出的那次「问 CLI 有哪些模型」
 }
 
 type toolsMsg struct {
@@ -52,6 +53,7 @@ type toolsMsg struct {
 
 type toolModelsMsg struct {
 	tool   string
+	req    int
 	models []string
 	err    error
 }
@@ -102,7 +104,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 			return nil // 别的 agent 的候选回来晚了（n057 自查：不能填进当前 agent 的输入框）
 		}
 		in := m.sub.input
-		if !in.loading || in.rename != "" {
+		if !in.loading || in.rename != "" || msg.req != in.req {
 			return nil // 改 id 的输入框不接候选（attempt 3 自查：迟到的候选落进去，↓ 看不见地选中、⏎ 把模型改成候选）
 		}
 		in.loading = false
@@ -295,13 +297,14 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		in := &modelInput{cur: -1, limit: 12} // 画面时再按窗口高度缩减
 		m.sub.input = in
 		if t, ok := m.toolInfo(a.Tool); ok && t.CanList {
-			in.loading, in.note = true, T("input.asking", t.Binary)
-			tool := a.Tool
+			m.modelReq++
+			in.loading, in.note, in.req = true, T("input.asking", t.Binary), m.modelReq
+			tool, req := a.Tool, m.modelReq
 			return func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				ms, err := m.API.ToolModels(ctx, tool)
-				return toolModelsMsg{tool: tool, models: ms, err: err}
+				return toolModelsMsg{tool: tool, req: req, models: ms, err: err}
 			}
 		}
 		in.note = T("input.manual")
@@ -449,12 +452,12 @@ func (m *Settings) msgFoot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, textCap)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, textCap)))
+		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
 	}
 	return m.wrapFoot(out)
 }
@@ -587,7 +590,7 @@ func (m *Settings) inputView() string {
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + caretMark + "\n")
 	if in.note != "" {
-		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, textCap))))
+		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, msgCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {
