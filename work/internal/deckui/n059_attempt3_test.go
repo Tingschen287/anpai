@@ -567,13 +567,13 @@ func TestModelListAnswersOnlyItsOwnInput(t *testing.T) {
 	}
 }
 
-// 合规模型 id（含连字符、≤128 字）的候选随机测：选中的候选折行后每段都不超宽、整段都带底色，选中块里是完整的 id；
+// 合规模型 id（含连字符、≤128 字）的候选随机测（20000 个，约 1 秒）：选中的候选折行后每段都不超宽、整段都带底色，选中块里是完整的 id；
 // 没选中的行不带底色（attempt 3 自查 2 的探针收为回归测试：以前带连字符的 id 折出超宽的一段，到出口再折时丢了底色）。
 func TestSelectedCandidateBlockHoldsWholeID(t *testing.T) {
 	const cs = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:@+-"
 	rng := rand.New(rand.NewSource(7))
 	bad := 0
-	for iter := 0; iter < 5000 && bad < 400; iter++ {
+	for iter := 0; iter < 20000 && bad < 400; iter++ {
 		w := 80 + rng.Intn(61)
 		n := 1 + rng.Intn(128)
 		b := make([]byte, n)
