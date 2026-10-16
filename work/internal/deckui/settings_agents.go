@@ -107,7 +107,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 			in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
 			return nil
 		}
-		in.all = msg.models
+		in.all, in.note = msg.models, "" // 候选回来了就不再说「正在问」（attempt 3 自查）
 		if len(msg.models) == 0 {
 			in.note = T("input.nolist")
 		}
@@ -405,14 +405,14 @@ func (m *Settings) agentView() (string, []string) {
 			// 输入框与候选与说明、提示，再留出「上面 / 下面还有」与至少一行列表，放不下就少列候选
 			fits := func() bool {
 				foot := m.fitLines(append(strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n"), m.msgFoot()...))
-				return strings.Count(m.fitWidth(title), "\n")+1+len(foot)+3 <= m.height
+				return min(strings.Count(m.fitWidth(title), "\n"), pinCap(m.height))+1+len(foot)+3 <= m.height
 			}
 			in.limit = 0
 			if fits() {
 				for in.limit = 12; in.limit > 0 && !fits(); in.limit-- {
 				}
 			} else {
-				in.limit = 12 // 一个候选都不列也放不下（底部很长）：整块一起滚，候选照常列出、PgDn 翻得到（attempt 2 自查）
+				in.limit = 12 // 一个候选都不列也放不下（底部很长）：整块一起滚，候选照常列出、选中的跟着窗口（attempt 2、3 自查）
 			}
 		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
@@ -456,7 +456,12 @@ func (m *Settings) titleLine(title, keys string) string {
 	if m.width <= 0 || ansi.StringWidth(title)+3+ansi.StringWidth(keys) <= m.width {
 		return bold + brand + title + reset + dimOn + "   " + keys + reset + "\n\n"
 	}
-	return bold + brand + title + reset + "\n" + dimOn + " " + strings.Join(wrapKeys(keys, m.width), "\n ") + reset + "\n\n"
+	keyLines := dimOn + " " + strings.Join(wrapKeys(keys, m.width), "\n ") + reset + "\n"
+	if ansi.StringWidth(title)+1 > m.width {
+		// 标题本身一行放不下（名字很长）：按键提示放在上面，标题限高滚走一部分时「esc 返回」仍固定可见（评审 2 B1）
+		return keyLines + bold + brand + title + reset + "\n\n"
+	}
+	return bold + brand + title + reset + "\n" + keyLines + "\n"
 }
 
 // ---------------- 输入模型 id ----------------

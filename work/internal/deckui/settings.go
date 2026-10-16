@@ -1189,6 +1189,9 @@ func fitHeight(body string, foot []string, height int) string {
 // （↑↓ 先在块内滚，滚到头再移光标）；off：PgUp/PgDn 叠加的行数（按别的键清零）；show、blockMax：上一次画面量出来的，按键时用。
 type scrollState struct{ blockOff, blockMax, off, show int }
 
+// pinCap 是固定在顶部的标题最多占几行（评审 2 B1：没有上限时，名字长到几百字就把画面撑出窗口）。
+func pinCap(height int) int { return max(1, height/3) }
+
 // fitScreen 按窗口高画出来，滚动状态记在 m.scr。
 func (m *Settings) fitScreen(body string, foot []string, keep int) string {
 	return fitHeightState(body, foot, m.height, keep, &m.scr)
@@ -1214,7 +1217,8 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 			}
 		}
 	}
-	head = min(head+1, len(lines))
+	// 固定的标题最多占一屏的三分之一，多出来的（几百字的项目名、agent 名折成的行）接进正文一起滚（评审 2 B1）
+	head = min(head+1, len(lines), pinCap(height))
 	rest, pinned := lines[head:], foot
 	bodyLen := len(rest)
 	if head+len(foot)+3 > height {
@@ -1224,7 +1228,7 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	}
 	// 光标所在的整块：「›」行与它折下来、同样带底色的续行（n059 自查 5）。底部接进来时也跟着光标走，
 	// 不把底部当成光标块（attempt 2 自查：以前 ↑↓ 选行时看不见光标行）；没有光标（输入框打开时）就从底部第一行看起
-	at, blockEnd, cursor := 0, 0, false
+	at, blockEnd, cursor, cand := 0, 0, false, -1
 	for i := 0; i < bodyLen; i++ {
 		// 认「品牌色 + ›」：数据（模型 id、项目名）经 Clean 去掉了转义码，里面的「›」不会被当成光标（attempt 2 自查）
 		if strings.Contains(rest[i], brand+"›") {
@@ -1239,6 +1243,12 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	} else if pinned == nil {
 		at = min(bodyLen+1, len(rest)-1)
 		blockEnd = at
+		// 输入框下面选中的候选（同样是「品牌色 + ›」）也要在窗口里：从输入框看起，放不下就让选中的候选落在窗口底（评审 2 已知问题 1）
+		for i := at; i < len(rest); i++ {
+			if strings.Contains(rest[i], brand+"›") {
+				cand = i
+			}
+		}
 	}
 	show := max(1, height-head-len(pinned)-2) // 留两行写「上面 / 下面还有几行」
 	st.show = show
@@ -1259,6 +1269,30 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 		sticky = st.blockOff > 0
 	} else {
 		st.blockOff = 0
+	}
+	if !cursor && pinned == nil {
+		// 输入框里打得很长、折成多行时，从输入框看起放不下就让打字处（「▏」）落在窗口底（attempt 3 自查）
+		for i := at; i < len(rest); i++ {
+			if strings.Contains(rest[i], "▏") {
+				if i-start+1 > show {
+					start = i - show + 1
+				}
+				break
+			}
+		}
+	}
+	if cand >= 0 {
+		// 选中的候选连同它折下来的续行（续行不以空格开头）落在窗口底，输入框那一行固定在窗口顶（合同：输入框始终可见）
+		candEnd := cand
+		for candEnd+1 < len(rest) && candEnd+1-cand < show-1 {
+			if l := ansi.Strip(rest[candEnd+1]); l == "" || strings.HasPrefix(l, " ") {
+				break
+			}
+			candEnd++
+		}
+		if candEnd-start+1 > show {
+			start, sticky = candEnd-show+1, true
+		}
 	}
 	maxStart := max(0, len(rest)-show)
 	base := max(0, min(start, maxStart))
