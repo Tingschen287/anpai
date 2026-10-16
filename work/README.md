@@ -1,6 +1,6 @@
 # 安排 Anpai（Go 部分）
 
-「安排 Anpai」（命令 `deck`、后台服务 `deckd`）的源码在本目录，Go 写的，有自己的 `go.mod`
+「安排 Anpai」（命令 `deck`；后台服务 `deckd` 是它的 `deck daemon` 子命令，不是单独的可执行文件）的源码在本目录，Go 写的，有自己的 `go.mod`
 （模块路径 `github.com/Tingschen287/terminal-deck/work`，仓库改名后没有改）。
 仓库根的 [`README.md`](../README.md) 是面向使用者的入口：是什么、平台与依赖、安装、启动与常用按键、配置路径。
 本文是它的细节补充：各部分怎么工作、有哪些约束，以及更早的 Work Deck 界面（`work`）还留着什么。
@@ -11,7 +11,7 @@
 
 本产品公开名是「安排 Anpai」（窄处只写「Anpai」；字标 Anpai 用 Geist SemiBold，「安排」用思源黑体，logo 仍是 A4）。
 原名 Agent Deck 与 upstream agent-deck（`github.com/asheshgoplani/agent-deck`）撞名，2026-10-15 owner 选定新名（adr_032）。
-只改了界面上看得到的名字：命令 `deck`、`deckd`、配置与状态路径（`$XDG_CONFIG_HOME/deck`、`$XDG_STATE_HOME/deck`）、环境变量、键位、
+只改了界面上看得到的名字：命令 `deck`（含 `deck daemon`）、服务名 `deckd`、配置与状态路径（`$XDG_CONFIG_HOME/deck`、`$XDG_STATE_HOME/deck`）、环境变量、键位、
 tmux socket 与会话名、Go 包名 `internal/agentdeck`（它指 upstream agent-deck 的适配层）都没变。
 
 - 本目录文档里写 **upstream agent-deck** 或 agent-deck 的，指上游那个程序。
@@ -22,7 +22,7 @@ tmux socket 与会话名、Go 包名 `internal/agentdeck`（它指 upstream agen
 要 Go 1.27.1 或更新（`go.mod`）。
 
 ```bash
-go build -o deck ./cmd/deck    # 安排 Anpai：deck 与 deckd 是同一个二进制
+go build -o deck ./cmd/deck    # 安排 Anpai：只有这一个可执行文件，deckd 就是 `deck daemon`
 go build -o work .             # 旧界面 Work Deck，见本文最后一节
 ```
 
@@ -112,13 +112,19 @@ go build -o deck ./cmd/deck
 - **同一个 agent-deck profile 只许一个写入者**：deckd 与旧 `work` 都先取 `$XDG_STATE_HOME/agent-deck-writers/<profile>.lock`，取不到的一方只读。deck 默认用 profile `deck`。
 - **按调用者分权限**：deckd 凭 `SO_PEERCRED` 与进程链认出调用者在哪个 tmux 窗格——布局窗格是 owner，注册表里的会话是主 agent 或子 agent，
   其他是未知（只能读额度、健康状态与 whoami 自身诊断，不能写）。项目与创建者一律由服务端推导。同一系统用户下这防的是模型越权与误操作，不防恶意代码。
-- **需要 Linux 6.5 及以上**：连接身份经 `SO_PEERPIDFD` 绑定到对端进程本身，防进程号复用。内核不支持时，一切调用者按未知处理。
+- **需要 Linux 6.5 及以上**：连接身份经 `SO_PEERPIDFD` 绑定到对端进程本身，防进程号复用。内核不支持时，一切调用者按未知处理
+  （`caller.go` 的 `classify`），而未知调用者只能读健康状态、`whoami` 与额度：侧栏读会话、设置页读设置、决策与通知面板都要 owner 或主 agent 身份，
+  所以旧内核上布局基本用不了，不是退化成只读模式。
+- **owner 身份只来自布局窗格**：`caller.go` 的 `classifyPane` 只把布局 server 上的窗格认成 owner。布局里没有让人敲命令的 shell 窗格，
+  所以 `deck project add`、`deck agent start-main`、`deck reports deliver-now` 这些要 owner 的命令，在普通终端里会被拒（403）；
+  人用界面（F9 新建项目、侧栏 `m`、F8），命令行形式给布局内的进程和 agent 会话里的 agent 用。
+  各接口要求的角色在 `internal/deckd/server.go`、`agents.go`、`reports.go` 的 `need(…)` 调用里。
 - **预留名额**（`deckstore.Store.Reserve`，`deck agent spawn` 用）：
   - 主、子会话都必须带启动请求指纹：`request_id`（字母数字与 `._:-`，最长 64）、`dir`（规整的绝对路径，最长 300 字节）、
     `task_sha256` 与 `args_sha256`（64 位小写十六进制，分别是任务正文与实际启动参数的 sha256）。原样校验，不清洗，不合格就拒绝。
   - `request_id` 在整个注册表里只能用一次：不论记录现在是什么状态都占着它，重复请求返回错误；要重试就用新的请求 id。
     启动失败（`LaunchFailed`，非 uncertain）会释放名额；uncertain 不是终态，继续占名额，之后仍可能被确认为启动成功。
-  - 超过预算包络时要先建一个 cost 决定，scope 用 `SpawnScope(请求, 项目设置)`；owner 批准后在有效期内以同一请求调 `Reserve(请求, 决定 id)`。
+  - 超过预算包络时要先建一个 cost 决定，scope 用 `SpawnScope(请求, 项目设置)`；owner 批准后先 `BeginExecute` 把决定置为执行中（deckd 在 `Reserve` 前自己调，`agents.go`），再在有效期内以同一请求调 `Reserve(请求, 决定 id)`；没经过 `BeginExecute` 的决定 `Reserve` 会拒绝。
     目录、任务、参数、请求 id、项目目录、包络版本任一变了，例外都不能用；用一次即标为 applied。
 - **额度**：deckd 的额度门只读 Token 看板 `127.0.0.1:8899/api/data`；取不到、过期或没有窗口的来源按「未知」处理，不编数字。
   额度面板（`/v1/quota`）在此之外补几个只供显示的来源：Claude 读 Claude Code 状态栏脚本缓存的官方用量（超过一天或已过重置时刻的不用），
@@ -141,7 +147,7 @@ deck agent decisions
 deck agent wait [--timeout 2m]          主 agent 自己等子 agent 的汇报（上限 10 分钟）
 deck agent report [--done] --text <内容>   子 agent 汇报
 deck agent start-main --project <项目>   owner 起主 agent
-deck project add --id <id> --name <名字> --path <目录> --main <agent:档位> [--agents a,b] [--model 档位=模型,…]
+deck project add --id <id> --name <名字> --path <规整的绝对路径> [--main <agent:档位>，默认 claude:frontier] [--agents a,b] [--model 档位=模型,…]
 deck reports deliver-now [--project <id>]
 ```
 
@@ -180,7 +186,7 @@ deck reports deliver-now [--project <id>]
   点名某个模型时不看清单：勾选的 agent 的模型都能点名用。主 agent 用它那一档清单里它自己的第一个模型。`deck agent` 起子 agent 前问 deckd（`GET /v1/resolve`）这一档现在会派哪个。
 - 模型 id 只能是字母数字和 `. _ / : @ + -`（它会进 CLI 的命令行），保存时与派工时都查。
 - 默认 `agents.yaml` 含 claude、codex、grok、antigravity（`agy`）、opencode、kimi 六项。设置里「加入」认识的 CLI 是 claude、codex、opencode、grok、`agy`、gemini
-  （kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（20 秒为限），claude、codex 手填。
+  （kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（20 秒为限），claude、codex、gemini 没有列模型的命令，手填。
   命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
 - **grok、Antigravity** 不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），
   只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。
@@ -198,10 +204,11 @@ go vet ./...
 go test -count=1 ./...
 ```
 
-旧界面的夹具在 `testdata/workdeck-fixture`，是一个七个节点分别停在七种状态的假项目，账本由控制器亲自写出，和真项目同构。要重建它：
+旧界面的夹具在 `testdata/workdeck-fixture`，是一个七个节点分别停在七种状态的假项目，账本由控制器亲自写出，和真项目同构。要重建它，
+脚本需要 Graph 控制器 `projectctl.py`；找不到时（默认按作者的工作区布局找）用环境变量 `PROJECTCTL` 指给它：
 
 ```bash
-bash testdata/rebuild-fixture.sh
+PROJECTCTL=<projectctl.py 的路径> bash testdata/rebuild-fixture.sh
 ```
 
 ## 旧界面 Work Deck（`work`，n035～n047）
@@ -226,6 +233,8 @@ go build -o work .
 | `T` | 绕开上游，直连会话所在的 tmux |
 | `p` | 只读预览会话画面，不接管 |
 | `v` | 看评审结论（取自评审报告文件）和一条可复制的 `projectctl review` 命令 |
+| `H` | 对选中节点的会话：看介入摘要，按 `y` 确认交还（`internal/ui/lease.go`） |
+| `i` | 打开决策队列（配置目录不可用时提示没有接队列） |
 | `r` `q` | 刷新、退出。`Esc` 只关预览、详情和弹窗，在主界面上不退出 |
 
 **对 Graph 控制器这一侧只有一个写入口：`projectctl start`**，只在上游会话已经起来、确认是 agent 之后才调；提交、验收与其他状态变更一律不写。

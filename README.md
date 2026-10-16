@@ -8,7 +8,7 @@
 超出预算要先建一个决定、等你批准；配置、推送、分歧这类事主 agent 也用 `deck agent escalate` 上报。
 这些都排进右侧的「需要你决策」面板等你拍板。agent 与模型在 F9 设置里管。
 
-命令是 `deck`（Go 写的，在 [`work/`](work/)）。仓库里还留着两个早先的 Python 启动器 `ai` 与 `host`，
+命令是 `deck`（Go 写的，在 [`work/`](work/)）；后台服务 `deckd` 不是单独的可执行文件，是 `deck daemon` 子命令，平时由 `deck up` 替你起。仓库里还留着两个早先的 Python 启动器 `ai` 与 `host`，
 见本文最后的「旧启动器」一节。
 
 ## 平台状态
@@ -24,18 +24,24 @@
 | 要什么 | 说明 |
 |---|---|
 | Go 1.27.1 或更新 | 只用来编译，版本以 [`work/go.mod`](work/go.mod) 为准 |
-| Linux 内核 6.5 或更新 | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程；内核不支持时，所有调用者都按「未知」处理，只能读、不能写。WSL 2 的内核通常已经满足 |
+| Linux 内核 6.5 或更新 | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程。内核不支持时 `deckd` 不给任何调用者身份：未知调用者只能读健康状态、`whoami` 与额度，侧栏、设置、决策与通知面板都会被拒，布局基本用不了（不是只读模式）。用 `uname -r` 看内核版本；较新的 WSL 2 内核通常已经满足 |
 | tmux | 开发与实测用 3.4；代码里没有版本检查 |
 | upstream agent-deck | 命令名 `agent-deck`，要在 `PATH` 里（或用环境变量 `WORKDECK_AGENTDECK_BIN` 指路）。对接并逐条核对过的是 v1.15.0（提交 `01c011b`），按上游项目自己的说明安装 |
-| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`gemini`；在 F9 设置里按本机装了的加入 |
+| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`gemini`；在 F9 设置里按本机装了的加入。`grok` 与 `agy` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），写法见 [`work/README.md`](work/README.md) |
 
-用 Claude Code 时有一条硬条件：upstream agent-deck 的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck/config.toml`，
-没设 `XDG_CONFIG_HOME` 就是 `~/.config/agent-deck/config.toml`；没有时回退 `~/.agent-deck/config.toml`）里
-`[claude]` 要显式写 `dangerous_mode = false`。上游 v1.15 不写时默认给 Claude Code 加 `--dangerously-skip-permissions`，
-deck 起 Claude 会话前会检查，不满足就拒绝启动，并在提示里说明怎么改。deck 不替你改这个文件。
+deck 起会话前会检查 upstream agent-deck 的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck/config.toml`，
+没设 `XDG_CONFIG_HOME` 就是 `~/.config/agent-deck/config.toml`；没有时回退 `~/.agent-deck/config.toml`），
+会让会话跳过权限确认的配置一律拒绝启动，并在提示里说明怎么改。deck 不替你改这个文件。最常碰到的一条：
+用 Claude Code 时 `[claude]` 要显式写 `dangerous_mode = false`（上游 v1.15 不写时默认给 Claude Code 加 `--dangerously-skip-permissions`）。
+其他会被拒的写法有：`[claude]` 的 `allow_dangerous_mode` 或 `auto_mode` 为 true；`[codex]`、`[gemini]` 的 `yolo_mode` 为 true；
+`[tools.*]` 的 `dangerous_mode` 不是 false；`[shell]` 的 `exit_to_shell` 开着；所启动工具的 `command` 带了多余参数；
+用点号或内联表写 `claude` 的开关（deck 读不懂）。完整规则见 [`work/README.md`](work/README.md) 和 `work/internal/agentdeck/bypasscfg.go`。
 
-额度面板和额度门读本机的 Token 看板（默认 `http://127.0.0.1:8899`，`deck daemon -dashboard` 可改）。
-没有看板时，取不到的额度一律显示「未知」，不编数字。
+额度读一个本机常驻的 Token 看板服务（作者自己的，不在本仓里，没有也能用；默认 `http://127.0.0.1:8899`，读它的 `/api/data`）。
+没有看板时，额度门取不到的额度一律按「未知」处理，不编数字。额度面板另外只为显示读 Claude Code 状态栏脚本缓存的 Claude 用量，
+这个缓存也没有时 Claude 一栏不显示。看板地址只有 `deck daemon -dashboard` 能改，`deck up` 没有这个参数：
+要改就先自己运行 `deck daemon -dashboard <地址>`，`deck up` 看到 `deckd` 已经在跑就不会再起。这样起的 `deckd` 不在布局的后台窗口里，
+关掉布局时它不会跟着停。
 
 ## 安装
 
@@ -80,7 +86,7 @@ deck up
 子 agent 在中间默认只读；主 agent 的第一条 brief 确认送达后可写。CLI 启动时停在目录信任等确认画面上时，
 deck 不替你选、也不发任务，侧栏和通知会说明，你在中间自己选，选完它再继续。
 
-左侧栏（鼠标点击和滚轮也可以）：
+布局里没有把键盘焦点切到左栏或右栏的键（F10 和 Esc 只是回中间），要用鼠标点一下对应的窗格。左侧栏的按键（鼠标点击和滚轮也可以）：
 
 | 键 | 作用 |
 |---|---|
@@ -90,8 +96,8 @@ deck 不替你选、也不发任务，侧栏和通知会说明，你在中间自
 | `m` | 为选中的项目起主 agent |
 | `Esc` | 键盘焦点回到中间 |
 
-会话前的圆点：绿色在跑，黄色等你输入，灰色空闲，红色出错，空心为未知。
-右栏的「需要你决策」面板里用 `↑` `↓` 选，按数字键作答。
+会话前的实心圆点：绿色在跑，黄色等你输入，灰色空闲，红色出错；空心或虚线圆是启动中、启动结果不明、已完成、已停止、启动失败或状态未知，
+每个会话第二行有文字写明具体是哪一种。右栏的「需要你决策」面板（先用鼠标点一下它）里用 `↑` `↓` 选，按数字键作答。
 
 关掉终端窗口只是断开，布局和 `deckd` 继续在后台跑，再运行 `deck up` 接回。
 要彻底停掉，关掉布局这台 tmux：`tmux -S "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/deck" kill-server`。
@@ -99,19 +105,29 @@ deck 不替你选、也不发任务，侧栏和通知会说明，你在中间自
 
 ### 其他命令
 
-| 命令 | 作用 |
-|---|---|
-| `deck settings -check` | 只读自查设置文件，不需要 `deckd`，不写任何东西。升级前先跑 |
-| `deck project add --id <id> --name <名字> --path <目录> [--main <agent:档位>] [--agents a,b] [--model 档位=模型,…]` | 命令行新建项目（`deckd` 要在运行） |
-| `deck agent start-main --project <项目>` | 为项目起主 agent，和侧栏按 `m` 同一套准入 |
-| `deck agent spawn --tier <档位> --title <标题> --task-file <文件>` | 主 agent 用来派子 agent；档位是 `economy`、`balanced`、`frontier`，也可以用 `--model` 点名模型。完整的子命令用 `deck agent <子命令> -h` 看 |
-| `deck panel <名字> [-project id]` | 在当前窗格里跑一块面板：`decisions`、`quota`、`progress`、`notifications`、`activity` |
-| `deck reports deliver-now [--project id]` | 与 F8 相同 |
-| `deck whoami` | `deckd` 把当前进程认成谁 |
-| `deck daemon` | 只起 `deckd`。平时不用，`deck up` 会替你起 |
+`deckd` 按调用进程判断身份：在布局这台 tmux 的窗格里跑的进程是 owner（侧栏、面板，以及 F8、F9 开出的窗口），
+在 agent-deck 那台 tmux 上注册过的会话里跑的是主 agent 或子 agent，其他进程（包括你平时用的普通终端）是未知。
+未知调用者只能读健康状态、`whoami` 与额度，其余一律被拒（403「未知调用者 不能调用这个接口」）。
+布局里没有让你敲命令的 shell 窗格，所以 owner 的日常操作都走界面：F9 设置里新建项目，侧栏按 `m` 起主 agent，F8 送汇报，决策面板按数字键作答。
+下面表里需要 owner 或 agent 身份的命令行形式，主要是给布局内的进程和 agent 会话里的 agent 用的。
 
-`deck agent` 的子命令按调用者分权限：布局窗格里的是你（owner），注册表里的会话是主 agent 或子 agent，其他进程是未知，只能读。
-`deck agent` 退出码 3 表示在等 owner 批准，输出里有决定与下一步。
+| 命令 | 作用 | 谁能用 |
+|---|---|---|
+| `deck settings -check` | 只读自查设置文件，不需要 `deckd`，不写任何东西。升级前先跑 | 任何终端 |
+| `deck whoami` | `deckd` 把当前进程认成谁（要 `deckd` 在运行） | 任何进程 |
+| `deck project add --id <id> --name <名字> --path <规整的绝对路径> [--main <agent:档位>，默认 claude:frontier] [--agents a,b] [--model 档位=模型,…]` | 命令行新建项目，和 F9 里按 `n` 是一回事 | owner |
+| `deck agent start-main --project <项目>` | 为项目起主 agent，和侧栏按 `m` 同一套准入 | owner |
+| `deck reports deliver-now [--project id]` | 与 F8 相同 | owner |
+| `deck agent spawn --tier <档位> --title <标题> --task-file <文件>` | 主 agent 派子 agent；档位是 `economy`、`balanced`、`frontier`，也可以用 `--model` 点名模型 | 主 agent（owner 也行） |
+| `deck agent list`、`output <id>`、`send <id> --text <内容>` | 看会话、看输出、给会话发话 | 主 agent 或 owner（`list` 子 agent 也能用） |
+| `deck agent escalate`、`wait` | 主 agent 上报需要 owner 决定的事、等子 agent 的汇报 | 主 agent |
+| `deck agent report [--done] --text <内容>` | 子 agent 向主 agent 汇报 | 子 agent |
+| `deck agent decisions` | 看待决定的事 | 主 agent 或 owner |
+| `deck panel <名字>` | 在当前窗格里跑一块面板：`decisions`、`quota`、`progress`、`notifications`、`activity`。`progress` 必须带 `-project <id>`；`quota` 任何进程都能看，其他几块要 owner 或 agent 身份（`decisions`、`notifications`、`progress` 要 owner 或主 agent，`activity` 子 agent 也行） | 见左 |
+| `deck daemon` | 只起 `deckd`。平时不用，`deck up` 会替你起；要改看板地址时才自己运行 | 任何终端 |
+
+`deck agent <子命令> -h` 只对有参数的几个有用（`spawn`、`escalate`、`wait`、`report`、`start-main`）；`list`、`decisions` 没有参数，
+`output`、`send` 第一个参数必须是会话 id。`deck agent` 退出码 3 表示在等 owner 批准，输出里有决定与下一步。
 
 ## 配置与数据
 
@@ -135,7 +151,7 @@ deck 不替你选、也不发任务，侧栏和通知会说明，你在中间自
 | `DECK_GRAPHICS` | logo 画法 `sixel`、`blocks`、`none`（也可以 `deck up -graphics`）；不设时 `deck up` 问终端：支持 Sixel 且知道一格多少像素就用 Sixel，否则用品牌色字母徽章 |
 | `WORKDECK_AGENTDECK_BIN` | agent-deck 可执行文件，默认在 `PATH` 里找 `agent-deck` |
 | `DECK_AGENTDECK_ADDR`、`WORKDECK_AGENTDECK_TOKEN` | 改连现成的 agent-deck headless 服务读会话状态（等同 `deck up -upstream`）。不设时 `deckd` 调 `agent-deck list --json` 读，没有端口也没有 token |
-| `WORKDECK_PROJECTCTL` | 进度面板用的 Graph 控制器脚本路径（可选） |
+| `WORKDECK_PROJECTCTL` | 进度面板用的 Graph 控制器脚本路径（可选，进度面板默认不挂） |
 
 ## 与 upstream agent-deck 的关系，以及重名说明
 
@@ -160,7 +176,10 @@ go vet ./...
 go test -count=1 ./...
 ```
 
-离线环境可以加 `GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=readonly`。回到仓库根，旧启动器的校验：
+离线环境可以加 `GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=readonly`。
+注意：如果环境里设了 `WORKDECK_AGENTDECK_BIN`，`go test` 里的集成测试会经真实的 agent-deck 在默认 tmux server 上派一个 shell 会话（测试结束会清理）；
+跑测试前建议先 `unset WORKDECK_AGENTDECK_BIN`，或把 `TMUX_TMPDIR`、`XDG_DATA_HOME` 指到临时目录。
+回到仓库根，旧启动器的校验：
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -178,9 +197,11 @@ bash -n scripts/install.sh scripts/uninstall.sh
 | `ai` | 选 agent、选目录、开会话（自称 Agent Deck） | `claude` / `codex` / `grok` / `kimi` / `opencode` 等原生 CLI |
 | `host` | 选服务器、分组、连接（Host Deck） | 本机 OpenSSH |
 
-需要 Python 3.11+ 和 Bash。安装：
+需要 Python 3.11+ 和 Bash。平台上，它在 WSL 2 + Windows Terminal 里支持得最完整；在其他 Linux 终端里核心流程可用，只是没有 Windows Terminal 的页签交接；Windows 原生和 macOS 没有。
+安装要在仓库根目录运行（上面的安装步骤停在 `work/` 里，先 `cd ..`）：
 
 ```bash
+cd ..    # 回到仓库根 anpai/
 ./scripts/install.sh
 ```
 
@@ -219,14 +240,16 @@ host --version
 Windows Terminal 的启动项样例在 [`integrations/windows-terminal/profiles.example.jsonc`](integrations/windows-terminal/profiles.example.jsonc)，
 合并进 `settings.json` 后替换 `<DISTRO>`、`<WSL_USER>`。
 
-更新与卸载：
+更新与卸载（都在仓库根运行）：
 
 ```bash
 git pull --ff-only
 ./scripts/install.sh
 ./scripts/uninstall.sh            # 保留配置和历史
-./scripts/uninstall.sh --purge    # 连配置和历史一起删
+./scripts/uninstall.sh --purge    # 连配置、历史和收藏（favorites）一起删
 ```
+
+卸载不会改 Tabby，也不会清 Windows 凭据库里的密码。
 
 版本记录见 [`CHANGELOG.md`](CHANGELOG.md)（只记旧启动器）。
 
