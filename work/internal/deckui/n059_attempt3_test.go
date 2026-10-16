@@ -3,10 +3,13 @@ package deckui
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -214,5 +217,278 @@ func TestAskingNoteClearedWhenModelsArrive(t *testing.T) {
 	v := review2Key(m, "+")
 	if m.sub.input.loading || strings.Contains(v, "正在问") || !strings.Contains(v, "claude-x-1") {
 		t.Fatalf("候选回来后仍写着正在问，或没列出候选：\n%s", v)
+	}
+}
+
+// 名字很长时打开加模型：候选个数按限高后的标题算，底部（输入框、候选、说明）仍固定在最下面，不因为标题长就整块滚走。
+func TestLongTitleInputFootStaysPinned(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {100, 30}} {
+		m, _ := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		m.agentPtr("claude").Name = uniqueName(900)
+		goRow(t, m, rowGlobal, "claude", "")
+		review2Key(m, "enter")
+		review2Key(m, "+")
+		var all []string
+		for i := 0; i < 20; i++ {
+			all = append(all, fmt.Sprintf("claude-cand-%02d", i))
+		}
+		m.sub.input.all = all
+		v := plainView(m)
+		review2Bounds(t, m, v)
+		lines := strings.Split(v, "\n")
+		if !strings.Contains(lines[len(lines)-1], "esc 取消") || !strings.Contains(v, "加模型：") || !strings.Contains(v, "claude-cand-00") {
+			t.Fatalf("%v：底部应固定在最下面并列出候选：\n%s", size, v)
+		}
+		if !strings.Contains(strings.Join(lines[:pinCap(m.height)], "\n"), "esc 返回") {
+			t.Fatalf("%v：「esc 返回」不在固定区：\n%s", size, v)
+		}
+	}
+}
+
+// ---------------- attempt 3 自查 ----------------
+
+// 新建项目确认页：agent 名很长、正文比一屏高时，打开就看得见「项目 id ▏」，打字后也在。
+func TestConfirmPageCaretVisible(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {81, 25}, {100, 30}, {119, 24}} {
+		for _, name := range []string{"", uniqueName(1024), strings.Repeat("名", 400)} {
+			m, _ := n057Fixture()
+			m.width, m.height = size[0], size[1]
+			if name != "" {
+				m.agentPtr("claude").Name = name
+			}
+			dir := filepath.Join(t.TempDir(), strings.Repeat("项", 80))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.Start = dir
+			review2Key(m, "n")
+			v := review2Key(m, "enter")
+			if m.form == nil || m.form.chosen == "" {
+				t.Fatal("没进确认页")
+			}
+			review2Bounds(t, m, v)
+			if !strings.Contains(v, "▏") {
+				t.Fatalf("%v 名字 %d 字：确认页看不见项目 id 输入行：\n%s", size, len([]rune(name)), v)
+			}
+			if v = review2Key(m, "x"); !strings.Contains(v, "x▏") {
+				t.Fatalf("%v：打字后看不见项目 id 输入行：\n%s", size, v)
+			}
+		}
+	}
+}
+
+// 多个名字拼成一串时每个名字各自清理：一个 1024 字的 agent 名不会把后面的 agent 挤掉。
+func TestJoinedNamesEachKeptWhole(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 100, 200
+	m.agentPtr("claude").Name = uniqueName(1024)
+	m.Start = t.TempDir()
+	review2Key(m, "n")
+	v := review2Key(m, "enter")
+	if m.form == nil || m.form.chosen == "" {
+		t.Fatal("没进确认页")
+	}
+	flat := strings.ReplaceAll(v, "\n", "") // 长名字折了行，「Codex」可能被折成两段
+	last := string(rune(0x4E00 + 1023))     // 1024 字名字的最后一个字：后面应接「、Codex」，不是截短的「…」
+	if name := m.agentName("codex"); !strings.Contains(flat, last+T("sep.list")+name) {
+		t.Fatalf("拼起来的 agent 清单被截掉（找不到 %q）：\n%s", name, v)
+	}
+}
+
+// 80×24 及以上：报错长到「0 个候选刚好放得下、1 个就放不下」时，候选不缩到 0（整块滚动、照常列出），↓ 选得到、看得见。
+func TestNoZeroCandidatesAtStandardSizes(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {81, 25}, {100, 30}, {119, 24}} {
+		for _, long := range []bool{false, true} {
+			for n := 200; n <= 1000; n += 15 {
+				m, api := n057Fixture()
+				m.width, m.height = size[0], size[1]
+				api.tools[0].CanList = true
+				api.models["claude"] = nil
+				for i := 0; i < 12; i++ {
+					api.models["claude"] = append(api.models["claude"], fmt.Sprintf("claude-model-%02d", i))
+				}
+				if long {
+					m.agentPtr("claude").Name = uniqueName(900)
+				}
+				goRow(t, m, rowGlobal, "claude", "")
+				review2Key(m, "enter")
+				review2Key(m, "+")
+				m.saveErr = strings.Repeat("存", n)
+				v := review2Key(m, "down")
+				review2Bounds(t, m, v)
+				if m.sub.input.cur != 0 || !strings.Contains(v, "› claude-model-00") || !strings.Contains(v, "▏") {
+					t.Fatalf("%v 长名=%v 报错 %d 字：候选选不到或看不见（limit=%d cur=%d）：\n%s", size, long, n, m.sub.input.limit, m.sub.input.cur, v)
+				}
+			}
+		}
+	}
+}
+
+// 输入框里打的过滤字长到折行时，选候选也看得见打字处与选中的候选；没选中的长候选折行不算进选中块。
+func TestLongFilterWithCandidatesCaretVisible(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {81, 25}, {100, 30}, {119, 24}} {
+		m, api := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		api.tools[0].CanList = true
+		api.models["claude"] = nil
+		for i := 0; i < 12; i++ {
+			api.models["claude"] = append(api.models["claude"], fmt.Sprintf("c%02d-%s-e%02d", i, strings.Repeat("y", 120), i))
+		}
+		api.fail = errors.New(strings.Repeat("存不上；", 240))
+		goRow(t, m, rowAgentPick, "codex", "")
+		review2Key(m, " ")
+		goRow(t, m, rowGlobal, "claude", "")
+		review2Key(m, "enter")
+		review2Key(m, "+")
+		for i := 0; i < min(size[0]+10, 115); i++ { // 折成两行，又不比候选里的 120 个 y 长
+			review2Key(m, "y")
+		}
+		for i := 0; i < 12; i++ {
+			v := review2Key(m, "down")
+			review2Bounds(t, m, v)
+			if m.sub.input.cur != i {
+				t.Fatalf("%v：候选 %d 选不到（cur=%d）", size, i, m.sub.input.cur)
+			}
+			if !strings.Contains(v, "y▏") || !strings.Contains(v, fmt.Sprintf("› c%02d-", i)) || !strings.Contains(v, fmt.Sprintf("e%02d", i)) {
+				t.Fatalf("%v：选候选 %d 时打字处或选中的候选看不见：\n%s", size, i, v)
+			}
+		}
+	}
+}
+
+// ⏎ 被拒（候选已有）后说明变长：选中的候选不能掉出列表，再按 ⏎ 也不会把过滤的字当 id 加进去。
+func TestSelectionSurvivesRejectedEnter(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {100, 24}, {100, 30}, {120, 40}} {
+		for _, idLen := range []int{20, 60, 128} {
+			m, api := n057Fixture()
+			m.width, m.height = size[0], size[1]
+			api.tools[0].CanList = true
+			var ids []string
+			for i := 0; i < 30; i++ {
+				id := fmt.Sprintf("gpt-%02d-", i)
+				ids = append(ids, id+strings.Repeat("q", idLen-len(id)))
+			}
+			api.models["claude"] = ids
+			cx := m.agentPtr("codex")
+			for _, id := range ids {
+				cx.Models = append(cx.Models, deckstore.ModelDef{ID: id, Tier: deckstore.Balanced})
+			}
+			goRow(t, m, rowGlobal, "claude", "")
+			review2Key(m, "enter")
+			review2Key(m, "+")
+			for _, c := range "gpt" {
+				review2Key(m, string(c))
+			}
+			for i := 0; i < 40; i++ {
+				review2Key(m, "down")
+			}
+			chosen := m.sub.input.matches()[m.sub.input.cur]
+			v := review2Key(m, "enter")
+			review2Bounds(t, m, v)
+			if ms := m.sub.input.matches(); m.sub.input.cur >= len(ms) || ms[m.sub.input.cur] != chosen || !strings.Contains(v, "› gpt-") {
+				t.Fatalf("%v len%d：被拒后选中的候选掉出列表或看不见：\n%s", size, idLen, v)
+			}
+			before := len(m.agentPtr("claude").Models)
+			review2Key(m, "enter")
+			if len(m.agentPtr("claude").Models) != before {
+				t.Fatalf("%v len%d：再按 ⏎ 加进了 %q", size, idLen, m.agentPtr("claude").Models[before].ID)
+			}
+		}
+	}
+}
+
+// 候选迟到：等候选时 ⏎ 被拒的原因不被抹掉；落不进改 id 的输入框。
+func TestLateModelListKeepsNotesAndSkipsRename(t *testing.T) {
+	m, api := n057Fixture()
+	m.width, m.height = 80, 24
+	api.tools[0].CanList = true
+	goRow(t, m, rowGlobal, "claude", "")
+	review2Key(m, "enter")
+	plainView(m)
+	_, slow := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")}) // 候选还在路上
+	for _, c := range "gpt x" {
+		review2Key(m, string(c))
+	}
+	review2Key(m, "enter") // 有空格：被拒
+	reason := m.sub.input.note
+	run(m, slow)
+	if v := plainView(m); m.sub.input.note != reason || reason == "" {
+		t.Fatalf("候选回来后拒绝原因没了（原来 %q，现在 %q）：\n%s", reason, m.sub.input.note, v)
+	}
+
+	m, api = n057Fixture()
+	m.width, m.height = 80, 24
+	api.tools[0].CanList = true
+	api.models["claude"] = []string{"zzz-from-cli"}
+	goRow(t, m, rowGlobal, "claude", "")
+	review2Key(m, "enter")
+	plainView(m)
+	_, slow = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	review2Key(m, "esc")
+	review2Key(m, "e")
+	before := m.agentPtr("claude").Models[0].ID
+	run(m, slow)
+	if len(m.sub.input.all) != 0 {
+		t.Fatalf("迟到的候选落进了改 id 的输入框：%v", m.sub.input.all)
+	}
+	for _, c := range "-v2" {
+		review2Key(m, string(c))
+	}
+	review2Key(m, "down")
+	review2Key(m, "enter")
+	if after := m.agentPtr("claude").Models[0].ID; after != before+"-v2" {
+		t.Fatalf("改 id 用了 %q，不是打的 %q", after, before+"-v2")
+	}
+}
+
+// 标题宽度正好等于窗口宽时一行放得下：按键提示仍在标题下面（与 a49e1e8 一样）。
+func TestTitleExactWidthKeepsKeysBelow(t *testing.T) {
+	m, _ := n057Fixture()
+	m.width, m.height = 80, 24
+	title := " " + T("agent.title", strings.Repeat("a", 1), "claude")
+	m.agentPtr("claude").Name = strings.Repeat("a", 80-ansi.StringWidth(title)+1)
+	goRow(t, m, rowGlobal, "claude", "")
+	lines := strings.Split(review2Key(m, "enter"), "\n")
+	if w := ansi.StringWidth(lines[0]); w != 80 || !strings.Contains(lines[1], "esc 返回") {
+		t.Fatalf("标题 %d 格时布局变了：\n%s", w, strings.Join(lines[:3], "\n"))
+	}
+}
+
+// PgUp 到顶、再 PgDn（或反过来）回得到原来的画面：选中的候选与输入框都在（attempt 3 自查：以前翻过头）。
+func TestPagingReturnsHome(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {140, 40}} {
+		m, api := n057Fixture()
+		m.width, m.height = size[0], size[1]
+		api.tools[0].CanList = true
+		api.models["claude"] = nil
+		for i := 0; i < 12; i++ {
+			api.models["claude"] = append(api.models["claude"], fmt.Sprintf("cand-%02d-%s", i, strings.Repeat("q", 119)))
+		}
+		api.fail = errors.New(strings.Repeat("存不上；", 240))
+		goRow(t, m, rowAgentPick, "codex", "")
+		review2Key(m, " ")
+		goRow(t, m, rowGlobal, "claude", "")
+		review2Key(m, "enter")
+		review2Key(m, "+")
+		for i := 0; i < 9; i++ {
+			review2Key(m, "down")
+		}
+		home := plainView(m)
+		moved := 0
+		for _, keys := range [][]string{{"pgdown", "pgup"}, {"pgup", "pgdown"}} {
+			// 第一下真的翻动了（不在顶上或底上）才要求第二下回到原来的画面
+			if v := review2Key(m, keys[0]); v != home {
+				moved++
+				if v = review2Key(m, keys[1]); v != home {
+					t.Fatalf("%v %v：回不到原来的画面：\n%s\n--- 原来：\n%s", size, keys, v, home)
+				}
+			}
+			review2Key(m, "down")
+			review2Key(m, "up")
+		}
+		if size == [2]int{80, 24} && moved != 2 {
+			t.Fatalf("80×24 底部放不下时 PgUp、PgDn 都应翻得动，实际 %d 个", moved)
+		}
 	}
 }

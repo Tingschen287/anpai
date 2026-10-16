@@ -102,14 +102,27 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 			return nil // 别的 agent 的候选回来晚了（n057 自查：不能填进当前 agent 的输入框）
 		}
 		in := m.sub.input
+		if !in.loading || in.rename != "" {
+			return nil // 改 id 的输入框不接候选（attempt 3 自查：迟到的候选落进去，↓ 看不见地选中、⏎ 把模型改成候选）
+		}
 		in.loading = false
+		// 只替换「正在问」：等候选时按 ⏎ 被拒的原因不抹掉（attempt 3 自查）
+		asking := false
+		if t, ok := m.toolInfo(msg.tool); ok {
+			asking = in.note == T("input.asking", t.Binary)
+		}
 		if msg.err != nil {
-			in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
+			if asking {
+				in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
+			}
 			return nil
 		}
-		in.all, in.note = msg.models, "" // 候选回来了就不再说「正在问」（attempt 3 自查）
-		if len(msg.models) == 0 {
-			in.note = T("input.nolist")
+		in.all = msg.models
+		if asking {
+			in.note = "" // 候选回来了就不再说「正在问」（attempt 3 自查）
+			if len(msg.models) == 0 {
+				in.note = T("input.nolist")
+			}
 		}
 	}
 	return nil
@@ -364,7 +377,7 @@ func (m *Settings) agentView() (string, []string) {
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
-			parts = append(parts, sanitizeFull(strings.Join(g, " ")))
+			parts = append(parts, joinFull(g, " "))
 		}
 		b.WriteString(m.note(T("agent.extra", strings.Join(parts, T("sep.semi")))))
 	}
@@ -376,7 +389,7 @@ func (m *Settings) agentView() (string, []string) {
 	for i, md := range a.Models {
 		use := ""
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			use = dimOn + "  " + T("model.used", sanitizeFull(strings.Join(users, T("sep.list")))) + reset // 项目多时不截（n059 自查 3）
+			use = dimOn + "  " + T("model.used", joinFull(users, T("sep.list"))) + reset // 项目多时不截（n059 自查 3）
 		}
 		id := sanitizeFull(md.ID)
 		if pad := 34 - ansi.StringWidth(id); pad > 0 {
@@ -407,12 +420,19 @@ func (m *Settings) agentView() (string, []string) {
 				foot := m.fitLines(append(strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n"), m.msgFoot()...))
 				return min(strings.Count(m.fitWidth(title), "\n"), pinCap(m.height))+1+len(foot)+3 <= m.height
 			}
+			in.limit = 12
+			has := in.rename == "" && len(in.matches()) > 0
 			in.limit = 0
-			if fits() {
+			ok := fits() // 0 个都放不下就不用一个个试（attempt 3 自查：长输入时每画一次多量 12 遍）
+			if ok {
 				for in.limit = 12; in.limit > 0 && !fits(); in.limit-- {
 				}
-			} else {
-				in.limit = 12 // 一个候选都不列也放不下（底部很长）：整块一起滚，候选照常列出、选中的跟着窗口（attempt 2、3 自查）
+			}
+			// 整块一起滚、候选照常列出（选中的跟着窗口）：一个候选都不列也放不下（底部很长，attempt 2 自查）；
+			// 缩到连选中的那个都列不进（attempt 3 自查：⏎ 被拒后说明变长，再按 ⏎ 把过滤的字当 id 加了进去）；
+			// 80×24 及以上缩到 0 个而其实有候选（attempt 3 自查：候选看不见也选不了）。更矮的窗口照旧缩到 0，保住输入框与说明
+			if !ok || in.limit <= in.cur || (in.limit == 0 && has && m.height >= 24) {
+				in.limit = 12
 			}
 		}
 		foot = strings.Split(strings.TrimRight(m.inputView(), "\n"), "\n")
@@ -457,7 +477,7 @@ func (m *Settings) titleLine(title, keys string) string {
 		return bold + brand + title + reset + dimOn + "   " + keys + reset + "\n\n"
 	}
 	keyLines := dimOn + " " + strings.Join(wrapKeys(keys, m.width), "\n ") + reset + "\n"
-	if ansi.StringWidth(title)+1 > m.width {
+	if ansi.StringWidth(title) > m.width {
 		// 标题本身一行放不下（名字很长）：按键提示放在上面，标题限高滚走一部分时「esc 返回」仍固定可见（评审 2 B1）
 		return keyLines + bold + brand + title + reset + "\n\n"
 	}
@@ -565,21 +585,27 @@ func (m *Settings) inputView() string {
 	if in.rename != "" {
 		title = T("input.rename", sanitizeFull(in.rename))
 	}
-	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + reset + "▏\n")
+	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + caretMark + "\n")
 	if in.note != "" {
 		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, textCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {
-			cur := " "
-			if i == in.cur {
-				cur = brand + "›" + reset
-			}
 			taken := ""
 			if o := m.ownerOf(s); o != "" {
 				taken = dimOn + T("input.has") + reset
 			}
-			fmt.Fprintf(&b, "   %s %s%s\n", cur, sanitizeFull(s), taken)
+			// 长 id 先按宽度折好、续行缩进；选中的整行加底色（续行也加），fitHeightState 靠底色认出选中候选的整块（attempt 3 自查）
+			for j, l := range m.wrap(sanitizeFull(s)+taken, 5) {
+				switch {
+				case i == in.cur && j == 0:
+					b.WriteString(m.hl("   "+brand+"›"+reset+" "+l) + "\n")
+				case i == in.cur:
+					b.WriteString(m.hl("     "+l) + "\n")
+				default:
+					b.WriteString("     " + l + "\n")
+				}
+			}
 		}
 		b.WriteString(m.note(T("input.addkeys")))
 	} else {

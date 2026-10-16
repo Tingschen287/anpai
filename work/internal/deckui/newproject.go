@@ -279,7 +279,7 @@ func (m *Settings) formView() string {
 		}
 		label := func(l string) string { return l + strings.Repeat(" ", lw-ansi.StringWidth(l)) } // 按显示宽度对齐（n059 自查）
 		fmt.Fprintf(&b, "   %s  %s\n", label(T("form.dir")), sanitizeFull(f.chosen))
-		fmt.Fprintf(&b, "   %s  \x1b[4m%s\x1b[0m▏\n", label(T("form.id")), sanitizeFull(f.id))
+		fmt.Fprintf(&b, "   %s  \x1b[4m%s%s\n", label(T("form.id")), sanitizeFull(f.id), caretMark)
 		p := m.defaultProject(f.id, f.chosen)
 		main := dimOn + T("form.noagent") + reset
 		if p.MainAgent.Agent != "" {
@@ -289,7 +289,7 @@ func (m *Settings) formView() string {
 		for _, id := range p.Agents {
 			names = append(names, m.agentName(id))
 		}
-		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), sanitizeFull(strings.Join(names, T("sep.list"))), label(T("form.main")), main)
+		fmt.Fprintf(&b, "   %s  %s\n   %s  %s\n", label(T("form.agents")), joinFull(names, T("sep.list")), label(T("form.main")), main)
 		b.WriteString(" " + m.note(T("form.later")))
 	}
 	return b.String()

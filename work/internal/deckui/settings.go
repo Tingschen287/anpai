@@ -436,7 +436,11 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if k == "pgup" {
 				step = -step
 			}
-			m.scr.off += step
+			if old := m.scr.off; (old < 0) != (old+step < 0) && old != 0 {
+				m.scr.off = 0 // 翻过原来的位置时停在原位（attempt 3 自查：PgUp 到顶后再 PgDn 回不到光标与输入框所在的画面）
+			} else {
+				m.scr.off += step
+			}
 			m.cancelConfirms()
 			return m, nil
 		case "down", "j", "up", "k":
@@ -797,6 +801,18 @@ func (m *Settings) fitLines(lines []string) []string {
 
 // textCap 是报错、提示原样显示的长度上限：只防异常长的文字，平常的都显示全、折行（验收：80×24 及以上无截断）。
 const textCap = 1000
+
+// caretMark 是输入框的打字处：画面里写成 reset 后跟「▏」，fitHeightState 靠它让输入框始终在画面里。
+const caretMark = reset + "▏"
+
+// joinFull 把几个名字各自清理后再拼成一串（attempt 3 自查：整串按 1024 字截时，一个很长的名字会把后面的名字挤掉）。
+func joinFull(xs []string, sep string) string {
+	out := make([]string, len(xs))
+	for i, x := range xs {
+		out[i] = sanitizeFull(x)
+	}
+	return strings.Join(out, sep)
+}
 
 // sgrRe 认出颜色等 SGR 转义码（折行时空白段里的颜色码要接到下一段）。
 var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
@@ -1228,11 +1244,20 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	}
 	// 光标所在的整块：「›」行与它折下来、同样带底色的续行（n059 自查 5）。底部接进来时也跟着光标走，
 	// 不把底部当成光标块（attempt 2 自查：以前 ↑↓ 选行时看不见光标行）；没有光标（输入框打开时）就从底部第一行看起
-	at, blockEnd, cursor, cand := 0, 0, false, -1
+	at, blockEnd, cursor, cand, caret := 0, 0, false, -1, -1
 	for i := 0; i < bodyLen; i++ {
 		// 认「品牌色 + ›」：数据（模型 id、项目名）经 Clean 去掉了转义码，里面的「›」不会被当成光标（attempt 2 自查）
 		if strings.Contains(rest[i], brand+"›") {
 			at, cursor = i, true
+		}
+	}
+	if !cursor {
+		// 打字处「reset+▏」（输入框、新建项目的项目 id）：数据里的「▏」前面没有转义码，不会认错
+		for i := range rest {
+			if strings.Contains(rest[i], caretMark) {
+				caret = i
+				break
+			}
 		}
 	}
 	if cursor {
@@ -1240,6 +1265,9 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 		for blockEnd+1 < bodyLen && strings.Contains(rest[blockEnd+1], selBg) {
 			blockEnd++
 		}
+	} else if caret >= 0 && caret < bodyLen {
+		// 输入框在正文里（新建项目确认页的项目 id）：窗口跟着打字处（attempt 3 自查：agent 名很长时打开就滚到底，看不见输入框）
+		at, blockEnd = caret, caret
 	} else if pinned == nil {
 		at = min(bodyLen+1, len(rest)-1)
 		blockEnd = at
@@ -1270,24 +1298,19 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	} else {
 		st.blockOff = 0
 	}
-	if !cursor && pinned == nil {
+	pin := 1 // sticky 时固定在窗口顶的行数：光标行 1 行；输入框从第一行到打字处整块
+	if !cursor && pinned == nil && caret >= at {
 		// 输入框里打得很长、折成多行时，从输入框看起放不下就让打字处（「▏」）落在窗口底（attempt 3 自查）
-		for i := at; i < len(rest); i++ {
-			if strings.Contains(rest[i], "▏") {
-				if i-start+1 > show {
-					start = i - show + 1
-				}
-				break
-			}
+		if caret-start+1 > show {
+			start = caret - show + 1
 		}
+		pin = min(caret-at+1, show-1)
 	}
-	if cand >= 0 {
-		// 选中的候选连同它折下来的续行（续行不以空格开头）落在窗口底，输入框那一行固定在窗口顶（合同：输入框始终可见）
+	if cand >= 0 && pin >= 1 {
+		// 选中的候选连同它折下来、同样带底色的续行落在窗口底，输入框整块固定在窗口顶（合同：输入框始终可见；
+		// attempt 3 自查：以前按「续行不以空格开头」认，没选中的长候选折行后也被算进来，把输入框挤掉）
 		candEnd := cand
-		for candEnd+1 < len(rest) && candEnd+1-cand < show-1 {
-			if l := ansi.Strip(rest[candEnd+1]); l == "" || strings.HasPrefix(l, " ") {
-				break
-			}
+		for candEnd+1 < len(rest) && candEnd+1-cand < show-pin && strings.Contains(rest[candEnd+1], selBg) {
 			candEnd++
 		}
 		if candEnd-start+1 > show {
@@ -1300,8 +1323,8 @@ func fitHeightState(body string, foot []string, height, keep int, st *scrollStat
 	st.off = start - base
 	end := min(len(rest), start+show)
 	window := rest[start:end]
-	if sticky && show > 1 && st.off == 0 && start > at { // 只剩 1 行时不固定，否则块里一行也看不到（attempt 2 自查）
-		window = append([]string{rest[at]}, rest[start+1:end]...)
+	if sticky && show > pin && st.off == 0 && start > at && start+pin <= end { // 只剩 1 行时不固定，否则块里一行也看不到（attempt 2 自查）
+		window = append(append([]string{}, rest[at:at+pin]...), rest[start+pin:end]...)
 	}
 	out := append([]string{}, lines[:head]...)
 	out = append(out, dimOn+"   "+T("scroll.up", start)+reset)
