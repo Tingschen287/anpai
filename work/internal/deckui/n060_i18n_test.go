@@ -1,10 +1,14 @@
 package deckui
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -48,11 +52,11 @@ var strayAllow = map[string]string{}
 
 // dynamicTextKeys 是运行时才取到、再传给 T 的键。
 // 名单来自生产代码里的表，不是另写一份：
-// 面板的 map（panels.TextKeys）、布局按键行（layout.TextKeys）、设置页签 pageText、档位 "tier." + deckstore.Tiers。
+// 面板的 map（panels.TextKeys）、布局按键行（layout.TextKeys）、设置页签（TextKeys）、档位 "tier." + deckstore.Tiers。
 // tier.unset 是 T("tier.unset")，扫得到，不在这里。
 func dynamicTextKeys() []string {
 	out := make([]string, 0, len(pageText)+len(deckstore.Tiers))
-	out = append(out, pageText[:]...)
+	out = append(out, TextKeys()...)
 	for _, tier := range deckstore.Tiers {
 		out = append(out, "tier."+string(tier))
 	}
@@ -61,50 +65,81 @@ func dynamicTextKeys() []string {
 	return out
 }
 
-// dynamicCallExpect 是第一个参数不是字符串字面量的 T / i18n.T / i18n.Errorf。
-// 多一个调用处，测试就失败，直到键收进上面的表。
-var dynamicCallExpect = []string{
-	"layout.go Keys",
-	"render.go RenderActivity",
-	"render.go RenderProgress",
-	"render.go kindLabel",
-	"render.go label",
-	"settings.go tabBar",
-	"settings.go tierName",
+// dynamicCallAllow 是放行的动态取键。粒度是「文件 · 函数 · 参数表达式原文」。
+// 原文用 go/printer 打印。改一个字符就对不上，测试失败，要人工复核后再改清单。
+// 清单挡不住坏形状：函数调用、未登记的 +、局部变量或参数，一律另报错。
+//
+// 过关的形状只有三种，每种都能证明键来自可枚举集合：
+//   - 表[下标]：表是本包 TextKeys 里 range 到的 map[string]string，或 TextKeys 里切片过的字符串数组。
+//     下标结果只能是表里的值，TextKeys 会把这些值交出去。
+//   - 表[下标].字段：表是结构体切片，TextKeys 的 range 只读这个字段。
+//   - "tier." + string(档位参数)：参数类型是 deckstore.Tier。string 是类型转换，不是拼键函数。
+//     前缀另由 checkTierConcat 锁成 tier.，每个档位都在动态键集合里。
+var dynamicCallAllow = []string{
+	"layout.go · Keys · layoutKeyRows[i].text",
+	"render.go · RenderActivity · activityStatusKey[x.Status]",
+	"render.go · RenderProgress · progressCountKey[k]",
+	"render.go · kindLabel · kindKey[k]",
+	"render.go · label · optionKey[opt]",
+	"settings.go · tabBar · pageText[i]",
+	"settings.go · tierName · \"tier.\" + string(t)",
 }
 
 var keyShape = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z0-9]+)+$`)
 
-func walkCovered(t *testing.T, fn func(path string, f *ast.File, fset *token.FileSet)) {
-	t.Helper()
+type parsedFile struct {
+	path string
+	file *ast.File
+}
+
+// parseCovered 解析本段收进文字表的包。src 的键是绝对路径，值是整文件源码，用来在内存里替换。
+// 没列进 src 的文件从磁盘读。不写盘。
+func parseCovered(src map[string]string) (*token.FileSet, []parsedFile, error) {
 	fset := token.NewFileSet()
+	var out []parsedFile
 	for _, dir := range coveredDirs() {
 		ms, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		for _, path := range ms {
 			if strings.HasSuffix(path, "_test.go") {
 				continue
 			}
-			f, err := parser.ParseFile(fset, path, nil, 0)
-			if err != nil {
-				t.Fatal(err)
+			var body any
+			if s, ok := src[path]; ok {
+				body = s
 			}
-			fn(path, f, fset)
+			f, err := parser.ParseFile(fset, path, body, 0)
+			if err != nil {
+				return nil, nil, fmt.Errorf("解析 %s：%w", path, err)
+			}
+			out = append(out, parsedFile{path: path, file: f})
 		}
+	}
+	return fset, out, nil
+}
+
+func walkCovered(t *testing.T, fn func(path string, f *ast.File, fset *token.FileSet)) {
+	t.Helper()
+	fset, files, err := parseCovered(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pf := range files {
+		fn(pf.path, pf.file, fset)
 	}
 }
 
 func isTextCall(n *ast.CallExpr) (name, key string, argc int, literal bool) {
 	switch fun := n.Fun.(type) {
 	case *ast.Ident:
-		if fun.Name == "T" {
-			name = "T"
+		if fun.Name == "T" || fun.Name == "Tf" {
+			name = fun.Name
 		}
 	case *ast.SelectorExpr:
 		id, ok := fun.X.(*ast.Ident)
-		if ok && id.Name == "i18n" && (fun.Sel.Name == "T" || fun.Sel.Name == "Errorf") {
+		if ok && id.Name == "i18n" && (fun.Sel.Name == "T" || fun.Sel.Name == "Tf" || fun.Sel.Name == "Format" || fun.Sel.Name == "Errorf") {
 			name = "i18n." + fun.Sel.Name
 		}
 	}
@@ -285,13 +320,241 @@ func TestDynamicKeyTypoFails(t *testing.T) {
 	}
 }
 
+// TestDynamicCallExprMutationsFail 读真实的 render.go，在内存里改已放行的调用或键表。
+// 检查器必须报错。不写回磁盘。
+func TestDynamicCallExprMutationsFail(t *testing.T) {
+	clean, err := dynamicKeyProblems(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean) != 0 {
+		t.Fatalf("未改动的源码不应报错：\n%s", strings.Join(clean, "\n"))
+	}
+	renderPath, err := coveredPath("render.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, err := os.ReadFile(renderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		got, err := os.ReadFile(renderPath)
+		if err != nil {
+			t.Errorf("重读源码：%v", err)
+			return
+		}
+		if string(got) != string(orig) {
+			t.Error("检查器把 render.go 写回了磁盘")
+		}
+	})
+	cases := []struct {
+		name string
+		edit func(t *testing.T, src string) string
+		want []string
+	}{
+		{
+			name: "Sprintf",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T(fmt.Sprintf("side.status.%s", "typo"))`)
+			},
+			want: []string{"函数调用 fmt.Sprintf", "render.go"},
+		},
+		{
+			name: "LocalVar",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])", "k := \"side.status.\" + x.Status\n\t\tst := i18n.T(k)")
+			},
+			want: []string{"局部变量或参数 k", "render.go"},
+		},
+		{
+			name: "UnregisteredConcat",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T("side.status." + x.Status)`)
+			},
+			want: []string{"未登记的字符串拼接", "render.go"},
+		},
+		{
+			name: "UnregisteredMap",
+			edit: func(t *testing.T, src string) string {
+				src = replaceOnce(t, src, "func TextKeys() []string {", "var otherStatusKey = map[string]string{\"launching\": \"side.status.launching\"}\n\nfunc TextKeys() []string {")
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", "i18n.T(otherStatusKey[x.Status])")
+			},
+			want: []string{"键表 otherStatusKey 没有被 TextKeys 枚举", "render.go"},
+		},
+		{
+			name: "TableValueTypo",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, `"side.status.launching"`, `"side.status.typo"`)
+			},
+			want: []string{`"side.status.typo"`, "没进动态键集合", "render.go"},
+		},
+		{
+			name: "ExtraMapLiteral",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "func TextKeys() []string {", "var strayStatusKey = map[string]string{\"x\": \"side.status.typo\"}\n\nfunc TextKeys() []string {")
+			},
+			want: []string{`"side.status.typo"`, "没进动态键集合", "render.go"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			edited := tc.edit(t, string(orig))
+			if edited == string(orig) {
+				t.Fatal("源码没有改动")
+			}
+			probs, err := dynamicKeyProblems(map[string]string{renderPath: edited})
+			if err != nil {
+				t.Fatal(err)
+			}
+			blob := strings.Join(probs, "\n")
+			for _, w := range tc.want {
+				if !strings.Contains(blob, w) {
+					t.Fatalf("应报错含 %q，实际：\n%s", w, blob)
+				}
+			}
+		})
+	}
+}
+
 // checkOrphanKeyLiterals 要求：像键名、又不是 T 的字面量参数的字符串，必须在动态键集合里。
 // 这样新写进 map 或切片、但忘了收进 TextKeys 的键过不了。
 func checkOrphanKeyLiterals(t *testing.T, catalog map[string]bool) {
 	t.Helper()
+	probs, err := orphanProblems(nil, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range probs {
+		t.Error(p)
+	}
+}
+
+func checkDynamicCallSites(t *testing.T) {
+	t.Helper()
+	probs, err := dynamicCallProblems(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range probs {
+		t.Error(p)
+	}
+}
+
+// checkTierConcat 锁住 "tier." + 档位名。整键不是字面量，只能从档位常量枚举。
+func checkTierConcat(t *testing.T, catalog map[string]bool) {
+	t.Helper()
+	probs, err := tierProblems(nil, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range probs {
+		t.Error(p)
+	}
+}
+
+// dynamicKeyProblems 对给定源码做动态取键检查：调用表达式、落单的键字面量、档位拼接。
+// src 的键是绝对路径，值是整文件源码。nil 表示全部读磁盘。不写盘。
+func dynamicKeyProblems(src map[string]string) ([]string, error) {
+	catalog := map[string]bool{}
+	for _, k := range dynamicTextKeys() {
+		catalog[k] = true
+	}
+	var probs []string
+	for _, part := range []func() ([]string, error){
+		func() ([]string, error) { return dynamicCallProblems(src) },
+		func() ([]string, error) { return orphanProblems(src, catalog) },
+		func() ([]string, error) { return tierProblems(src, catalog) },
+	} {
+		p, err := part()
+		if err != nil {
+			return nil, err
+		}
+		probs = append(probs, p...)
+	}
+	return probs, nil
+}
+
+func dynamicCallProblems(src map[string]string) ([]string, error) {
+	fset, files, err := parseCovered(src)
+	if err != nil {
+		return nil, err
+	}
+	tables := enumeratedTables(files)
+	var probs []string
+	got := map[string]bool{}
+	seen := map[token.Pos]bool{}
+	for _, pf := range files {
+		pkgTables := tables[pf.file.Name.Name]
+		for _, d := range pf.file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			params, locals := bindNames(fd)
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name, _, _, literal := isTextCall(call)
+				if name == "" || literal {
+					return true
+				}
+				seen[call.Pos()] = true
+				expr, err := printExpr(fset, call.Args[0])
+				if err != nil {
+					probs = append(probs, err.Error())
+					return true
+				}
+				pos := fset.Position(call.Pos())
+				if okShape, why := classifyKey(call.Args[0], fd, pkgTables, params, locals); !okShape {
+					probs = append(probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
+					return true
+				}
+				got[filepath.Base(pf.path)+" · "+fd.Name.Name+" · "+expr] = true
+				return true
+			})
+		}
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name, _, _, literal := isTextCall(call)
+			if name != "" && !literal && !seen[call.Pos()] {
+				probs = append(probs, fmt.Sprintf("%s：动态取键不在函数里", fset.Position(call.Pos())))
+			}
+			return true
+		})
+	}
+	want := map[string]bool{}
+	for _, s := range dynamicCallAllow {
+		want[s] = true
+	}
+	for s := range got {
+		if !want[s] {
+			probs = append(probs, "新的动态取键 "+s+"：先确认键来自已枚举的集合，再写进 dynamicCallAllow")
+		}
+	}
+	for s := range want {
+		if !got[s] {
+			probs = append(probs, "dynamicCallAllow 里的 "+s+" 已经不是动态取键")
+		}
+	}
+	sort.Strings(probs)
+	return probs, nil
+}
+
+func orphanProblems(src map[string]string, catalog map[string]bool) ([]string, error) {
+	fset, files, err := parseCovered(src)
+	if err != nil {
+		return nil, err
+	}
+	var probs []string
 	direct := map[token.Pos]bool{}
-	walkCovered(t, func(_ string, f *ast.File, fset *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				name, _, _, literal := isTextCall(call)
 				if name != "" && literal {
@@ -307,58 +570,23 @@ func checkOrphanKeyLiterals(t *testing.T, catalog map[string]bool) {
 				return true
 			}
 			if !catalog[v] {
-				t.Errorf("%s 的 %q 不在 T 的字面量参数里，也没进动态键集合", fset.Position(lit.Pos()), v)
+				probs = append(probs, fmt.Sprintf("%s 的 %q 不在 T 的字面量参数里，也没进动态键集合", fset.Position(lit.Pos()), v))
 			}
 			return true
 		})
-	})
+	}
+	return probs, nil
 }
 
-func checkDynamicCallSites(t *testing.T) {
-	t.Helper()
-	got := map[string]bool{}
-	walkCovered(t, func(path string, f *ast.File, _ *token.FileSet) {
-		base := filepath.Base(path)
-		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				name, _, _, literal := isTextCall(call)
-				if name != "" && !literal {
-					got[base+" "+fd.Name.Name] = true
-				}
-				return true
-			})
-		}
-	})
-	want := map[string]bool{}
-	for _, s := range dynamicCallExpect {
-		want[s] = true
+func tierProblems(src map[string]string, catalog map[string]bool) ([]string, error) {
+	fset, files, err := parseCovered(src)
+	if err != nil {
+		return nil, err
 	}
-	for s := range got {
-		if !want[s] {
-			t.Errorf("新的动态取键 %s：把键收进可枚举集合，并写进 dynamicCallExpect", s)
-		}
-	}
-	for s := range want {
-		if !got[s] {
-			t.Errorf("dynamicCallExpect 里的 %s 已经不是动态取键", s)
-		}
-	}
-}
-
-// checkTierConcat 锁住 "tier." + 档位名。整键不是字面量，只能从档位常量枚举。
-func checkTierConcat(t *testing.T, catalog map[string]bool) {
-	t.Helper()
+	var probs []string
 	var prefs []string
-	walkCovered(t, func(_ string, f *ast.File, fset *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -373,27 +601,435 @@ func checkTierConcat(t *testing.T, catalog map[string]bool) {
 			}
 			lit, ok := bin.X.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
-				t.Errorf("%s：动态拼接的前缀不是字符串", fset.Position(call.Pos()))
+				probs = append(probs, fmt.Sprintf("%s：动态拼接的前缀不是字符串", fset.Position(call.Pos())))
 				return true
 			}
 			s, err := strconv.Unquote(lit.Value)
 			if err != nil {
-				t.Error(err)
+				probs = append(probs, err.Error())
 				return true
 			}
 			prefs = append(prefs, s)
 			return true
 		})
-	})
+	}
 	if strings.Join(prefs, ",") != "tier." {
-		t.Errorf("档位键拼接前缀是 %q，要是 tier.", prefs)
+		probs = append(probs, fmt.Sprintf("档位键拼接前缀是 %q，要是 tier.", prefs))
 	}
 	for _, tier := range deckstore.Tiers {
 		k := "tier." + string(tier)
 		if !catalog[k] {
-			t.Errorf("档位键 %s 没有收进动态键集合", k)
+			probs = append(probs, "档位键 "+k+" 没有收进动态键集合")
 		}
 	}
+	return probs, nil
+}
+
+// enumInfo 描述一张被 TextKeys 枚举的包级表。
+// valueIsKey：下标的结果就是文字键（map[string]string 或字符串数组）。
+// fields：结构体切片里，TextKeys 实际读取的字段。
+type enumInfo struct {
+	valueIsKey bool
+	fields     map[string]bool
+}
+
+func enumeratedTables(files []parsedFile) map[string]map[string]enumInfo {
+	vars := map[string]map[string]ast.Expr{}
+	for _, pf := range files {
+		pkg := pf.file.Name.Name
+		if vars[pkg] == nil {
+			vars[pkg] = map[string]ast.Expr{}
+		}
+		for _, d := range pf.file.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, sp := range gd.Specs {
+				vs, ok := sp.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				typ := specType(vs)
+				for _, name := range vs.Names {
+					vars[pkg][name.Name] = typ
+				}
+			}
+		}
+	}
+	out := map[string]map[string]enumInfo{}
+	for _, pf := range files {
+		pkg := pf.file.Name.Name
+		if out[pkg] == nil {
+			out[pkg] = map[string]enumInfo{}
+		}
+		pv := vars[pkg]
+		for _, d := range pf.file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name.Name != "TextKeys" || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.RangeStmt:
+					for _, name := range rangeTableNames(n.X, pv) {
+						info := out[pkg][name]
+						if fields := rangeFields(n); len(fields) > 0 {
+							if info.fields == nil {
+								info.fields = map[string]bool{}
+							}
+							for _, f := range fields {
+								info.fields[f] = true
+							}
+							out[pkg][name] = info
+						} else if varValueIsKey(pv[name]) {
+							info.valueIsKey = true
+							out[pkg][name] = info
+						}
+					}
+				case *ast.SliceExpr:
+					id, ok := n.X.(*ast.Ident)
+					if !ok || !varValueIsKey(pv[id.Name]) {
+						return true
+					}
+					info := out[pkg][id.Name]
+					info.valueIsKey = true
+					out[pkg][id.Name] = info
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+func specType(vs *ast.ValueSpec) ast.Expr {
+	if vs.Type != nil {
+		return vs.Type
+	}
+	if len(vs.Values) == 1 {
+		if lit, ok := vs.Values[0].(*ast.CompositeLit); ok {
+			return lit.Type
+		}
+	}
+	return nil
+}
+
+func varValueIsKey(typ ast.Expr) bool {
+	switch t := typ.(type) {
+	case *ast.MapType:
+		return isStringType(t.Value)
+	case *ast.ArrayType:
+		return isStringType(t.Elt)
+	default:
+		return false
+	}
+}
+
+func isStringType(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "string"
+}
+
+func rangeTableNames(x ast.Expr, vars map[string]ast.Expr) []string {
+	switch x := unparen(x).(type) {
+	case *ast.Ident:
+		if _, ok := vars[x.Name]; ok {
+			return []string{x.Name}
+		}
+	case *ast.CompositeLit:
+		var names []string
+		for _, elt := range x.Elts {
+			id, ok := elt.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if _, ok := vars[id.Name]; ok {
+				names = append(names, id.Name)
+			}
+		}
+		return names
+	}
+	return nil
+}
+
+func rangeFields(n *ast.RangeStmt) []string {
+	id, ok := n.Value.(*ast.Ident)
+	if !ok || id.Name == "_" || n.Body == nil {
+		return nil
+	}
+	var fields []string
+	seen := map[string]bool{}
+	ast.Inspect(n.Body, func(node ast.Node) bool {
+		sel, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		base, ok := sel.X.(*ast.Ident)
+		if !ok || base.Name != id.Name || seen[sel.Sel.Name] {
+			return true
+		}
+		seen[sel.Sel.Name] = true
+		fields = append(fields, sel.Sel.Name)
+		return true
+	})
+	return fields
+}
+
+func classifyKey(arg ast.Expr, fd *ast.FuncDecl, tables map[string]enumInfo, params, locals map[string]bool) (bool, string) {
+	if isTierConcat(arg, fd) {
+		return true, ""
+	}
+	if name := firstCall(arg); name != "" {
+		return false, "键参数里有函数调用 " + name
+	}
+	if hasAdd(arg) {
+		return false, "未登记的字符串拼接"
+	}
+	arg = unparen(arg)
+	if id, ok := arg.(*ast.Ident); ok {
+		if params[id.Name] || locals[id.Name] {
+			return false, "键参数是局部变量或参数 " + id.Name
+		}
+		return false, "键参数不是已登记的形状 " + id.Name
+	}
+	if sel, ok := arg.(*ast.SelectorExpr); ok {
+		if id, ok := sel.X.(*ast.Ident); ok && (params[id.Name] || locals[id.Name]) {
+			return false, "键参数是局部变量或参数 " + id.Name
+		}
+	}
+	table, field, ok := indexTable(arg)
+	if !ok {
+		return false, "键参数不是已登记的形状"
+	}
+	if params[table] || locals[table] {
+		return false, "键参数是局部变量或参数 " + table
+	}
+	info, enumerated := tables[table]
+	if !enumerated {
+		return false, "键表 " + table + " 没有被 TextKeys 枚举"
+	}
+	if field == "" {
+		if !info.valueIsKey {
+			return false, "键表 " + table + " 的下标结果不是文字键"
+		}
+		return true, ""
+	}
+	if !info.fields[field] {
+		return false, "键表 " + table + " 的字段 " + field + " 没有被 TextKeys 枚举"
+	}
+	return true, ""
+}
+
+func isTierConcat(arg ast.Expr, fd *ast.FuncDecl) bool {
+	bin, ok := unparen(arg).(*ast.BinaryExpr)
+	if !ok || bin.Op != token.ADD {
+		return false
+	}
+	lit, ok := bin.X.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil || s != "tier." {
+		return false
+	}
+	call, ok := bin.Y.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return false
+	}
+	fun, ok := call.Fun.(*ast.Ident)
+	if !ok || fun.Name != "string" {
+		return false
+	}
+	id, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return isTierParam(fd, id.Name)
+}
+
+func isTierParam(fd *ast.FuncDecl, name string) bool {
+	if fd == nil || fd.Type == nil || fd.Type.Params == nil {
+		return false
+	}
+	for _, f := range fd.Type.Params.List {
+		sel, ok := f.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Tier" {
+			continue
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "deckstore" {
+			continue
+		}
+		for _, n := range f.Names {
+			if n.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func indexTable(arg ast.Expr) (table, field string, ok bool) {
+	arg = unparen(arg)
+	if sel, isSel := arg.(*ast.SelectorExpr); isSel {
+		field = sel.Sel.Name
+		arg = unparen(sel.X)
+	}
+	ix, isIx := arg.(*ast.IndexExpr)
+	if !isIx {
+		return "", "", false
+	}
+	id, isID := ix.X.(*ast.Ident)
+	if !isID {
+		return "", "", false
+	}
+	return id.Name, field, true
+}
+
+func firstCall(e ast.Expr) string {
+	name := ""
+	ast.Inspect(e, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok || name != "" {
+			return name == ""
+		}
+		name = callName(c)
+		return false
+	})
+	return name
+}
+
+func callName(c *ast.CallExpr) string {
+	switch f := c.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		if id, ok := f.X.(*ast.Ident); ok {
+			return id.Name + "." + f.Sel.Name
+		}
+		return f.Sel.Name
+	default:
+		return "调用"
+	}
+}
+
+func hasAdd(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		b, ok := n.(*ast.BinaryExpr)
+		if ok && b.Op == token.ADD {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+func bindNames(fd *ast.FuncDecl) (params, locals map[string]bool) {
+	params = map[string]bool{}
+	locals = map[string]bool{}
+	addFields := func(fl *ast.FieldList, dst map[string]bool) {
+		if fl == nil {
+			return
+		}
+		for _, f := range fl.List {
+			for _, n := range f.Names {
+				if n.Name != "_" {
+					dst[n.Name] = true
+				}
+			}
+		}
+	}
+	addFields(fd.Recv, locals)
+	if fd.Type != nil {
+		addFields(fd.Type.Params, params)
+		addFields(fd.Type.Results, locals)
+	}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if n.Tok != token.DEFINE {
+				return true
+			}
+			for _, lhs := range n.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+					locals[id.Name] = true
+				}
+			}
+		case *ast.RangeStmt:
+			if n.Tok != token.DEFINE {
+				return true
+			}
+			for _, idn := range []ast.Expr{n.Key, n.Value} {
+				if id, ok := idn.(*ast.Ident); ok && id.Name != "_" {
+					locals[id.Name] = true
+				}
+			}
+		case *ast.DeclStmt:
+			gd, ok := n.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				return true
+			}
+			for _, sp := range gd.Specs {
+				vs, ok := sp.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					if name.Name != "_" {
+						locals[name.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return params, locals
+}
+
+func printExpr(fset *token.FileSet, e ast.Expr) (string, error) {
+	var b bytes.Buffer
+	cfg := printer.Config{Mode: printer.UseSpaces, Tabwidth: 8}
+	if err := cfg.Fprint(&b, fset, e); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func coveredPath(base string) (string, error) {
+	var hits []string
+	for _, dir := range coveredDirs() {
+		p := filepath.Join(dir, base)
+		if _, err := os.Stat(p); err == nil {
+			hits = append(hits, p)
+		}
+	}
+	if len(hits) != 1 {
+		return "", fmt.Errorf("文件 %s 匹配到 %d 个", base, len(hits))
+	}
+	return hits[0], nil
+}
+
+func replaceOnce(t *testing.T, src, old, neu string) string {
+	t.Helper()
+	n := strings.Count(src, old)
+	if n != 1 {
+		t.Fatalf("片段出现 %d 次：%s", n, old)
+	}
+	return strings.Replace(src, old, neu, 1)
 }
 
 // checkDynamicKeysPlain 拦住带占位符的动态键。这种键的参数个数，字面量扫描数不到。

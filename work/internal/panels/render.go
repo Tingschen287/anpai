@@ -316,15 +316,16 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 }
 
 func kindLabel(k string) string {
-	if key, ok := kindKey[k]; ok {
-		return i18n.T(key)
+	// 写成 kindKey[k]。先放进局部变量再传入，检查器会拒绝。
+	if _, ok := kindKey[k]; ok {
+		return i18n.T(kindKey[k])
 	}
 	return k
 }
 
 func label(opt string) string {
-	if key, ok := optionKey[opt]; ok {
-		return i18n.T(key)
+	if _, ok := optionKey[opt]; ok {
+		return i18n.T(optionKey[opt])
 	}
 	return opt
 }

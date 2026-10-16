@@ -302,7 +302,7 @@ func split(ps []deckstore.PanelDef) (right, bottom []deckstore.PanelDef) {
 	return right, bottom
 }
 
-// layoutKeyRows 是根表按键和文字键。Keys 用下标取文字，调用处不是字符串字面量。
+// layoutKeyRows 是根表按键和文字键。Keys 用 layoutKeyRows[i].text 取文字，调用处不是字符串字面量。
 var layoutKeyRows = []struct{ key, text string }{
 	{"F2", "layout.key.f2"},
 	{"Ctrl-Q", "layout.key.cq"},
@@ -318,7 +318,8 @@ var layoutKeyRows = []struct{ key, text string }{
 func Keys() []struct{ Key, What string } {
 	out := make([]struct{ Key, What string }, len(layoutKeyRows))
 	for i, r := range layoutKeyRows {
-		out[i] = struct{ Key, What string }{r.key, i18n.T(r.text)}
+		// 用包级表的下标，不用 r.text。检查器不认局部变量上的字段。
+		out[i] = struct{ Key, What string }{r.key, i18n.T(layoutKeyRows[i].text)}
 	}
 	return out
 }

@@ -123,6 +123,13 @@ const (
 
 var pageText = [pageCount]string{"page.project", "page.agents", "page.trust"}
 
+// TextKeys 返回页签文字键。tabBar 用下标取，调用处不是字符串字面量。
+func TextKeys() []string {
+	out := make([]string, len(pageText))
+	copy(out, pageText[:])
+	return out
+}
+
 // Settings 是设置界面的 Bubble Tea 模型。
 type Settings struct {
 	API       SettingsAPI
@@ -888,10 +895,10 @@ func (m *Settings) hl(s string) string {
 // tabBar 是顶部：标题与三个页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
 func (m *Settings) tabBar() string {
 	var tabs []string
-	for i, key := range pageText {
-		name := " " + T(key) + " "
+	for i := range pageText {
+		name := " " + T(pageText[i]) + " "
 		if page(i) == pageTrust && len(m.trust) > 0 {
-			name = " " + T(key) + fmt.Sprintf(" %d ", len(m.trust))
+			name = " " + T(pageText[i]) + fmt.Sprintf(" %d ", len(m.trust))
 		}
 		if page(i) == m.page {
 			tabs = append(tabs, tabOn+name+reset)
