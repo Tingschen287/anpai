@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
@@ -83,13 +82,13 @@ func (a DeckAPI) StartMain(ctx context.Context, project string) (StartMainResult
 func startMainText(project string, r StartMainResult, err error) (text string, ok bool) {
 	switch {
 	case err != nil:
-		return fmt.Sprintf("起「%s」的主 agent 失败：%s", project, errText(err)), false
+		return T("main.start.fail", project, errText(err)), false
 	case r.Pending != "":
-		return fmt.Sprintf("「%s」的主 agent 要先等你在右栏批准（%s），批准后选中项目再按一次 m", project, r.Pending), true
+		return T("main.start.pending", project, r.Pending), true
 	case r.Note != "":
-		return oneLine(deckstore.Clean(fmt.Sprintf("已起「%s」的主 agent：%s", project, r.Note), 160)), true
+		return oneLine(deckstore.Clean(T("main.start.note", project, r.Note), 160)), true
 	}
-	return fmt.Sprintf("已起「%s」的主 agent", project), true
+	return T("main.start.ok", project), true
 }
 
 // errText 把错误清洗成一行可显示的文字。
@@ -191,7 +190,7 @@ func newLoop(api API) *loop {
 			d, err := api.Fetch(ctx)
 			cancel()
 			if err != nil {
-				d.Err = "连不上 deckd：" + errText(err)
+				d.Err = T("ui.deckd") + errText(err)
 			}
 			select {
 			case l.data <- d:
@@ -293,15 +292,15 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 	starting := map[string]bool{}
 	startMain := func(project string) {
 		if project == "" {
-			l.say("先选中一个项目（还没有项目就按 F9、再按 n 新建）", false)
+			l.say(T("main.noproject"), false)
 			return
 		}
 		if starting[project] {
-			l.say(fmt.Sprintf("「%s」的主 agent 正在起，请稍等", project), true)
+			l.say(T("main.starting.wait", project), true)
 			return
 		}
 		starting[project] = true
-		l.say(fmt.Sprintf("正在起「%s」的主 agent……", project), true)
+		l.say(T("main.starting", project), true)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), deckclient.LongTimeout)
 			defer cancel()

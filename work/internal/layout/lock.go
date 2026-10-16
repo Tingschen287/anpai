@@ -1,10 +1,11 @@
 package layout
 
 import (
-	"fmt"
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Lock 串行化布局修改（n049 评审 1 S2）：F5/F6/F7 与 client-resized 钩子都用 tmux run-shell -b 在后台跑
@@ -23,7 +24,7 @@ func Lock(path string, timeout time.Duration) (unlock func(), err error) {
 		}
 		if err != syscall.EWOULDBLOCK || time.Now().After(deadline) {
 			f.Close()
-			return nil, fmt.Errorf("另一个布局操作还没做完（%s）：%w", path, err)
+			return nil, i18n.Errorf("layout.err.lock", path, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

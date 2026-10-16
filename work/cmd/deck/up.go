@@ -348,19 +348,8 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 	logf("client %d：30 秒内没能通知 deckd（%s；client 已列出：%v）", pid, op, seen)
 }
 
-// idleLines 是空闲页的文字（第一行是产品名，窄时只写「Anpai」，n058）。
-func idleLines(w int) []string {
-	lines := []string{
-		deckui.BrandFor(w),
-		"",
-		"左栏点一个会话，它就显示在这里；会话放回后台照常运行。",
-		"",
-	}
-	for _, k := range layout.Keys {
-		lines = append(lines, fmt.Sprintf("%-6s %s", k.Key, k.What))
-	}
-	return lines
-}
+// idleLines 是空闲页的文字（第一行是产品名。中文窄时只写「Anpai」，n058；英文一律「Anpai」，n060）。
+func idleLines(w int) []string { return deckui.IdleLines(w) }
 
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
 func idle() {

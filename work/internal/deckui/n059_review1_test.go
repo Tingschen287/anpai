@@ -4,11 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -368,36 +363,9 @@ func TestTallBlockOffsetResetsOnProjectSwitch(t *testing.T) {
 	}
 }
 
-// attempt 2：文字表每条的格式占位符个数与调用时给的参数个数一致（评审 1 已知问题 1：main.moved 少一个参数）。
-func TestTextFormatArgsMatch(t *testing.T) {
-	verb := regexp.MustCompile(`%[-+# 0]*[0-9]*(\.[0-9]+)?[a-zA-Z]`)
-	fset := token.NewFileSet()
-	for _, name := range settingsUIFiles {
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			x, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if id, ok := x.Fun.(*ast.Ident); !ok || id.Name != "T" || len(x.Args) == 0 || x.Ellipsis.IsValid() {
-				return true
-			}
-			lit, ok := x.Args[0].(*ast.BasicLit)
-			if !ok {
-				return true
-			}
-			key, _ := strconv.Unquote(lit.Value)
-			want := len(verb.FindAllString(strings.ReplaceAll(textZH[key], "%%", ""), -1))
-			if got := len(x.Args) - 1; got != want {
-				t.Errorf("%s：T(%q) 给了 %d 个参数，文字里有 %d 个占位符", fset.Position(x.Pos()), key, got, want)
-			}
-			return true
-		})
-	}
-}
+// 文字表每条的格式占位符个数与调用时给的参数个数一致（评审 1 已知问题 1：main.moved 少一个参数）。
+// n060：推广到本段覆盖的全部包，中英两种语言都查。
+func TestTextFormatArgsMatch(t *testing.T) { checkFormatArgs(t) }
 
 // attempt 2 自查：底部放不下（很长的保存报错）时，↑↓ 选行仍看得见光标行、每按一次光标就动一次；报错全文 PgDn 翻得到。
 func TestCursorStaysVisibleWhenFootOverflows(t *testing.T) {

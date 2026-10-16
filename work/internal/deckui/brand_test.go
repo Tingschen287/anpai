@@ -17,7 +17,7 @@ func TestBrandForWidthRule(t *testing.T) {
 			t.Fatalf("BrandFor(%d)=%q，应为 %q", c.cols, got, c.want)
 		}
 	}
-	if BrandName != "安排 Anpai" || BrandShort != "Anpai" || strings.Contains(BrandName+BrandShort, "Agent Deck") {
+	if BrandName() != "安排 Anpai" || BrandShort != "Anpai" || strings.Contains(BrandName()+BrandShort, "Agent Deck") {
 		t.Fatal("产品名常量不对")
 	}
 }

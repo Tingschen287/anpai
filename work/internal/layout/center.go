@@ -2,8 +2,9 @@ package layout
 
 import (
 	"context"
-	"fmt"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // CenterLoop 是中间窗格里 `deck center` 的重连循环（架构稿 §1 Ctrl-Q、§7 必测场景，n049）。
@@ -67,9 +68,9 @@ func (l *CenterLoop) Run() {
 			quick = 0
 		}
 		if quick >= l.MaxQuick {
-			reason := fmt.Sprintf("中间窗格连续 %d 次在 %s 内断开，已停止重试", quick, l.QuickExit)
+			reason := i18n.T("layout.err.center", quick, l.QuickExit)
 			if err != nil {
-				reason += "。最后一次：" + err.Error()
+				reason += i18n.T("layout.err.center.last") + err.Error()
 			}
 			if !l.Pause(reason) {
 				return

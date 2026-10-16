@@ -2,7 +2,6 @@ package panels
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Names 是内置面板名。
@@ -44,7 +44,7 @@ func Run(name, project string, c *deckclient.Client) error {
 		known = known || n == name
 	}
 	if !known {
-		return fmt.Errorf("没有面板 %q（可选：%v）", name, Names)
+		return i18n.Errorf("panel.err.unknown", name, Names)
 	}
 	_, err := tea.NewProgram(&model{name: name, project: project, c: c, width: 40, height: 20}).Run()
 	return err
@@ -80,7 +80,7 @@ func (m *model) fetch() tea.Cmd {
 			return dataMsg{decs: ds}
 		case "progress":
 			if m.project == "" {
-				return dataMsg{err: fmt.Errorf("进度面板要指定 --project")}
+				return dataMsg{err: i18n.Errorf("panel.err.project")}
 			}
 			var p deckd.Progress
 			if err := m.c.Get(ctx, "/v1/progress"+m.q(), &p); err != nil {
@@ -100,7 +100,7 @@ func (m *model) fetch() tea.Cmd {
 			}
 			return dataMsg{view: RenderActivity(ss, time.Now())}
 		}
-		return dataMsg{err: fmt.Errorf("没有面板 %s", m.name)}
+		return dataMsg{err: i18n.Errorf("panel.err.missing", m.name)}
 	}
 }
 
@@ -161,16 +161,16 @@ func (m *model) answer(i int) tea.Cmd {
 		defer cancel()
 		err := m.c.Do(ctx, "POST", "/v1/decisions/"+d.ID+"/answer", map[string]any{"option": opt, "version": d.Version}, nil)
 		if err != nil {
-			return answeredMsg{note: bad.Render("没答上：" + deckstore.Clean(err.Error(), 300))}
+			return answeredMsg{note: bad.Render(i18n.T("panel.err.answer") + deckstore.Clean(err.Error(), 300))}
 		}
-		return answeredMsg{note: good.Render("已回答：" + label(opt))}
+		return answeredMsg{note: good.Render(i18n.T("panel.err.answered") + label(opt))}
 	}
 }
 
 func (m *model) View() string {
 	if m.err != nil {
 		// 错误文本可能带上游或模型写的内容：显示前清洗（n050 评审 B7）
-		return title.Render(m.name) + "\n" + bad.Render("取不到："+deckstore.Clean(m.err.Error(), 300)) + "\n"
+		return title.Render(m.name) + "\n" + bad.Render(i18n.T("ui.loadfail")+deckstore.Clean(m.err.Error(), 300)) + "\n"
 	}
 	if m.name == "decisions" {
 		return RenderDecisions(m.decs, m.sel, m.note)

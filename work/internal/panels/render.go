@@ -16,6 +16,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 )
 
@@ -75,7 +76,7 @@ func resetText(r, now time.Time) string {
 	}
 	l, n := r.Local(), now.Local()
 	if !l.After(n) {
-		return "↻ 已重置" // 看板的窗口数据停在上一个周期（例如 Codex 一阵没用）：时刻已过，旁边的百分比是旧的（n056 自查）
+		return i18n.T("quota.reset") // 看板的窗口数据停在上一个周期（例如 Codex 一阵没用）：时刻已过，旁边的百分比是旧的（n056 自查）
 	}
 	if l.Year() == n.Year() && l.YearDay() == n.YearDay() {
 		return "↻ " + l.Format("15:04")
@@ -111,8 +112,13 @@ func quotaBadge(tool, mode string, rows int) []string {
 
 // windowLabel 是窗口在面板上的名字：认识的写中文，其余（看板给的键）清洗后原样。
 func windowLabel(key string) string {
-	if l, ok := map[string]string{"5h": "5h", "week": "周", "day": "日"}[key]; ok {
-		return l
+	switch key {
+	case "5h":
+		return "5h"
+	case "week":
+		return i18n.T("quota.week")
+	case "day":
+		return i18n.T("quota.day")
 	}
 	return strings.Join(strings.Fields(deckstore.Clean(key, 12)), " ")
 }
@@ -122,7 +128,7 @@ func windowLabel(key string) string {
 // sixel 时返回各 logo 的位置，图由调用方另画。
 func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []QuotaLogo) {
 	now := quotaNow()
-	lines := []string{title.Render("额度")}
+	lines := []string{title.Render(i18n.T("quota.title"))}
 	var logos []QuotaLogo
 	var shown []dashquota.ToolQuota
 	resetW := 0
@@ -136,7 +142,7 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		}
 	}
 	if len(shown) == 0 {
-		return append(lines, dim.Render("暂时没有可显示的额度")), nil
+		return append(lines, dim.Render(i18n.T("quota.empty"))), nil
 	}
 	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 labelW 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
 	labelW := 3
@@ -174,9 +180,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		style, mark := good, ""
 		switch q.Status {
 		case dashquota.Exhausted:
-			style, mark = bad, " 用尽"
+			style, mark = bad, i18n.T("quota.full")
 		case dashquota.Warn:
-			style, mark = warn, " 告急"
+			style, mark = warn, i18n.T("quota.low")
 		}
 		// 太窄时截名字、保住「用尽」「告急」（n056 attempt 2 自查）
 		if room := width - 6 - lipgloss.Width(mark); room > 0 && lipgloss.Width(name) > room {
@@ -235,36 +241,36 @@ func OpenDecisions(ds []deckstore.Decision) []deckstore.Decision {
 	return out
 }
 
-var kindName = map[string]string{
-	deckstore.KindCost: "要花额度", deckstore.KindConfig: "要改电脑设置", deckstore.KindPush: "要推送代码",
-	deckstore.KindDisagree: "协作者意见不一", deckstore.KindDeviation: "偏离你的决策",
-	deckstore.KindCodexTrust: "Codex 会改写你的配置", deckstore.KindGraphGate: "项目计划的门", deckstore.KindSessionWait: "会话在等你",
+var kindKey = map[string]string{
+	deckstore.KindCost: "decide.kind.cost", deckstore.KindConfig: "decide.kind.config", deckstore.KindPush: "decide.kind.push",
+	deckstore.KindDisagree: "decide.kind.disagree", deckstore.KindDeviation: "decide.kind.deviation",
+	deckstore.KindCodexTrust: "decide.kind.codex", deckstore.KindGraphGate: "decide.kind.gate", deckstore.KindSessionWait: "decide.kind.wait",
 }
 
-var optionName = map[string]string{deckstore.OptApprove: "同意", deckstore.OptReject: "不同意", deckstore.OptStop: "停止"}
+var optionKey = map[string]string{deckstore.OptApprove: "decide.opt.approve", deckstore.OptReject: "decide.opt.reject", deckstore.OptStop: "decide.opt.stop"}
 
 // RenderDecisions 画「需要你决策」面板。sel 是选中的那一条。
 func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 	open := OpenDecisions(ds)
 	var b strings.Builder
-	b.WriteString(title.Render(fmt.Sprintf("需要你决策（%d）", len(open))) + "\n")
-	b.WriteString(dim.Render("只有主 agent 过滤后的事项才会出现在这里") + "\n")
+	b.WriteString(title.Render(i18n.T("decide.title", len(open))) + "\n")
+	b.WriteString(dim.Render(i18n.T("decide.about")) + "\n")
 	if len(open) == 0 {
-		b.WriteString(dim.Render("现在没有要你决定的事") + "\n")
+		b.WriteString(dim.Render(i18n.T("decide.empty")) + "\n")
 	}
 	for i, d := range open {
 		mark := "  "
 		if i == sel {
 			mark = picked.Render("▸ ")
 		}
-		k := kindName[d.Kind]
+		k := kindLabel(d.Kind)
 		if k == "" {
 			k = d.Kind
 		}
 		b.WriteString(mark + warn.Render("["+k+"]") + " " + dim.Render(d.Project) + "\n")
 		b.WriteString("  " + deckstore.Clean(d.Summary, 800) + "\n")
 		if d.Recommend != "" {
-			b.WriteString(dim.Render("  推荐："+label(d.Recommend)) + "\n")
+			b.WriteString(dim.Render(i18n.T("decide.recommend")+label(d.Recommend)) + "\n")
 		}
 		if i == sel {
 			var opts []string
@@ -274,16 +280,23 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 			b.WriteString("  " + picked.Render(strings.Join(opts, "  ")) + "\n")
 		}
 	}
-	b.WriteString(dim.Render("↑↓ 选  数字键作答") + "\n")
+	b.WriteString(dim.Render(i18n.T("decide.keys")) + "\n")
 	if note != "" {
 		b.WriteString(note + "\n")
 	}
 	return b.String()
 }
 
+func kindLabel(k string) string {
+	if key, ok := kindKey[k]; ok {
+		return i18n.T(key)
+	}
+	return k
+}
+
 func label(opt string) string {
-	if n, ok := optionName[opt]; ok {
-		return n
+	if key, ok := optionKey[opt]; ok {
+		return i18n.T(key)
 	}
 	return opt
 }
@@ -291,28 +304,28 @@ func label(opt string) string {
 // RenderProgress 画项目进度面板。
 func RenderProgress(p deckd.Progress) string {
 	var b strings.Builder
-	b.WriteString(title.Render("项目进度 · "+p.Project) + "\n")
+	b.WriteString(title.Render(i18n.T("progress.title")+p.Project) + "\n")
 	if !p.Graph {
-		b.WriteString(dim.Render("这个项目没有接 Graph") + "\n")
+		b.WriteString(dim.Render(i18n.T("progress.nograph")) + "\n")
 		return b.String()
 	}
 	order := []string{"accepted", "running", "submitted", "ready", "rework", "blocked", "failed", "planned", "superseded"}
-	zh := map[string]string{"accepted": "已验收", "running": "进行中", "submitted": "待评审", "ready": "可开工", "rework": "返工",
-		"blocked": "阻塞", "failed": "失败", "planned": "计划中", "superseded": "已取代"}
+	zh := map[string]string{"accepted": "progress.accepted", "running": "progress.running", "submitted": "progress.submitted", "ready": "progress.ready", "rework": "progress.rework",
+		"blocked": "progress.blocked", "failed": "progress.failed", "planned": "progress.planned", "superseded": "progress.superseded"}
 	var parts []string
 	for _, k := range order {
 		if n := p.Counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", zh[k], n))
+			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(zh[k]), n))
 		}
 	}
 	if p.Unknown > 0 {
-		parts = append(parts, fmt.Sprintf("状态未知 %d", p.Unknown))
+		parts = append(parts, i18n.T("progress.unknown", p.Unknown))
 	}
 	b.WriteString(strings.Join(parts, " · ") + "\n")
 	for _, bl := range p.Budgets {
 		switch {
 		case bl.Used == nil && bl.Limit != nil:
-			b.WriteString(fmt.Sprintf("%s 未知 / %g%s\n", bl.Label, *bl.Limit, bl.Unit))
+			b.WriteString(i18n.T("progress.budget.unknown", bl.Label, *bl.Limit, bl.Unit))
 		case bl.Used != nil && bl.Limit != nil:
 			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, bl.Unit))
 		}
@@ -326,9 +339,9 @@ func RenderProgress(p deckd.Progress) string {
 // RenderNotifications 画下栏通知，最新的在下面，最多 height 行。
 func RenderNotifications(ns []deckstore.Notification, height int) string {
 	var b strings.Builder
-	b.WriteString(title.Render("通知") + dim.Render("  主 agent 开了子 agent、需要你决定时都会出现在这里，不打断你") + "\n")
+	b.WriteString(title.Render(i18n.T("notify.title")) + dim.Render(i18n.T("notify.about")) + "\n")
 	if len(ns) == 0 {
-		b.WriteString(dim.Render("还没有通知") + "\n")
+		b.WriteString(dim.Render(i18n.T("notify.empty")) + "\n")
 	}
 	if height > 1 && len(ns) > height-1 {
 		ns = ns[len(ns)-(height-1):]
@@ -350,18 +363,18 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 // RenderActivity 画「agent 在干嘛」：每个项目的会话与状态。
 func RenderActivity(ss []deckstore.Session, now time.Time) string {
 	var b strings.Builder
-	b.WriteString(title.Render("agent 在干嘛") + "\n")
+	b.WriteString(title.Render(i18n.T("act.title")) + "\n")
 	if len(ss) == 0 {
-		b.WriteString(dim.Render("还没有会话") + "\n")
+		b.WriteString(dim.Render(i18n.T("act.empty")) + "\n")
 	}
-	zh := map[string]string{deckstore.StatusLaunching: "启动中", deckstore.StatusRunning: "在跑", deckstore.StatusUncertain: "结果不明",
-		deckstore.StatusDone: "完成", deckstore.StatusFailed: "失败", deckstore.StatusStopped: "已停"}
+	zh := map[string]string{deckstore.StatusLaunching: "side.status.launching", deckstore.StatusRunning: "side.status.running", deckstore.StatusUncertain: "act.status.uncertain",
+		deckstore.StatusDone: "act.status.done", deckstore.StatusFailed: "act.status.failed", deckstore.StatusStopped: "act.status.stopped"}
 	for _, x := range ss {
-		role := "协作"
+		role := i18n.T("act.role.sub")
 		if x.Role == "main" {
-			role = "★主"
+			role = i18n.T("act.role.main")
 		}
-		st := zh[x.Status]
+		st := i18n.T(zh[x.Status])
 		if x.Status == deckstore.StatusUncertain || x.Status == deckstore.StatusFailed {
 			st = warn.Render(st)
 		}

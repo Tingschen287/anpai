@@ -23,6 +23,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 窗格角色。
@@ -115,7 +116,7 @@ func (s Spec) panelCmd(p deckstore.PanelDef) string {
 func BaseConf(s Spec) string {
 	s = s.withDefaults()
 	var b strings.Builder
-	b.WriteString("# 安排 Anpai v1 布局 server（deck up 生成，勿手改）\n")
+	b.WriteString(i18n.T("layout.conf.base") + "\n")
 	for _, line := range []string{
 		"set -g prefix None",
 		"set -g prefix2 None",
@@ -301,16 +302,23 @@ func split(ps []deckstore.PanelDef) (right, bottom []deckstore.PanelDef) {
 	return right, bottom
 }
 
-// Keys 是布局 server 根表上的按键（外层 tmux 截获，不进中间的 CLI）。
-var Keys = []struct{ Key, What string }{
-	{"F2", "接管当前显示的子 agent（切走、隐藏或 Ctrl-Q 即自动交还）"},
-	{"Ctrl-Q", "把中间正在看的会话放回后台（会话照常运行）"},
-	{"F5", "显示/隐藏左栏"},
-	{"F6", "显示/隐藏右栏"},
-	{"F7", "显示/隐藏下栏"},
-	{"F8", "把排队等着转告主 agent 的汇报立刻送出"},
-	{"F9", "agent 设置"},
-	{"F10", "回到中间窗格（键盘焦点）"},
+// Keys 是布局 server 根表上的按键说明（外层 tmux 截获，不进中间的 CLI）。按当前语言取文字。
+func Keys() []struct{ Key, What string } {
+	rows := []struct{ key, text string }{
+		{"F2", "layout.key.f2"},
+		{"Ctrl-Q", "layout.key.cq"},
+		{"F5", "layout.key.f5"},
+		{"F6", "layout.key.f6"},
+		{"F7", "layout.key.f7"},
+		{"F8", "layout.key.f8"},
+		{"F9", "layout.key.f9"},
+		{"F10", "layout.key.f10"},
+	}
+	out := make([]struct{ Key, What string }, len(rows))
+	for i, r := range rows {
+		out[i] = struct{ Key, What string }{r.key, i18n.T(r.text)}
+	}
+	return out
 }
 
 // BindingsConf 是窗格建好之后的按键绑定。接管键交给标签条程序处理（它在布局窗格里，有 owner 身份；
@@ -321,7 +329,7 @@ func BindingsConf(s Spec, b Built) string {
 		return "run-shell -b " + Quote(s.deckCmd(append([]string{"layout", "toggle", region}, s.sockets()...)...))
 	}
 	var w strings.Builder
-	w.WriteString("# 安排 Anpai v1 按键（deck up 生成，勿手改）\n")
+	w.WriteString(i18n.T("layout.conf.keys") + "\n")
 	fmt.Fprintf(&w, "bind -n F2 send-keys -t %s F2\n", b.Tabs)
 	// Ctrl-Q：放回后台。在布局 server 上截获、交给标签条按隐藏规则处理（架构稿 §7），只读与可写时都有效，
 	// 不靠 agent-deck 在它那台 server 上的 C-q 断开绑定、也不必断开重连中间 client（n049 真机演示后改）
@@ -356,7 +364,7 @@ func regionOf(role string) string {
 func Toggle(m Mux, s Spec, region string) (err error) {
 	s = s.withDefaults()
 	if region != "left" && region != "right" && region != "bottom" {
-		return fmt.Errorf("没有 %q 这一栏（只有 left、right、bottom）", region)
+		return i18n.Errorf("layout.err.region", region)
 	}
 	panes, err := m.Panes()
 	if err != nil {
@@ -385,7 +393,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 		}
 	}
 	if center == "" {
-		return fmt.Errorf("布局里没有中间窗格")
+		return i18n.Errorf("layout.err.nocenter")
 	}
 	if len(shown) > 0 {
 		for _, p := range shown {
@@ -399,7 +407,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 		return m.Select(center)
 	}
 	if len(parked) == 0 {
-		return fmt.Errorf("%s 栏没有窗格", region)
+		return i18n.Errorf("layout.err.nopanes", region)
 	}
 	// 按建窗格的先后（pane id 递增）挪回，保持原来的上下、左右顺序
 	sort.Slice(parked, func(i, j int) bool { return paneNum(parked[i].ID) < paneNum(parked[j].ID) })
@@ -410,7 +418,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, "标签条", tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
+			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.tabs"), tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
 		}()
 	}
 	// 下栏原本在侧栏右边（侧栏整高）。整宽并回会铺到侧栏下面、把侧栏压矮，所以先停放侧栏，下栏回去后再把侧栏整高接回左边。
@@ -419,7 +427,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, "侧栏", sidebar,
+			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.side"), sidebar,
 				agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: strconv.Itoa(s.LeftWidth)}))
 		}()
 	}
@@ -456,7 +464,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 // restore 把为并回而暂时停放的窗格接回原位，再整理尺寸、选回中间。
 func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec) error {
 	if err := m.Unpark(pane, center, spec); err != nil {
-		return fmt.Errorf("%s接不回原位（它还在后台窗口 parked-* 里照常运行；再按显隐键不会把它接回，要恢复就关掉布局 server 后重新 deck up）：%w", what, err)
+		return i18n.Errorf("layout.err.restore", what, err)
 	}
 	if err := Normalize(m, s); err != nil {
 		return err
