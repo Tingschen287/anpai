@@ -249,6 +249,34 @@ var kindKey = map[string]string{
 
 var optionKey = map[string]string{deckstore.OptApprove: "decide.opt.approve", deckstore.OptReject: "decide.opt.reject", deckstore.OptStop: "decide.opt.stop"}
 
+// activityStatusKey 把活动面板的会话状态对到文字键。
+// 启动中、在跑和侧栏共用 side.status.*。其余用 act.status.*。
+// 不认识的状态不在表里，查出来是空串，画面留空。
+var activityStatusKey = map[string]string{
+	deckstore.StatusLaunching: "side.status.launching", deckstore.StatusRunning: "side.status.running",
+	deckstore.StatusUncertain: "act.status.uncertain", deckstore.StatusDone: "act.status.done",
+	deckstore.StatusFailed: "act.status.failed", deckstore.StatusStopped: "act.status.stopped",
+}
+
+// progressCountKey 把进度计数的状态对到文字键。
+var progressCountKey = map[string]string{
+	"accepted": "progress.accepted", "running": "progress.running", "submitted": "progress.submitted",
+	"ready": "progress.ready", "rework": "progress.rework", "blocked": "progress.blocked",
+	"failed": "progress.failed", "planned": "progress.planned", "superseded": "progress.superseded",
+}
+
+// TextKeys 返回本包里经 map 传给 i18n.T 的键。调用处不是字符串字面量，扫描器看不见。
+func TextKeys() []string {
+	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey))
+	for _, m := range []map[string]string{kindKey, optionKey, activityStatusKey, progressCountKey} {
+		for _, k := range m {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // RenderDecisions 画「需要你决策」面板。sel 是选中的那一条。
 func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 	open := OpenDecisions(ds)
@@ -310,12 +338,10 @@ func RenderProgress(p deckd.Progress) string {
 		return b.String()
 	}
 	order := []string{"accepted", "running", "submitted", "ready", "rework", "blocked", "failed", "planned", "superseded"}
-	zh := map[string]string{"accepted": "progress.accepted", "running": "progress.running", "submitted": "progress.submitted", "ready": "progress.ready", "rework": "progress.rework",
-		"blocked": "progress.blocked", "failed": "progress.failed", "planned": "progress.planned", "superseded": "progress.superseded"}
 	var parts []string
 	for _, k := range order {
 		if n := p.Counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(zh[k]), n))
+			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), n))
 		}
 	}
 	if p.Unknown > 0 {
@@ -367,14 +393,12 @@ func RenderActivity(ss []deckstore.Session, now time.Time) string {
 	if len(ss) == 0 {
 		b.WriteString(dim.Render(i18n.T("act.empty")) + "\n")
 	}
-	zh := map[string]string{deckstore.StatusLaunching: "side.status.launching", deckstore.StatusRunning: "side.status.running", deckstore.StatusUncertain: "act.status.uncertain",
-		deckstore.StatusDone: "act.status.done", deckstore.StatusFailed: "act.status.failed", deckstore.StatusStopped: "act.status.stopped"}
 	for _, x := range ss {
 		role := i18n.T("act.role.sub")
 		if x.Role == "main" {
 			role = i18n.T("act.role.main")
 		}
-		st := i18n.T(zh[x.Status])
+		st := i18n.T(activityStatusKey[x.Status])
 		if x.Status == deckstore.StatusUncertain || x.Status == deckstore.StatusFailed {
 			st = warn.Render(st)
 		}

@@ -302,21 +302,32 @@ func split(ps []deckstore.PanelDef) (right, bottom []deckstore.PanelDef) {
 	return right, bottom
 }
 
+// layoutKeyRows 是根表按键和文字键。Keys 用下标取文字，调用处不是字符串字面量。
+var layoutKeyRows = []struct{ key, text string }{
+	{"F2", "layout.key.f2"},
+	{"Ctrl-Q", "layout.key.cq"},
+	{"F5", "layout.key.f5"},
+	{"F6", "layout.key.f6"},
+	{"F7", "layout.key.f7"},
+	{"F8", "layout.key.f8"},
+	{"F9", "layout.key.f9"},
+	{"F10", "layout.key.f10"},
+}
+
 // Keys 是布局 server 根表上的按键说明（外层 tmux 截获，不进中间的 CLI）。按当前语言取文字。
 func Keys() []struct{ Key, What string } {
-	rows := []struct{ key, text string }{
-		{"F2", "layout.key.f2"},
-		{"Ctrl-Q", "layout.key.cq"},
-		{"F5", "layout.key.f5"},
-		{"F6", "layout.key.f6"},
-		{"F7", "layout.key.f7"},
-		{"F8", "layout.key.f8"},
-		{"F9", "layout.key.f9"},
-		{"F10", "layout.key.f10"},
-	}
-	out := make([]struct{ Key, What string }, len(rows))
-	for i, r := range rows {
+	out := make([]struct{ Key, What string }, len(layoutKeyRows))
+	for i, r := range layoutKeyRows {
 		out[i] = struct{ Key, What string }{r.key, i18n.T(r.text)}
+	}
+	return out
+}
+
+// TextKeys 返回按键说明用到的文字键。
+func TextKeys() []string {
+	out := make([]string, len(layoutKeyRows))
+	for i, r := range layoutKeyRows {
+		out[i] = r.text
 	}
 	return out
 }

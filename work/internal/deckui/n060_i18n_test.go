@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,10 +46,34 @@ func coveredDirs() []string {
 // strayAllow 是允许留下的中文字面量。键是字面量内容，值是理由。现在没有。
 var strayAllow = map[string]string{}
 
-// dynamicKeys 是代码里拼出来的键，字符串字面量扫不到。
-// tier.frontier / tier.balanced / tier.economy：settings.go 的 tierName 用 "tier." + 档位名。
-// tier.unset 是 T("tier.unset")，扫得到。
-var dynamicKeys = []string{"tier.frontier", "tier.balanced", "tier.economy"}
+// dynamicTextKeys 是运行时才取到、再传给 T 的键。
+// 名单来自生产代码里的表，不是另写一份：
+// 面板的 map（panels.TextKeys）、布局按键行（layout.TextKeys）、设置页签 pageText、档位 "tier." + deckstore.Tiers。
+// tier.unset 是 T("tier.unset")，扫得到，不在这里。
+func dynamicTextKeys() []string {
+	out := make([]string, 0, len(pageText)+len(deckstore.Tiers))
+	out = append(out, pageText[:]...)
+	for _, tier := range deckstore.Tiers {
+		out = append(out, "tier."+string(tier))
+	}
+	out = append(out, panels.TextKeys()...)
+	out = append(out, layout.TextKeys()...)
+	return out
+}
+
+// dynamicCallExpect 是第一个参数不是字符串字面量的 T / i18n.T / i18n.Errorf。
+// 多一个调用处，测试就失败，直到键收进上面的表。
+var dynamicCallExpect = []string{
+	"layout.go Keys",
+	"render.go RenderActivity",
+	"render.go RenderProgress",
+	"render.go kindLabel",
+	"render.go label",
+	"settings.go tabBar",
+	"settings.go tierName",
+}
+
+var keyShape = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z0-9]+)+$`)
 
 func walkCovered(t *testing.T, fn func(path string, f *ast.File, fset *token.FileSet)) {
 	t.Helper()
@@ -100,7 +125,7 @@ func isTextCall(n *ast.CallExpr) (name, key string, argc int, literal bool) {
 func checkNoStrayChinese(t *testing.T) {
 	t.Helper()
 	used := map[string]bool{}
-	for _, k := range dynamicKeys {
+	for _, k := range dynamicTextKeys() {
 		used[k] = true
 	}
 	walkCovered(t, func(path string, f *ast.File, fset *token.FileSet) {
@@ -184,6 +209,212 @@ func checkFormatArgs(t *testing.T) {
 			return true
 		})
 	})
+}
+
+// absentTextKeys 返回不在中文表或英文表里的键。正例和反例走同一条。
+func absentTextKeys(keys []string) []string {
+	var miss []string
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		_, zhOK := i18n.TextZH(k)
+		_, enOK := i18n.TextEN(k)
+		if !zhOK || !enOK {
+			miss = append(miss, k)
+		}
+	}
+	sort.Strings(miss)
+	return miss
+}
+
+// TestDynamicKeysInBothTables 核对动态键都在中英两张表里。
+// 不在 T 里对缺键 panic：缺键仍要原样返回键名，已有测试盖住这条。
+// 拼错的键留在 map 里时，扫描器以前直接跳过。现在键从表里枚举出来，这里失败。
+func TestDynamicKeysInBothTables(t *testing.T) {
+	keys := dynamicTextKeys()
+	if len(keys) == 0 {
+		t.Fatal("动态键集合是空的")
+	}
+	if miss := absentTextKeys(keys); len(miss) > 0 {
+		t.Fatalf("动态键不在中英文字表里：%s", strings.Join(miss, ", "))
+	}
+	catalog := map[string]bool{}
+	for _, k := range keys {
+		catalog[k] = true
+	}
+	checkOrphanKeyLiterals(t, catalog)
+	checkDynamicCallSites(t)
+	checkTierConcat(t, catalog)
+	checkDynamicKeysPlain(t, keys)
+}
+
+// TestDynamicKeyTypoFails 注入一个不存在的键。不改生产代码里的键。
+// 每一条都先确认原键在可枚举集合里，再换成错键，同一条检查必须失败。
+func TestDynamicKeyTypoFails(t *testing.T) {
+	live := dynamicTextKeys()
+	have := map[string]bool{}
+	for _, k := range live {
+		have[k] = true
+	}
+	cases := []struct{ orig, bad string }{
+		{"side.status.launching", "side.status.typo"},
+		{"progress.submitted", "progress.typo"},
+		{"decide.kind.gate", "decide.kind.typo"},
+		{"layout.key.f2", "layout.key.typo"},
+		{"tier.balanced", "tier.typo"},
+		{"page.agents", "page.typo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.orig, func(t *testing.T) {
+			if !have[tc.orig] {
+				t.Fatalf("可枚举集合里没有 %s", tc.orig)
+			}
+			keys := append([]string(nil), live...)
+			for i, k := range keys {
+				if k == tc.orig {
+					keys[i] = tc.bad
+				}
+			}
+			if miss := absentTextKeys(keys); len(miss) == 0 {
+				t.Fatalf("把 %s 换成 %s 后，动态键检查仍通过", tc.orig, tc.bad)
+			}
+		})
+	}
+}
+
+// checkOrphanKeyLiterals 要求：像键名、又不是 T 的字面量参数的字符串，必须在动态键集合里。
+// 这样新写进 map 或切片、但忘了收进 TextKeys 的键过不了。
+func checkOrphanKeyLiterals(t *testing.T, catalog map[string]bool) {
+	t.Helper()
+	direct := map[token.Pos]bool{}
+	walkCovered(t, func(_ string, f *ast.File, fset *token.FileSet) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				name, _, _, literal := isTextCall(call)
+				if name != "" && literal {
+					direct[call.Args[0].Pos()] = true
+				}
+			}
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING || direct[lit.Pos()] {
+				return true
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil || !keyShape.MatchString(v) {
+				return true
+			}
+			if !catalog[v] {
+				t.Errorf("%s 的 %q 不在 T 的字面量参数里，也没进动态键集合", fset.Position(lit.Pos()), v)
+			}
+			return true
+		})
+	})
+}
+
+func checkDynamicCallSites(t *testing.T) {
+	t.Helper()
+	got := map[string]bool{}
+	walkCovered(t, func(path string, f *ast.File, _ *token.FileSet) {
+		base := filepath.Base(path)
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name, _, _, literal := isTextCall(call)
+				if name != "" && !literal {
+					got[base+" "+fd.Name.Name] = true
+				}
+				return true
+			})
+		}
+	})
+	want := map[string]bool{}
+	for _, s := range dynamicCallExpect {
+		want[s] = true
+	}
+	for s := range got {
+		if !want[s] {
+			t.Errorf("新的动态取键 %s：把键收进可枚举集合，并写进 dynamicCallExpect", s)
+		}
+	}
+	for s := range want {
+		if !got[s] {
+			t.Errorf("dynamicCallExpect 里的 %s 已经不是动态取键", s)
+		}
+	}
+}
+
+// checkTierConcat 锁住 "tier." + 档位名。整键不是字面量，只能从档位常量枚举。
+func checkTierConcat(t *testing.T, catalog map[string]bool) {
+	t.Helper()
+	var prefs []string
+	walkCovered(t, func(_ string, f *ast.File, fset *token.FileSet) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name, _, _, literal := isTextCall(call)
+			if name == "" || literal {
+				return true
+			}
+			bin, ok := call.Args[0].(*ast.BinaryExpr)
+			if !ok || bin.Op != token.ADD {
+				return true
+			}
+			lit, ok := bin.X.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				t.Errorf("%s：动态拼接的前缀不是字符串", fset.Position(call.Pos()))
+				return true
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				t.Error(err)
+				return true
+			}
+			prefs = append(prefs, s)
+			return true
+		})
+	})
+	if strings.Join(prefs, ",") != "tier." {
+		t.Errorf("档位键拼接前缀是 %q，要是 tier.", prefs)
+	}
+	for _, tier := range deckstore.Tiers {
+		k := "tier." + string(tier)
+		if !catalog[k] {
+			t.Errorf("档位键 %s 没有收进动态键集合", k)
+		}
+	}
+}
+
+// checkDynamicKeysPlain 拦住带占位符的动态键。这种键的参数个数，字面量扫描数不到。
+func checkDynamicKeysPlain(t *testing.T, keys []string) {
+	t.Helper()
+	verbs := func(s string) []string {
+		return verbRe.FindAllString(strings.ReplaceAll(s, "%%", ""), -1)
+	}
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			zh, zhOK := i18n.TextZH(k)
+			en, enOK := i18n.TextEN(k)
+			if zhOK && enOK {
+				if vz, ve := verbs(zh), verbs(en); len(vz) > 0 || len(ve) > 0 {
+					t.Errorf("动态键 %q 带占位符 %v / %v，参数个数扫不到", k, vz, ve)
+				}
+			}
+		}
+	}
 }
 
 func cjkRune(s string) (rune, string) {
