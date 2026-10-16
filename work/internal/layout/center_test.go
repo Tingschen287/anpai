@@ -1,0 +1,227 @@
+package layout
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type script struct {
+	mu      sync.Mutex
+	now     time.Time
+	runs    []run // 每次 attach 的结果
+	i       int
+	ops     map[int]string // client 进程号 → op（Announce 在后台并发调用，按进程号还原先后）
+	ctxs    map[int]context.Context
+	pauses  []string
+	answers []bool
+}
+
+type run struct {
+	lasts time.Duration
+	err   error // nil：正常断开（Ctrl-Q）；非 nil：连不上
+	start error // Attach 本身失败
+}
+
+func (s *script) loop() *CenterLoop {
+	return &CenterLoop{
+		Now: func() time.Time { s.mu.Lock(); defer s.mu.Unlock(); return s.now },
+		Attach: func() (int, func() error, error) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			r := s.runs[s.i]
+			s.i++
+			if r.start != nil {
+				return 0, nil, r.start
+			}
+			return 100 + s.i, func() error { s.mu.Lock(); s.now = s.now.Add(r.lasts); s.mu.Unlock(); return r.err }, nil
+		},
+		Announce: func(ctx context.Context, op string, pid int) {
+			s.mu.Lock()
+			if s.ops == nil {
+				s.ops, s.ctxs = map[int]string{}, map[int]context.Context{}
+			}
+			s.ops[pid], s.ctxs[pid] = op, ctx
+			s.mu.Unlock()
+		},
+		Pause: func(reason string) bool {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.pauses = append(s.pauses, reason)
+			a := s.answers[0]
+			s.answers = s.answers[1:]
+			return a
+		},
+	}
+}
+
+func waitOps(t *testing.T, s *script, n int) []string {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		s.mu.Lock()
+		var got []string
+		for pid := 101; pid < 101+len(s.runs); pid++ {
+			if op, ok := s.ops[pid]; ok {
+				got = append(got, op)
+			}
+		}
+		s.mu.Unlock()
+		if len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("Announce 只来了 %v", s.ops)
+	return nil
+}
+
+// 首次连上 resync；Ctrl-Q（正常断开）后 reset；连不上之后 resync。
+func TestCenterLoopChoosesOpByHowTheClientEnded(t *testing.T) {
+	s := &script{now: time.Unix(0, 0), runs: []run{
+		{lasts: time.Minute},                                                         // 首次，owner 用了一会儿后按 Ctrl-Q
+		{lasts: time.Minute, err: errors.New("lost")},                                // 第二次，连接出错
+		{lasts: time.Minute},                                                         // 第三次
+		{start: errors.New("x")}, {start: errors.New("x")}, {start: errors.New("x")}, // 之后连续起不来
+	}, answers: []bool{false}}
+	s.loop().Run()
+	ops := waitOps(t, s, 3)
+	if strings.Join(ops, ",") != "resync,reset,resync" {
+		t.Fatalf("op 顺序不对：%v", ops)
+	}
+}
+
+// 连续 3 次快速断开就停下等 owner；owner 选重试后重新计数、按 resync 连。
+func TestCenterLoopStopsRetryingAfterRepeatedQuickExits(t *testing.T) {
+	s := &script{now: time.Unix(0, 0), runs: []run{
+		{lasts: 100 * time.Millisecond, err: errors.New("no server")},
+		{lasts: 100 * time.Millisecond, err: errors.New("no server")},
+		{lasts: 100 * time.Millisecond, err: errors.New("no server")},
+		{lasts: time.Minute}, // owner 按了重试，这次连上了
+		{start: errors.New("x")}, {start: errors.New("x")}, {start: errors.New("x")},
+	}, answers: []bool{true, false}}
+	s.loop().Run()
+	if len(s.pauses) != 2 || !strings.Contains(s.pauses[0], "连续 3 次") || !strings.Contains(s.pauses[0], "no server") {
+		t.Fatalf("应在第 3 次快速断开后停下并说明原因：%v", s.pauses)
+	}
+	if s.i != 7 {
+		t.Fatalf("停下前不应多试：attach 了 %d 次", s.i)
+	}
+	ops := waitOps(t, s, 4)
+	if ops[3] != "resync" {
+		t.Fatalf("重试后连上应是 resync：%v", ops)
+	}
+}
+
+// 快速但正常的断开（例如连按 Ctrl-Q）也计数，避免会话一开就关时空转。
+func TestCenterLoopCountsQuickNormalExitsToo(t *testing.T) {
+	s := &script{now: time.Unix(0, 0), runs: []run{
+		{lasts: 10 * time.Millisecond}, {lasts: 10 * time.Millisecond}, {lasts: 10 * time.Millisecond},
+	}, answers: []bool{false}}
+	s.loop().Run()
+	if len(s.pauses) != 1 {
+		t.Fatalf("应停下一次：%v", s.pauses)
+	}
+}
+
+// 每个 client 的通知在它退出后即取消（n049 评审 1 B1）。
+func TestCenterLoopCancelsAnnounceWhenItsClientExits(t *testing.T) {
+	s := &script{now: time.Unix(0, 0), runs: []run{
+		{lasts: time.Minute}, {lasts: time.Minute},
+		{start: errors.New("x")}, {start: errors.New("x")}, {start: errors.New("x")},
+	}, answers: []bool{false}}
+	s.loop().Run()
+	waitOps(t, s, 2)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for pid, ctx := range s.ctxs {
+		if ctx.Err() == nil {
+			t.Fatalf("client %d 退出后它的通知还没取消", pid)
+		}
+	}
+}
+
+// 每次起 client 之前先过栅栏（含第一次），栅栏的等待不算进 client 的存活时长（n049 评审 2 B1、评审 3 B8）。
+func TestCenterLoopFencesBeforeReattaching(t *testing.T) {
+	var order []string
+	n, clock := 0, time.Unix(0, 0)
+	l := &CenterLoop{
+		Now: func() time.Time { return clock }, // 只在 client 跑着时走：之后连不上就是快速失败、停下
+		Attach: func() (int, func() error, error) {
+			n++
+			if n > 2 {
+				return 0, nil, errors.New("x")
+			}
+			order = append(order, "attach")
+			return 100 + n, func() error { clock = clock.Add(time.Minute); order = append(order, "exit"); return nil }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence:    func() { order = append(order, "fence") },
+		Pause:    func(string) bool { return false },
+		MaxQuick: 1,
+	}
+	l.Run()
+	if got := strings.Join(order, ","); got != "fence,attach,exit,fence,attach,exit,fence" {
+		t.Fatalf("顺序应是 栅栏 → 连上 → 退出 → 栅栏 → 再连：%s", got)
+	}
+}
+
+// 评审 3 B8：client 每次一连上就退出，栅栏每次等 5 秒：仍按快速断开计数，第 3 次后停下。
+func TestFenceWaitDoesNotHideQuickExits(t *testing.T) {
+	clock, n := time.Unix(0, 0), 0
+	l := &CenterLoop{
+		Now: func() time.Time { return clock }, MaxQuick: 3, QuickExit: 3 * time.Second,
+		Attach: func() (int, func() error, error) {
+			n++
+			if n > 5 {
+				return 0, nil, errors.New("测试兜底：不该连到第 6 次")
+			}
+			return n, func() error { return errors.New("一连上就退出") }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence:    func() { clock = clock.Add(5 * time.Second) },
+		Pause:    func(string) bool { return false },
+	}
+	l.Run()
+	if n != 3 {
+		t.Fatalf("应在第 3 次快速断开后停下：连了 %d 次", n)
+	}
+}
+
+// 栅栏没返回就不起新 client。
+func TestNoAttachUntilFenceReturns(t *testing.T) {
+	gate := make(chan struct{})
+	attached := make(chan struct{}, 4)
+	fences := 0
+	l := &CenterLoop{
+		Now: time.Now,
+		Attach: func() (int, func() error, error) {
+			attached <- struct{}{}
+			return 1, func() error { return nil }, nil
+		},
+		Announce: func(context.Context, string, int) {},
+		Fence: func() {
+			fences++
+			if fences == 2 {
+				<-gate // 第一个 client 退出后，deckd 还有操作没做完
+			}
+		},
+		Pause:    func(string) bool { return false },
+		MaxQuick: 2,
+	}
+	go l.Run()
+	<-attached
+	select {
+	case <-attached:
+		t.Fatal("栅栏没返回就起了新 client")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-attached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("栅栏返回后应起新 client")
+	}
+}

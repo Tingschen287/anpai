@@ -1,0 +1,210 @@
+# Work Deck 测试夹具的 Graph 规格。内容是假的，只为让 projectctl 产出可读账本。
+schema_version: "1.0"
+project_id: "workdeck-fixture"
+graph_revision: 3
+lifecycle_stage_source: "README.md#frontmatter.stage"
+
+state_control:
+  event_log: "4.eval/control/events.jsonl"
+  status_projection: "PROJECT-STATUS.md"
+  loop_log_directory: "4.eval/loops"
+
+policies:
+  max_parallel_nodes: 2
+  independent_review_required: true
+  evidence_required_before_submission: true
+  project_budget:
+    max_worker_rounds: 20
+    max_frontier_calls: 8
+    soft_token_budget: 1200000
+    max_cost_cny: null
+    max_elapsed_hours: 40
+
+nodes:
+  - id: "f01_collect_inputs"
+    title: "收集输入：夹具的第一个节点"
+    kind: "task"
+    objective: "把夹具需要的输入文件落盘，作为后续节点的依赖。"
+    depends_on: []
+    risk: "low"
+    route_class: "economy"
+    owner_role: "fixture_executor"
+    read_scope: ["README.md", "0.context/README.md"]
+    write_scope: ["0.context/inputs", "4.eval/loops/f01_collect_inputs.md"]
+    resources: ["3.prompts/goals/f01_collect_inputs.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/inputs/sources.md"]
+    verification:
+      commands:
+        - "test -s 0.context/inputs/sources.md"
+      acceptance_criteria:
+        - "输入清单文件存在且非空。"
+      evidence_paths: ["0.context/inputs/sources.md", "4.eval/loops/f01_collect_inputs.md"]
+    budget: {max_worker_rounds: 3, max_frontier_calls: 0, soft_token_budget: 50000, max_cost_cny: null, max_elapsed_minutes: 60}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "economy", independent_from_executor: true}
+    stop_conditions:
+      success: "输入清单落盘并通过评审。"
+      blocked: "上游没有可用输入。"
+      failed: "输入无法获取。"
+      budget: "达到节点预算即停止。"
+      safety: "需要读取凭据时立即停止。"
+
+  - id: "f02_build_core"
+    title: "构建核心：一个正在跑的节点"
+    kind: "task"
+    objective: "构建夹具的核心产物，用来演示 running 状态与第二次尝试。"
+    depends_on: ["f01_collect_inputs"]
+    risk: "medium"
+    route_class: "balanced"
+    owner_role: "fixture_executor"
+    read_scope: ["0.context/inputs", "README.md"]
+    write_scope: ["0.context/core", "4.eval/loops/f02_build_core.md"]
+    resources: ["3.prompts/goals/f02_build_core.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/core/core.md"]
+    verification:
+      commands:
+        - "test -s 0.context/core/core.md"
+      acceptance_criteria:
+        - "核心产物文件存在且非空。"
+      evidence_paths: ["0.context/core/core.md", "4.eval/loops/f02_build_core.md"]
+    budget: {max_worker_rounds: 4, max_frontier_calls: 1, soft_token_budget: 200000, max_cost_cny: null, max_elapsed_minutes: 180}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "balanced", independent_from_executor: true}
+    stop_conditions:
+      success: "核心产物通过评审。"
+      blocked: "依赖节点未验收。"
+      failed: "核心产物无法构建。"
+      budget: "达到节点预算即停止。"
+      safety: "需要修改全局配置时立即停止。"
+
+  - id: "f03_write_report"
+    title: "写报告：一个已提交待评审的节点"
+    kind: "task"
+    objective: "产出夹具报告，用来演示 submitted 状态。"
+    depends_on: ["f01_collect_inputs"]
+    risk: "medium"
+    route_class: "balanced"
+    owner_role: "fixture_executor"
+    read_scope: ["0.context/inputs", "README.md"]
+    write_scope: ["0.context/report", "4.eval/loops/f03_write_report.md"]
+    resources: ["3.prompts/goals/f03_write_report.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/report/report.md"]
+    verification:
+      commands:
+        - "test -s 0.context/report/report.md"
+      acceptance_criteria:
+        - "报告文件存在且非空。"
+      evidence_paths: ["0.context/report/report.md", "4.eval/loops/f03_write_report.md"]
+    budget: {max_worker_rounds: 3, max_frontier_calls: 1, soft_token_budget: 150000, max_cost_cny: null, max_elapsed_minutes: 120}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "balanced", independent_from_executor: true}
+    stop_conditions:
+      success: "报告通过评审。"
+      blocked: "依赖节点未验收。"
+      failed: "报告无法产出。"
+      budget: "达到节点预算即停止。"
+      safety: "需要访问真实业务数据时立即停止。"
+
+  - id: "f04_external_probe"
+    title: "外部探测：一个被阻塞的节点"
+    kind: "task"
+    objective: "探测外部接口，用来演示 blocked 状态与等待 owner 的动作。"
+    depends_on: ["f01_collect_inputs"]
+    risk: "high"
+    route_class: "frontier"
+    owner_role: "fixture_executor"
+    read_scope: ["0.context/inputs", "README.md"]
+    write_scope: ["0.context/probe", "4.eval/loops/f04_external_probe.md"]
+    resources: ["3.prompts/goals/f04_external_probe.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/probe/probe.md"]
+    verification:
+      commands:
+        - "test -s 0.context/probe/probe.md"
+      acceptance_criteria:
+        - "探测记录文件存在且非空。"
+      evidence_paths: ["0.context/probe/probe.md", "4.eval/loops/f04_external_probe.md"]
+    budget: {max_worker_rounds: 2, max_frontier_calls: 2, soft_token_budget: 100000, max_cost_cny: null, max_elapsed_minutes: 90}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "frontier", independent_from_executor: true}
+    stop_conditions:
+      success: "探测记录通过评审。"
+      blocked: "外部接口没有可用凭据。"
+      failed: "外部接口确认不可用。"
+      budget: "达到节点预算即停止。"
+      safety: "需要读取凭据时立即停止。"
+
+  - id: "f05_legacy_path"
+    title: "旧路径：一个已失败的节点"
+    kind: "task"
+    objective: "验证旧实现路径，用来演示 failed 状态。"
+    depends_on: ["f01_collect_inputs"]
+    risk: "low"
+    route_class: "economy"
+    owner_role: "fixture_executor"
+    read_scope: ["0.context/inputs", "README.md"]
+    write_scope: ["0.context/legacy", "4.eval/loops/f05_legacy_path.md"]
+    resources: ["3.prompts/goals/f05_legacy_path.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/legacy/legacy.md"]
+    verification:
+      commands:
+        - "test -s 0.context/legacy/legacy.md"
+      acceptance_criteria:
+        - "旧路径记录文件存在且非空。"
+      evidence_paths: ["0.context/legacy/legacy.md", "4.eval/loops/f05_legacy_path.md"]
+    budget: {max_worker_rounds: 2, max_frontier_calls: 0, soft_token_budget: 50000, max_cost_cny: null, max_elapsed_minutes: 60}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "economy", independent_from_executor: true}
+    stop_conditions:
+      success: "旧路径记录通过评审。"
+      blocked: "依赖节点未验收。"
+      failed: "旧路径确认不可行。"
+      budget: "达到节点预算即停止。"
+      safety: "需要修改系统配置时立即停止。"
+
+  - id: "f06_owner_gate"
+    title: "Owner 裁决门：等待人来拍板"
+    kind: "human_gate"
+    objective: "由 owner 裁决是否继续推进夹具项目的最后一个节点。"
+    depends_on: ["f01_collect_inputs"]
+    risk: "high"
+    route_class: "human"
+    owner_role: "human_owner"
+    read_scope: ["0.context/report", "README.md"]
+    write_scope: ["0.context/gate", "4.eval/loops/f06_owner_gate.md"]
+    resources: ["3.prompts/goals/f06_owner_gate.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/gate/decision.md"]
+    verification:
+      commands: []
+      acceptance_criteria:
+        - "owner 的裁决逐字记录在裁决文件里，并写明批准范围。"
+      evidence_paths: ["0.context/gate/decision.md", "4.eval/loops/f06_owner_gate.md"]
+    budget: {max_worker_rounds: 2, max_frontier_calls: 0, soft_token_budget: 40000, max_cost_cny: null, max_elapsed_minutes: 120}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "human", independent_from_executor: true}
+    stop_conditions:
+      success: "owner 给出裁决并记录在案。"
+      blocked: "owner 暂不裁决。"
+      failed: "owner 决定终止夹具项目。"
+      budget: "达到节点预算即停止。"
+      safety: "裁决涉及不可逆动作时先暂停。"
+
+  - id: "f07_ship_result"
+    title: "交付结果：尚未开工的节点"
+    kind: "task"
+    objective: "在 owner 裁决通过后交付夹具结果，用来演示 planned 状态。"
+    depends_on: ["f06_owner_gate"]
+    risk: "high"
+    route_class: "frontier"
+    owner_role: "fixture_executor"
+    read_scope: ["0.context/gate", "README.md"]
+    write_scope: ["0.context/ship", "4.eval/loops/f07_ship_result.md"]
+    resources: ["3.prompts/goals/f07_ship_result.md", "4.eval/baseline.md"]
+    deliverables: ["0.context/ship/ship.md"]
+    verification:
+      commands:
+        - "test -s 0.context/ship/ship.md"
+      acceptance_criteria:
+        - "交付记录文件存在且非空。"
+      evidence_paths: ["0.context/ship/ship.md", "4.eval/loops/f07_ship_result.md"]
+    budget: {max_worker_rounds: 3, max_frontier_calls: 2, soft_token_budget: 200000, max_cost_cny: null, max_elapsed_minutes: 180}
+    review_policy: {required: true, reviewer_role: "fixture_reviewer", route_class: "frontier", independent_from_executor: true}
+    stop_conditions:
+      success: "交付记录通过评审。"
+      blocked: "owner 裁决门未通过。"
+      failed: "交付确认不可行。"
+      budget: "达到节点预算即停止。"
+      safety: "需要对外发送时先暂停。"

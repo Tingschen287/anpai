@@ -1,0 +1,30 @@
+package layout
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+	"time"
+)
+
+// Lock 串行化布局修改（n049 评审 1 S2）：F5/F6/F7 与 client-resized 钩子都用 tmux run-shell -b 在后台跑
+// deck layout，快速连按或边按边缩放时会交错执行，停放、并回、整理尺寸互相踩。拿到锁的先做完，其余排队；
+// 等 timeout 还拿不到就报错放弃（不强行进去）。锁随进程退出自动释放。
+func Lock(path string, timeout time.Duration) (unlock func(), err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+		}
+		if err != syscall.EWOULDBLOCK || time.Now().After(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("另一个布局操作还没做完（%s）：%w", path, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

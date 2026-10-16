@@ -1,0 +1,598 @@
+package projectctl
+
+import (
+	"context"
+	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fixtureRoot 返回夹具项目的路径。
+func fixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(moduleRoot(t), "testdata", "workdeck-fixture")
+	if _, err := os.Stat(filepath.Join(root, "work-graph.yaml")); err != nil {
+		t.Fatalf("夹具不可用，先跑 testdata/rebuild-fixture.sh：%v", err)
+	}
+	return root
+}
+
+// scriptPath 找控制器。找不到就跳过集成测试并说清原因。
+func scriptPath(t *testing.T) string {
+	t.Helper()
+	p, err := DefaultScript()
+	if err != nil {
+		t.Skipf("跳过：找不到 Graph 控制器，可用 WORKDECK_PROJECTCTL 指定（%v）", err)
+	}
+	return p
+}
+
+func TestSnapshotOnFixtureCoversEveryState(t *testing.T) {
+	root := fixtureRoot(t)
+	r := NewReader(root, scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	if len(snap.Problems) > 0 {
+		t.Errorf("取数过程报了问题：%v", snap.Problems)
+	}
+	if snap.ProjectID != "workdeck-fixture" {
+		t.Errorf("项目号是 %q，期望 workdeck-fixture", snap.ProjectID)
+	}
+	if len(snap.Nodes) != 7 {
+		t.Fatalf("节点数是 %d，期望 7", len(snap.Nodes))
+	}
+
+	want := map[string]State{
+		"f01_collect_inputs":  StateAccepted,
+		"f02_build_core":      StateRunning,
+		"f03_write_report":    StateSubmitted,
+		"f04_external_probe":  StateBlocked,
+		"f05_legacy_path":     StateFailed,
+		"f06_owner_gate":      StateReady,
+		"f07_ship_result":     StatePlanned,
+	}
+	for _, n := range snap.Nodes {
+		got, ok := n.State.Get()
+		if !ok {
+			t.Errorf("节点 %s 状态未知：%s", n.ID, n.State.Reason())
+			continue
+		}
+		if want[n.ID] != got {
+			t.Errorf("节点 %s 状态是 %s，期望 %s", n.ID, got, want[n.ID])
+		}
+	}
+}
+
+func TestRunningNodeCarriesAttemptAndElapsed(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	running := snap.Running()
+	if len(running) != 1 {
+		t.Fatalf("运行中节点有 %d 个，期望 1 个", len(running))
+	}
+	n := running[0]
+	attempt, ok := n.Attempt.Get()
+	if !ok {
+		t.Fatalf("运行中节点拿不到 attempt：%s", n.Attempt.Reason())
+	}
+	if attempt != 2 {
+		t.Errorf("attempt 是 %d，期望 2（夹具里这个节点被打回过一次）", attempt)
+	}
+	if _, ok := n.Elapsed.Get(); !ok {
+		t.Errorf("运行中节点拿不到耗时：%s", n.Elapsed.Reason())
+	}
+	if _, ok := n.Actor.Get(); !ok {
+		t.Errorf("运行中节点拿不到执行者：%s", n.Actor.Reason())
+	}
+}
+
+func TestWaitingOnOwnerListsBlockedFailedAndSubmitted(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	waiting := snap.WaitingOnOwner()
+	var ids []string
+	for _, n := range waiting {
+		ids = append(ids, n.ID)
+	}
+	if len(waiting) != 3 {
+		t.Fatalf("等 owner 的条目有 %d 条，期望 3 条：%v", len(waiting), ids)
+	}
+	// blocked 最急，排最前。
+	if waiting[0].ID != "f04_external_probe" {
+		t.Errorf("排最前的是 %s，期望 blocked 的 f04_external_probe", waiting[0].ID)
+	}
+	if waiting[0].RequiredAction == "" {
+		t.Error("blocked 的条目没有带上要 owner 做什么")
+	}
+}
+
+// 预算里 elapsed 这一维度，控制器不导出已用量。
+// 它必须是未知且带原因，绝不能是 0——0 会让人以为一点时间都没花。
+func TestElapsedBudgetIsUnknownNotZero(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	var found bool
+	for _, b := range snap.Budgets {
+		if b.Label != "elapsed" {
+			continue
+		}
+		found = true
+		if b.Used.IsKnown() {
+			t.Error("elapsed 已用量不该是已知的，控制器并不导出它")
+		}
+		if b.Used.Reason() == "" {
+			t.Error("elapsed 已用量是未知，但没有说明原因")
+		}
+		if _, ok := b.Limit.Get(); !ok {
+			t.Errorf("elapsed 上限应当能从 work-graph.yaml 读到：%s", b.Limit.Reason())
+		}
+	}
+	if !found {
+		t.Error("预算表里没有 elapsed 这一行")
+	}
+}
+
+func TestOtherBudgetDimensionsAreKnown(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	for _, label := range []string{"worker rounds", "frontier calls", "tokens"} {
+		var line *BudgetLine
+		for i := range snap.Budgets {
+			if snap.Budgets[i].Label == label {
+				line = &snap.Budgets[i]
+			}
+		}
+		if line == nil {
+			t.Errorf("预算表里没有 %s 这一行", label)
+			continue
+		}
+		if _, ok := line.Used.Get(); !ok {
+			t.Errorf("%s 的已用量取不到：%s", label, line.Used.Reason())
+		}
+		if _, ok := line.Limit.Get(); !ok {
+			t.Errorf("%s 的上限取不到：%s", label, line.Limit.Reason())
+		}
+	}
+}
+
+// 这是本轮最重要的一条：取一次快照，项目目录必须一个字节都不变。
+func TestSnapshotWritesNothingIntoTheProject(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+
+	r := NewReader(root, scriptPath(t))
+	// 先取一次，让控制器该建的锁文件建完，避免把首次创建当成写入。
+	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+
+	before := treeDigest(t, root)
+	for i := 0; i < 3; i++ {
+		assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+	}
+	after := treeDigest(t, root)
+
+	if before != after {
+		t.Errorf("取快照改动了项目文件：前 %s，后 %s", before, after)
+	}
+}
+
+// lastLedgerEventTime 读夹具账本最后一条事件的时间。
+//
+// 过期判定比的是「账本走到哪」和「投影停在哪」，基准必须来自账本本身。
+func lastLedgerEventTime(t *testing.T, root string) time.Time {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "4.eval", "control", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var e struct {
+			OccurredAt string `json:"occurred_at"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &e); err != nil || e.OccurredAt == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, e.OccurredAt)
+		if err != nil {
+			continue
+		}
+		return at
+	}
+	t.Fatal("夹具账本里没有一条带时间的事件，无法给过期判定定基准")
+	return time.Time{}
+}
+
+// 投影比账本旧的时候，来自投影的数字一律转未知。
+func TestStaleProjectionTurnsProjectionNumbersUnknown(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+
+	// 把投影的生成时间拨到账本最后一条事件之前，模拟别人写了账本而投影没跟上。
+	//
+	// 基准取账本自己的时间，不取 time.Now()。夹具是静态的，一旦拿当天时间去减，
+	// 过不了几天 now-24h 就会超过夹具账本的最后一条事件，投影反而显得比账本新，
+	// 这个测试就会无声地测不到东西——它确实这样坏过一次。
+	path := filepath.Join(root, "PROJECT-STATUS.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := lastLedgerEventTime(t, root)
+	old := last.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	lines := strings.Split(string(data), "\n")
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "- 生成时间：") {
+			lines[i] = "- 生成时间：" + old
+		}
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReader(root, scriptPath(t))
+	snap := r.Snapshot(context.Background())
+
+	if !snap.Fresh.Stale {
+		t.Fatal("投影明显落后了，却没有被判为过期")
+	}
+	if snap.Fresh.Note == "" {
+		t.Error("判为过期却没有给出说明")
+	}
+	for _, n := range snap.Nodes {
+		if n.Attempt.IsKnown() {
+			t.Errorf("投影已过期，节点 %s 的 attempt 不该还是已知的", n.ID)
+		}
+		if n.Elapsed.IsKnown() {
+			t.Errorf("投影已过期，节点 %s 的耗时不该还是已知的", n.ID)
+		}
+	}
+	for _, b := range snap.Budgets {
+		if b.Used.IsKnown() {
+			t.Errorf("投影已过期，%s 的已用量不该还是已知的", b.Label)
+		}
+	}
+	// 状态本身来自控制器而不是投影，所以它必须照常可用。
+	for _, n := range snap.Nodes {
+		if !n.State.IsKnown() {
+			t.Errorf("节点 %s 的状态来自控制器，不该因为投影过期而丢失", n.ID)
+		}
+	}
+}
+
+// copyFixture 把夹具复制到临时位置再返回新的项目根。
+//
+// 控制器要求项目目录名必须等于 project_id，所以不能直接用 t.TempDir() 的随机名，
+// 得在里面再建一层同名目录。忽略这一点时每条命令都会验证失败，
+// 而「什么都没跑」和「跑了但没写文件」在目录哈希上长得一模一样。
+func copyFixture(t *testing.T, src string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), filepath.Base(src))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyTree(t, src, root)
+	return root
+}
+
+// assertSnapshotIsLive 确认这一次取数真的跑通了控制器。
+//
+// 节点清单来自 work-graph.yaml，就算每条命令都失败，快照里照样有七个节点，
+// 所以必须查状态是不是真取到了，否则这就是一次自我安慰的断言。
+func assertSnapshotIsLive(t *testing.T, snap Snapshot) {
+	t.Helper()
+	if len(snap.Nodes) == 0 {
+		t.Fatal("快照里没有节点，取数没真的跑起来")
+	}
+	if len(snap.Problems) > 0 {
+		t.Fatalf("取数报了问题，说明控制器没跑通：%v", snap.Problems)
+	}
+	for _, n := range snap.Nodes {
+		if !n.State.IsKnown() {
+			t.Fatalf("节点 %s 的状态没取到（%s），取数没真的跑通", n.ID, n.State.Reason())
+		}
+	}
+	if snap.Chain.Events == 0 {
+		t.Fatal("账本事件数是 0，取数没真的跑通")
+	}
+}
+
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		_, err = io.Copy(out, in)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// treeDigest 把整棵目录树摘成一个哈希，路径和内容都算进去。
+func treeDigest(t *testing.T, root string) string {
+	t.Helper()
+	var paths []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+
+	h := sha256.New()
+	for _, p := range paths {
+		rel, _ := filepath.Rel(root, p)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(h, "%s\x00%x\x00", rel, sha256.Sum256(data))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// 先行快照不为任何单个节点去问控制器。
+//
+// 夹具里投影的三张分类表覆盖了 running / submitted / blocked / failed / ready
+// 五个节点，它们的状态必须直接可用；accepted 和 planned 两个投影写不到，
+// 必须老实标成查询中，而不是猜一个。
+func TestFastSnapshotUsesProjectionAndDefersTheRest(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+	snap := r.FastSnapshot(context.Background())
+
+	fromProjection := map[string]State{
+		"f02_build_core":     StateRunning,
+		"f03_write_report":   StateSubmitted,
+		"f04_external_probe": StateBlocked,
+		"f05_legacy_path":    StateFailed,
+		"f06_owner_gate":     StateReady,
+	}
+	deferred := map[string]bool{
+		"f01_collect_inputs": true, // accepted，投影里没有
+		"f07_ship_result":    true, // planned，投影里没有
+	}
+
+	for _, n := range snap.Nodes {
+		got, ok := n.State.Get()
+		switch {
+		case fromProjection[n.ID] != "":
+			if !ok {
+				t.Errorf("节点 %s 的状态投影里写着，不该还要去问控制器：%s", n.ID, n.State.Reason())
+				continue
+			}
+			if got != fromProjection[n.ID] {
+				t.Errorf("节点 %s 状态是 %s，期望 %s", n.ID, got, fromProjection[n.ID])
+			}
+		case deferred[n.ID]:
+			if ok {
+				t.Errorf("节点 %s 投影里没有，先行快照不该已经知道它是 %s", n.ID, got)
+			}
+			if n.State.Reason() != "查询中" {
+				t.Errorf("节点 %s 应标成查询中，实际是 %q", n.ID, n.State.Reason())
+			}
+		}
+	}
+
+	// 等 owner 的条目全部来自投影，先行快照里就该是齐的。
+	if len(snap.WaitingOnOwner()) != 3 {
+		t.Errorf("先行快照里等 owner 的条目有 %d 条，期望 3 条", len(snap.WaitingOnOwner()))
+	}
+	// 预算同样来自投影，先行快照里就该有数。
+	for _, b := range snap.Budgets {
+		if b.Label == "elapsed" {
+			continue
+		}
+		if !b.Used.IsKnown() {
+			t.Errorf("先行快照里 %s 的已用量应当可用：%s", b.Label, b.Used.Reason())
+		}
+	}
+}
+
+// 终态问过一次就记住，下一次先行快照直接给得出来。
+func TestFinalStatesAreRememberedAcrossRefreshes(t *testing.T) {
+	r := NewReader(fixtureRoot(t), scriptPath(t))
+
+	// 先行快照拿不到 accepted 的那个节点。
+	first := r.FastSnapshot(context.Background())
+	if st, ok := stateOf(first, "f01_collect_inputs"); ok {
+		t.Fatalf("第一次先行快照就知道 f01 是 %s，缓存测试前提不成立", st)
+	}
+
+	// 完整取一次，把终态问出来。
+	full := r.Snapshot(context.Background())
+	if st, ok := stateOf(full, "f01_collect_inputs"); !ok || st != StateAccepted {
+		t.Fatalf("完整快照没把 f01 查成 accepted：%v %v", st, ok)
+	}
+
+	// 再来一次先行快照，这次不问控制器也该知道。
+	again := r.FastSnapshot(context.Background())
+	st, ok := stateOf(again, "f01_collect_inputs")
+	if !ok {
+		t.Error("终态没有被记住，先行快照又把 f01 标成了未知")
+	} else if st != StateAccepted {
+		t.Errorf("记住的状态是 %s，期望 accepted", st)
+	}
+
+	// planned 不是终态，不该被记住。
+	if st, ok := stateOf(again, "f07_ship_result"); ok {
+		t.Errorf("f07 是 planned，不是终态，不该被记住，却拿到了 %s", st)
+	}
+}
+
+func stateOf(s Snapshot, id string) (State, bool) {
+	for _, n := range s.Nodes {
+		if n.ID == id {
+			return n.State.Get()
+		}
+	}
+	return "", false
+}
+
+// 终态问过一次就该记到盘上，重开不必再问。
+//
+// 真实项目上首次要问近两分钟，只记在内存里等于每次开都重来一遍。
+func TestFinalStatesPersistAcrossProcessRestart(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+
+	// 第一个进程：完整问一轮，终态落盘。
+	first := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, first.Snapshot(context.Background()))
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("完整取数后缓存没落盘：%v", err)
+	}
+
+	// 第二个进程：只做先行取数，不问任何单节点，accepted 也该直接有。
+	second := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := second.FastSnapshot(context.Background())
+	st, ok := stateOf(snap, "f01_collect_inputs")
+	if !ok {
+		t.Fatal("重开后先行快照仍不知道 accepted 节点的状态，缓存没起作用")
+	}
+	if st != StateAccepted {
+		t.Errorf("缓存读出的状态是 %s，期望 accepted", st)
+	}
+
+	// 非终态不该被缓存：planned 会变，记住它就会说谎。
+	if st, ok := stateOf(snap, "f07_ship_result"); ok {
+		t.Errorf("planned 不是终态，不该进缓存，却拿到了 %s", st)
+	}
+}
+
+// 缓存是别的项目的就不能用，否则会把状态张冠李戴。
+func TestCacheFromAnotherProjectIsIgnored(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	if err := os.WriteFile(cache, []byte(
+		`{"project":"/某个别的项目","states":{"f01_collect_inputs":"accepted"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := r.FastSnapshot(context.Background())
+	if _, ok := stateOf(snap, "f01_collect_inputs"); ok {
+		t.Error("别的项目的缓存被当成了本项目的")
+	}
+}
+
+// 缓存坏了不能让界面打不开：大不了重新问一遍。
+func TestCorruptCacheDoesNotBreakTheReader(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	if err := os.WriteFile(cache, []byte("{这不是 JSON"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+}
+
+// failed 不是终态，绝不能被缓存成永久事实。
+//
+// 控制器的状态机允许 node_resumed 把 failed 转回 ready，也允许转成 superseded。
+// 把它当终态记住，节点恢复之后界面会一直显示旧的 failed——缓存说谎比慢更糟。
+func TestFailedIsNeverCachedBecauseItCanBeResumed(t *testing.T) {
+	if isFinal(StateFailed) {
+		t.Error("failed 被当成了终态，但控制器允许 node_resumed 把它转回 ready")
+	}
+	if !isFinal(StateAccepted) {
+		t.Error("accepted 应当是终态")
+	}
+	if !isFinal(StateSuperseded) {
+		t.Error("superseded 应当是终态")
+	}
+	for _, st := range []State{StateReady, StateRunning, StateSubmitted, StateRework, StateBlocked, StatePlanned} {
+		if isFinal(st) {
+			t.Errorf("%s 不该被当成终态", st)
+		}
+	}
+
+	// 端到端：夹具里 f05 是 failed，完整取数后不该进缓存文件。
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+	r := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, r.Snapshot(context.Background()))
+
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "f05_legacy_path") {
+		t.Error("failed 的节点被写进了缓存文件")
+	}
+	if !strings.Contains(string(data), "f01_collect_inputs") {
+		t.Error("accepted 的节点应当进缓存")
+	}
+}
+
+// 账本往前走过，整份缓存作废。
+//
+// 只要多了一条事件，就可能有节点被 resume 或 superseded 了。逐个判断不如
+// 全部重查来得诚实。
+func TestCacheIsDiscardedWhenTheLedgerMovedOn(t *testing.T) {
+	root := copyFixture(t, fixtureRoot(t))
+	cache := filepath.Join(t.TempDir(), "node-states.json")
+
+	first := NewReader(root, scriptPath(t)).WithCache(cache)
+	assertSnapshotIsLive(t, first.Snapshot(context.Background()))
+
+	// 把缓存记录的事件数改成一个旧值，模拟账本此后又长了。
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f cacheFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.Events <= 0 {
+		t.Fatal("缓存没记下账本事件数，无法判断新旧")
+	}
+	f.Events--
+	out, _ := json.Marshal(f)
+	if err := os.WriteFile(cache, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 事件数对不上，缓存整份不采用：先行快照里 accepted 应当又变回未知。
+	second := NewReader(root, scriptPath(t)).WithCache(cache)
+	snap := second.FastSnapshot(context.Background())
+	if st, ok := stateOf(snap, "f01_collect_inputs"); ok {
+		t.Errorf("账本已经走过，缓存仍被采用，拿到了 %s", st)
+	}
+}

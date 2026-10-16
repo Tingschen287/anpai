@@ -45,7 +45,7 @@ class LauncherTests(unittest.TestCase):
         agents = config["agent"]
         keys = [agent["key"] for agent in agents]
         self.assertEqual(len(keys), len(set(keys)))
-        self.assertEqual(keys, ["cco", "ccs", "codex", "grok", "kimi"])
+        self.assertEqual(keys, ["cco", "ccs", "codex", "grok", "grokt", "kimi", "opencode"])
 
     def test_load_agents_accepts_example_config(self):
         old_config = launcher.CONF
@@ -55,7 +55,8 @@ class LauncherTests(unittest.TestCase):
         finally:
             launcher.CONF = old_config
         self.assertEqual(agents[0]["cmd"], "claude")
-        self.assertEqual(agents[-1]["color"], "#047afe")
+        self.assertEqual(agents[-1]["cmd"], "opencode")
+        self.assertEqual(agents[-1]["color"], "#ff5c00")
 
     def test_empty_key_does_not_crash_agent_picker(self):
         agents = [{"key": "x", "name": "X", "color": "#ffffff", "note": ""}]
@@ -225,7 +226,9 @@ class LauncherTests(unittest.TestCase):
             "ccs": ["--resume"],
             "codex": ["resume"],
             "grok": ["/resume"],
+            "grokt": ["/resume"],
             "kimi": ["--session"],
+            "opencode": ["--continue"],
         })
 
     def test_path_suggestions_filter_directories_and_preserve_input(self):

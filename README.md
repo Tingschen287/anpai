@@ -4,7 +4,7 @@
 
 | 产品 | 命令 | 干什么 | 真正干活的程序 |
 |---|---|---|---|
-| **Agent Deck** | `ai` | 选 Agent、选目录、开会话 | `claude` / `codex` / `grok` / `kimi` 等原生 CLI |
+| **Agent Deck** | `ai` | 选 Agent、选目录、开会话 | `claude` / `codex` / `grok` / `kimi` / `opencode` 等原生 CLI |
 | **Host Deck** | `host` | 选服务器、分组、连接 | 本机 OpenSSH |
 
 启动器只负责发现、选择、分组和交接。不替代 Agent CLI，也不自己实现 SSH。
@@ -65,6 +65,7 @@ ai --version               查看版本
 | Codex | `codex resume` |
 | Grok | `grok "/resume"` |
 | Kimi | `kimi --session` |
+| OpenCode | `opencode --continue` |
 
 配置：`~/.config/ai-launcher/agents.toml`，样例见 [`config/agents.example.toml`](config/agents.example.toml)。可用 `AI_LAUNCHER_CONFIG`、`AI_LAUNCHER_HISTORY` 覆盖路径。
 

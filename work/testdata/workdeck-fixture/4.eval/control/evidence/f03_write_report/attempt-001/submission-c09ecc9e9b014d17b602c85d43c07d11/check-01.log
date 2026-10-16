@@ -1,0 +1,10 @@
+$ test -s 0.context/report/report.md
+exit_code=0
+timed_out=false
+elapsed_seconds=0.001
+
+[stdout]
+
+
+[stderr]
+

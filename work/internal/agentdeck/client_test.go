@@ -1,0 +1,1070 @@
+package agentdeck
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// profile 留空会落到上游的默认 profile，那可能是使用者的真实工作数据。
+// 上游自己记过一次事故：测试跑在真实 profile 上，一次覆盖掉 36 个生产会话。
+func TestClientRefusesEmptyProfile(t *testing.T) {
+	if _, err := NewClient("/bin/true", "", "127.0.0.1:1", "tok"); err == nil {
+		t.Fatal("profile 留空时必须拒绝构造客户端")
+	}
+	if _, err := NewClient("", "_test", "127.0.0.1:1", "tok"); err == nil {
+		t.Fatal("没有可执行文件路径时必须拒绝构造客户端")
+	}
+	if _, err := NewClient("/bin/true", "_test", "127.0.0.1:1", "tok"); err != nil {
+		t.Fatalf("参数齐全时不该报错：%v", err)
+	}
+}
+
+func TestOnlyListedSubcommandsMayRun(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 这些都是上游有、但 Work Deck 本轮不该碰的子命令。
+	for _, sub := range []string{"remove", "rm", "session", "fleet", "mcp", "conductor", "remote", "add"} {
+		_, err := c.exec(context.Background(), sub)
+		var refused *ErrSubcommandNotAllowed
+		if !errors.As(err, &refused) {
+			t.Errorf("子命令 %q 应当被拒绝，实际得到 %v", sub, err)
+		}
+	}
+}
+
+// profile 必须真的传进子进程环境，否则隔离是空话。
+func TestProfileIsForcedIntoChildEnv(t *testing.T) {
+	t.Setenv("AGENTDECK_PROFILE", "someone-elses-real-profile")
+	c, err := NewClient("/bin/true", "_n036fixture", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	for _, kv := range c.env() {
+		if strings.HasPrefix(kv, "AGENTDECK_PROFILE=") {
+			seen = append(seen, kv)
+		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("子进程环境里应当恰好有一个 AGENTDECK_PROFILE，实际 %v", seen)
+	}
+	if seen[0] != "AGENTDECK_PROFILE=_n036fixture" {
+		t.Errorf("profile 没被顶掉：%s", seen[0])
+	}
+}
+
+// 派工说不清模型就不许派。
+func TestLaunchRequestRefusesUnknownModel(t *testing.T) {
+	base := LaunchRequest{ProjectPath: "/tmp/x", Tool: "claude", Model: "m"}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("齐全的请求不该报错：%v", err)
+	}
+	noModel := base
+	noModel.Model = ""
+	if err := noModel.Validate(); err == nil {
+		t.Error("模型为空时必须拒绝派工")
+	}
+	noTool := base
+	noTool.Tool = ""
+	if err := noTool.Validate(); err == nil {
+		t.Error("工具为空时必须拒绝派工")
+	}
+	noPath := base
+	noPath.ProjectPath = ""
+	if err := noPath.Validate(); err == nil {
+		t.Error("项目路径为空时必须拒绝派工")
+	}
+}
+
+// 依赖清单不能写完就烂掉：清单里列的字段必须真的是结构体在读的字段，反过来也一样。
+//
+// 只核下面五个结构体。ListedSession、MenuItem、Group、SessionList 也解析 JSON，不在这里核。
+func TestManifestMatchesTheStructsWeActuallyDecode(t *testing.T) {
+	check := func(name string, listed []string, v any) {
+		t.Helper()
+		actual := map[string]bool{}
+		rt := reflect.TypeOf(v)
+		for i := 0; i < rt.NumField(); i++ {
+			tag := rt.Field(i).Tag.Get("json")
+			if tag == "" || tag == "-" {
+				continue
+			}
+			actual[strings.Split(tag, ",")[0]] = true
+		}
+		for _, f := range listed {
+			if !actual[f] {
+				t.Errorf("%s：清单列了字段 %q，但代码并不解析它", name, f)
+			}
+		}
+		for f := range actual {
+			var found bool
+			for _, l := range listed {
+				if l == f {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s：代码解析了字段 %q，但依赖清单没列", name, f)
+			}
+		}
+	}
+	check("launch --json", LaunchFields, LaunchResult{})
+	check("会话对象", SessionFields, Session{})
+	check("菜单事件", MenuFields, MenuEvent{})
+	check("inbox export", InboxFields, InboxRecord{})
+	check("inbox writer-status", WriterStatusFields, WriterStatus{})
+}
+
+// 清单里列的子命令，必须正好是白名单。
+func TestManifestSubcommandsMatchAllowList(t *testing.T) {
+	// 这张表是写死的，改白名单就得同时改这里——那正是它的用处：
+	// 让「多放行一条上游命令」成为一个必须被看见的改动，而不是顺手加上去的。
+	if !reflect.DeepEqual(Subcommands, []string{
+		"launch", "web", "list", "session attach", "session output", "session send",
+		"session stop", "inbox export", "inbox writer-status",
+	}) {
+		t.Errorf("白名单变了：%v。依赖清单与 MANIFEST.md 也要同步更新", Subcommands)
+	}
+	src := readPackageSource(t)
+	for _, ep := range HTTPEndpoints {
+		if !strings.Contains(src, ep) {
+			t.Errorf("清单列了端点 %q，但包里没有任何代码请求它", ep)
+		}
+	}
+}
+
+// 人读清单与机器清单不能各说各话。
+//
+// 只查一个方向：机器清单里的端点、版本、提交、子命令、环境变量，都要在 MANIFEST.md 里出现。
+// MANIFEST.md 多写了什么，这里不查。
+func TestHumanReadableManifestStaysInSync(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := string(data)
+	for _, must := range append(append([]string{}, HTTPEndpoints...), UpstreamVersion, UpstreamCommit) {
+		if !strings.Contains(md, must) {
+			t.Errorf("MANIFEST.md 里没提到 %q", must)
+		}
+	}
+	for _, sub := range Subcommands {
+		if !strings.Contains(md, "`"+sub+"`") {
+			t.Errorf("MANIFEST.md 里没提到子命令 %q", sub)
+		}
+	}
+	for _, env := range EnvVars {
+		if !strings.Contains(md, env) {
+			t.Errorf("MANIFEST.md 里没提到环境变量 %q", env)
+		}
+	}
+}
+
+// 本轮起可以接管终端，但仍然不许替人发按键、不许杀会话。
+//
+// n036 时这条测试禁止一切 attach；n037 的任务就是进入会话，所以约束改了。
+// 改的是「允许进入」这一条，其余一条没松。
+//
+// **attempt 13 起它走语法树，不再按行扫文本。** 上一轮按文本扫，
+// 独立评审当场给了两个绕过法，都不需要什么技巧：
+//
+//	var alternatekeyInjectionCommands = []string{"send-keys"}  // 名字含那个子串，整行被跳过
+//	cmd := "send" + "-keys"                                    // 源码里没有连着的那个词
+//
+// 现在扫的是**折叠成常量之后**的字符串，拼接算得出来；
+// 放过的是语法树上那一个变量声明，换个名字就蹭不到了。
+//
+// **它也有边界。** 折叠不出来的字符串（例如运行时用 []byte 拼的）它看不见，
+// 那一类由 TestCommandArgumentsAreBuiltFromConstantsOnly 在命令参数处管，而那条也有拦不住的写法。
+// 拦得住与拦不住的写法见对照脚本与 boundary-limits.md。
+func TestAdapterMayAttachButNeverSendsKeysOrKills(t *testing.T) {
+	forbiddenSub := append([]string{"kill-session", "kill-server", "respawn-pane"},
+		keyInjectionCommands...)
+	const forbiddenExact = "kill" // tmux 的 kill 子命令；含 kill 的普通词不算
+
+	files, fset := packageASTs(t)
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			// 禁令本身要放过：证明「不做某件事」，总得先说得出那件事叫什么。
+			// 认的是这一个变量声明，不是「哪一行里有这个名字」。
+			//
+			// **只声明它一个名字时才放过。** 一条 var 可以同时声明好几个：
+			//
+			//	var keyInjectionCommands, evil = []string{...}, "send-keys"
+			//
+			// 只看 Names[0] 的话，evil 就跟着一起逃了。
+			if spec, ok := n.(*ast.ValueSpec); ok && len(spec.Names) == 1 &&
+				spec.Names[0].Name == "keyInjectionCommands" {
+				return false
+			}
+			expr, ok := n.(ast.Expr)
+			if !ok {
+				return true
+			}
+			s, ok := constStringOf(expr)
+			if !ok {
+				return true
+			}
+			pos := fset.Position(expr.Pos())
+			where := fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line)
+			if s == forbiddenExact {
+				t.Errorf("包里算得出字符串 %q（%s）：进去之后是人在操作，Work Deck 不替他动手",
+					s, where)
+			}
+			for _, bad := range forbiddenSub {
+				if strings.Contains(s, bad) {
+					t.Errorf("包里算得出一个含 %q 的字符串（%s，整个值是 %q）："+
+						"进去之后是人在操作，Work Deck 不替他动手", bad, where, s)
+				}
+			}
+			return false // 这一段已经折叠成常量，不必再往里拆
+		})
+	}
+	// 进入用的是上游自己的 session attach，或默认 server 上的 tmux attach-session。
+	if !strings.Contains(readPackageSource(t), "attach-session") {
+		t.Error("本轮应当具备进入会话的能力")
+	}
+}
+
+// packageASTs 解析本包自己的非测试源码。
+//
+// 测试文件要排除：里面故意写着各种反例字符串，扫进来全是误报。
+//
+// **这是一条真实的边界，写在这里免得被误读。** 独立评审指出：
+// `_test.go` 可以通过 init、TestMain 或普通测试真的执行危险操作，
+// 它不进发布二进制，但会在测试进程和 CI 里跑。
+// 所以守边测试只看「发布进二进制的这部分代码」，不看测试文件。
+// 名字里的 Adapter 指的就是这部分。
+//
+// **它也不是保证。** 即使在这部分代码里，它拦得住的也只是对照脚本列出的写法；
+// GAPS 列出的写法（第二个返回值、函数变量与接口调用、切片中转、原地写入）它拦不住。
+// 现有代码不含这些写法，是人工审计的结论，见 boundary-limits.md 第四节。
+func packageASTs(t *testing.T) ([]*ast.File, *token.FileSet) {
+	t.Helper()
+	dir := packageDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("解析 %s 失败：%v", name, err)
+		}
+		files = append(files, f)
+	}
+	if len(files) == 0 {
+		t.Fatal("本包一个非测试源文件都没读到，这条守边测试等于没跑")
+	}
+	return files, fset
+}
+
+func packageDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("拿不到测试文件路径")
+	}
+	return filepath.Dir(file)
+}
+
+func linesOfPackageSource(t *testing.T) []string {
+	t.Helper()
+	return strings.Split(readPackageSource(t), "\n")
+}
+
+func readPackageSource(t *testing.T) string {
+	t.Helper()
+	dir := packageDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(data)
+	}
+	return b.String()
+}
+
+// session 底下有一堆会毁掉别人工作的兄弟命令，白名单必须精确到第二级。
+//
+// 只写 "session" 就放行，等于顺手给了 Work Deck 杀会话、删注册表的能力，
+// 而它没有任何理由需要这些。
+func TestDangerousSessionSubcommandsAreRefused(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// session stop 自 n044 起在白名单里（只停派工器刚起、没拿到任务说明的会话，且要许可），不在这张表里了。
+	dangerous := [][]string{
+		{"session", "remove", "x"},
+		{"session", "restart", "x"},
+		{"session", "cleanup"},
+		{"session", "archive", "x"},
+		{"session", "fork", "x"},
+		{"session", "set", "x", "title", "y"},
+		{"session", "revive"},
+	}
+	for _, args := range dangerous {
+		_, err := c.exec(context.Background(), args[0], args[1:]...)
+		var refused *ErrSubcommandNotAllowed
+		if !errors.As(err, &refused) {
+			t.Errorf("%v 必须被拒绝，实际得到 %v", args, err)
+		}
+	}
+}
+
+// inbox 底下只许两条非消费式读取。
+//
+// drain 按父会话分片、读完即删，是 conductor 的消费口；裸 `inbox <id>` 读完就截断。
+// Work Deck 碰其中任何一条，都是在和 conductor 抢同一份记录。
+func TestInboxOnlyAllowsNonConsumingReads(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"inbox"},
+		{"inbox", "drain"},
+		{"inbox", "drain", "self"},
+		{"inbox", "some-session-id"},
+		{"inbox", "--json", "some-session-id"},
+	} {
+		_, err := c.exec(context.Background(), args[0], args[1:]...)
+		var refused *ErrSubcommandNotAllowed
+		if !errors.As(err, &refused) {
+			t.Errorf("%v 必须被拒绝，实际得到 %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"inbox", "export"}, {"inbox", "writer-status"}} {
+		if !isAllowedSubcommand(args...) {
+			t.Errorf("%v 应当被允许", args)
+		}
+	}
+}
+
+// 允许的那几条要真的能过白名单这一关。
+func TestAllowedSessionSubcommandsPassTheGate(t *testing.T) {
+	if !isAllowedSubcommand("session", "attach") {
+		t.Error("session attach 应当被允许")
+	}
+	if !isAllowedSubcommand("session", "output") {
+		t.Error("session output 应当被允许")
+	}
+	if isAllowedSubcommand("session") {
+		t.Error("光一个 session 不该被允许：那会把 stop/remove 一起放行")
+	}
+	if !isAllowedSubcommand("session", "stop") {
+		t.Error("session stop 应当被允许（n044）")
+	}
+	for _, sub := range []string{"remove", "restart", "archive", "kill"} {
+		if isAllowedSubcommand("session", sub) {
+			t.Errorf("session %s 不该被允许：加 stop 不等于放开 session 底下别的命令", sub)
+		}
+	}
+}
+
+// 预览是只读的：命令里不许出现会改动会话的动作。
+//
+// **这条按文本逐行扫，有一个跳行规则**：含 "keyInjectionCommands = " 的整行不查
+// （为了放过禁令声明本身）。所以行尾写个这样的注释，同一行的 kill-session 它就看不见
+// （对照脚本 GAPS K8）。同一段注入会让 TestAdapterMayAttachButNeverSendsKeysOrKills 变红
+// （对照 A24-1），这一类由那条语法树守卫接住。
+func TestPreviewPathIsReadOnly(t *testing.T) {
+	forbidden := append([]string{"kill-session", "kill-server", "respawn"}, keyInjectionCommands...)
+	for _, bad := range forbidden {
+		for _, line := range linesOfPackageSource(t) {
+			if strings.Contains(line, "keyInjectionCommands = ") {
+				continue
+			}
+			if strings.Contains(line, bad) {
+				t.Errorf("包里出现了 %q，预览与进入都不该改动会话状态（%s）",
+					bad, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+func TestStripANSILeavesReadableText(t *testing.T) {
+	in := "\x1b[32m绿字\x1b[0m 普通\x1b[1;31m红粗\x1b[m 结束"
+	got := stripANSI(in)
+	want := "绿字 普通红粗 结束"
+	if got != want {
+		t.Errorf("去转义结果是 %q，期望 %q", got, want)
+	}
+}
+
+func randHex(t *testing.T) string {
+	t.Helper()
+	return randomHex(t, 4)
+}
+
+// socket 名要真的传进 tmux 的参数里。
+//
+// 这个字段在上游带 omitempty：默认 server 时不出现，非默认时才有。
+// 本包此前只看了一个默认 socket 的会话就断言「接口不暴露它」，那是假阴性。
+func TestDirectAttachPassesSocketNameAsArgv(t *testing.T) {
+	c, err := NewClient("/bin/true", "_test", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 非默认 socket：必须带 -L。
+	cmd, err := c.DirectTmuxAttachCommand(context.Background(), "agentdeck_x_1", "mysock")
+	if err != nil {
+		t.Fatalf("有 socket 名时不该拒绝：%v", err)
+	}
+	// `=` 是 tmux 的精确目标形式。不带它，`-t name` 会前缀匹配到 name-suffix，
+	// attach 就进了别的会话——实测过，见 socketscan.go 的 exactTarget。
+	want := []string{"tmux", "-L", "mysock", "attach-session", "-t", "=agentdeck_x_1"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
+	}
+
+	// 默认 server：socket 名为空是正常的，不带 -L。
+	cmd, err = c.DirectTmuxAttachCommand(context.Background(), "agentdeck_y_2", "")
+	if err != nil {
+		t.Fatalf("默认 socket 时不该拒绝：%v", err)
+	}
+	want = []string{"tmux", "attach-session", "-t", "=agentdeck_y_2"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("参数是 %v，期望 %v", cmd.Args, want)
+	}
+
+	// 没有会话名才是真的没法直连。
+	if _, err := c.DirectTmuxAttachCommand(context.Background(), "", "sock"); err == nil {
+		t.Error("没有 tmux 会话名时必须拒绝")
+	}
+}
+
+// 菜单里要能取出 socket 名，取不到和为空是两回事。
+func TestTmuxTargetOfDistinguishesEmptySocketFromMissingSession(t *testing.T) {
+	ev := MenuEvent{Items: []MenuItem{
+		{Type: "session", Session: &Session{ID: "a", TmuxSession: "t_a", TmuxSocketName: "s1"}},
+		{Type: "session", Session: &Session{ID: "b", TmuxSession: "t_b"}},
+	}}
+	if sess, sock, ok := ev.TmuxTargetOf("a"); !ok || sess != "t_a" || sock != "s1" {
+		t.Errorf("取 a 得到 %q %q %v", sess, sock, ok)
+	}
+	// socket 为空表示默认 server，仍然是「取到了」。
+	if sess, sock, ok := ev.TmuxTargetOf("b"); !ok || sess != "t_b" || sock != "" {
+		t.Errorf("取 b 得到 %q %q %v", sess, sock, ok)
+	}
+	if _, _, ok := ev.TmuxTargetOf("不存在"); ok {
+		t.Error("不存在的会话不该报告取到了")
+	}
+}
+
+// 依赖清单必须列出 socket 名字段，否则下次又会有人以为它不存在。
+func TestManifestListsSocketName(t *testing.T) {
+	var listed bool
+	for _, f := range SessionFields {
+		if f == "tmuxSocketName" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("依赖清单没列 tmuxSocketName")
+	}
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := string(data)
+	if !strings.Contains(md, "tmuxSocketName") {
+		t.Error("MANIFEST.md 没提 tmuxSocketName")
+	}
+	if !strings.Contains(md, "omitempty") {
+		t.Error("MANIFEST.md 没说明该字段为什么会看不见")
+	}
+}
+
+// 源码里请求的每一个端点，都必须在清单里。
+//
+// **它按字面量找**：只认源码里完整写出的 "/api/..."、"/events/..." 字符串。
+// 拼出来的路径（例如 "/api/"+"x"）它看不见，独立评审实测注入这样一个调用仍然绿。
+//
+// 这是原先缺掉的那一半。旧的一致性测试只查「清单列的端点能在源码里找到」，
+// 反过来没人查——于是 `GET /api/menu` 在生产路径上被调了整整一个节点，
+// 依赖清单里却一直没有它，而测试全绿。独立评审把这个单向性挑了出来。
+//
+// 单向的检查只能防「清单写多了」，防不住「清单写少了」，
+// 而后者才是依赖清单真正要防的事。
+func TestEveryEndpointInSourceIsListed(t *testing.T) {
+	src := readPackageSource(t)
+
+	// 找出源码里所有形如 "/api/..." 或 "/events/..." 的字面量。
+	re := regexp.MustCompile(`"(/(?:api|events)/[a-zA-Z0-9_/-]+)"`)
+	found := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		found[m[1]] = true
+	}
+	if len(found) == 0 {
+		t.Fatal("源码里一个端点字面量都没找到：这个检查多半已经失效")
+	}
+
+	listed := map[string]bool{}
+	for _, ep := range HTTPEndpoints {
+		listed[ep] = true
+	}
+	for ep := range found {
+		if !listed[ep] {
+			t.Errorf("源码请求了端点 %q，依赖清单 HTTPEndpoints 里却没有它", ep)
+		}
+	}
+
+	// 人读的那份也要有。
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := string(data)
+	for ep := range found {
+		if !strings.Contains(manifest, ep) {
+			t.Errorf("源码请求了端点 %q，MANIFEST.md 里却没提到它", ep)
+		}
+	}
+}
+
+// 白名单里的每一条命令，都要在副作用清单里有个交代，而且交代要有据可查。
+//
+// 这个测试改过两版。第一版只查「每条命令被放进某个桶」，
+// 于是 attempt 8 把 session attach / output 硬编码成「不写」也照样绿——
+// 而它们实际都会经 NewStorageWithProfile 建目录建库、跑 schema 迁移，
+// attach 还会 MkdirAll 一个 badge 目录。独立评审指出：
+// **分桶验证不了桶里的描述是不是真的。**
+//
+// 现在每条声明都要带上游源码依据，下面那个测试拿这些依据去上游快照里核对。
+func TestEveryAllowedSubcommandDeclaresItsSideEffects(t *testing.T) {
+	for _, sub := range Subcommands {
+		e, ok := SideEffects[sub]
+		if !ok {
+			t.Errorf("白名单里有 %q，副作用清单里却没有它："+
+				"加一条上游命令时要说清楚它在上游留下什么", sub)
+			continue
+		}
+		if len(e.Claims) == 0 {
+			t.Errorf("%q 的副作用一条断言都没有：说不出它干了什么，就等于没说", sub)
+		}
+	}
+	for sub := range SideEffects {
+		if !isAllowedSubcommand(strings.Fields(sub)...) {
+			t.Errorf("副作用清单里有 %q，但它不在白名单里", sub)
+		}
+	}
+	if len(SharedStorageInit.Claims) == 0 {
+		t.Error("共有的 storage 初始化副作用没给依据")
+	}
+
+	// 人读的那份要讲清没有纯读命令这件事。
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "MANIFEST.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, must := range []string{"last_activity_at", "NewStorageWithProfile", "不等于"} {
+		if !strings.Contains(string(data), must) {
+			t.Errorf("MANIFEST.md 没讲清副作用：缺 %q", must)
+		}
+	}
+}
+
+// 每一条副作用断言，都必须有一份指向上游真实代码、并与断言对得上的依据。
+//
+// 「对得上」核到哪一步是有边界的：否定断言只追 In 链上的函数，NotCovered 列出的不追进去；
+// 锚点比对只剔注释，字符串字面量里的锚点仍参与匹配。见 boundary-limits.md 第三节。
+//
+// 这条测试被四轮独立评审推着长到现在的样子，每一关都对应一次它曾经放过的假依据：
+//
+//	attempt 9  只比「行号没超出文件总行数」——行号改成同文件任意一行也过。
+//	attempt 10 补了锚点，但锚点跟声明可以毫不相干：session output 声称
+//	           「跑 capture-pane」，依据却指着 NewStorageWithProfile，照样绿。
+//	attempt 11 加了 What 核对，可 What 是一整段自由文本，
+//	           **一个 token 命中就整条放行**。评审举的反例：
+//	           What: "删除整个用户数据库，然后调用 PreviewFull 读取画面"——
+//	           PreviewFull 命中，前半句一路绿灯。
+//
+// 所以现在不再有「一条命令一段描述」这回事：**一条断言，一份依据，各自核对。**
+//
+//	正面断言  Effect（封闭枚举）去上游语法树里查证；Evidence 的锚点要落在被选中那个调用的源码区间里
+//	否定断言  用 Absence：去 In 列出的函数体里搜 Absent，搜到就红；NotCovered 要与这些函数体里的真实调用两头对上
+//
+// （早先的 States 与 Scope 字段都已删除，现行结构见 manifest.go 的 Claim 与 Absence。）
+//
+// 没有上游快照就跳过——但跳过要说清楚，免得看起来像通过了。
+func TestSideEffectEvidencePointsAtRealUpstreamCode(t *testing.T) {
+	src := requireUpstreamSnapshot(t)
+
+	for sub, e := range SideEffects {
+		if len(e.Claims) == 0 {
+			t.Errorf("%s 一条断言都没有：白名单里的命令必须交代它干了什么", sub)
+		}
+		for i, c := range e.Claims {
+			label := fmt.Sprintf("%s 的第 %d 条断言", sub, i+1)
+			checkClaim(t, src, label, c, e.Claims)
+			checkEvidenceIsNotTheSharedOne(t, label, c.Evidence)
+		}
+	}
+	for i, c := range SharedStorageInit.Claims {
+		label := fmt.Sprintf("SharedStorageInit 的第 %d 条断言", i+1)
+		checkClaim(t, src, label, c, SharedStorageInit.Claims)
+	}
+}
+
+func requireUpstreamSnapshot(t *testing.T) string {
+	t.Helper()
+	src := os.Getenv("WORKDECK_UPSTREAM_SRC")
+	if src == "" {
+		t.Skip("跳过：没有设 WORKDECK_UPSTREAM_SRC，无法核对上游依据")
+	}
+	if _, err := os.Stat(filepath.Join(src, "go.mod")); err != nil {
+		t.Skipf("跳过：%s 看起来不是上游源码树（%v）", src, err)
+	}
+	return src
+}
+
+// checkClaim 核对一条断言。
+//
+// 正面与否定各走各的路，但都必须有路可走，而且**走的都是语法树**。
+func checkClaim(t *testing.T, src, label string, c Claim, siblings []Claim) {
+	t.Helper()
+	if strings.TrimSpace(c.Effect.Target) == "" {
+		t.Errorf("%s 没说上游做了什么", label)
+		return
+	}
+	hasEvidence, hasAbsence := len(c.Evidence) > 0, c.Absence != nil
+	switch {
+	case hasEvidence && hasAbsence:
+		t.Errorf("%s 同时给了正面依据和缺席依据，说不清它到底在证明什么", label)
+		return
+	case !hasEvidence && !hasAbsence:
+		t.Errorf("%s 一份依据都没有：%s 的出处在哪", label, c.Effect)
+		return
+	case hasAbsence:
+		if c.Effect.Kind != EffectAbsent {
+			t.Errorf("%s 给的是缺席依据，Effect 却是 %s——两者对不上", label, c.Effect.Kind)
+			return
+		}
+		checkAbsence(t, src, label, c, siblings)
+		return
+	}
+	if c.Effect.Kind == EffectAbsent {
+		t.Errorf("%s 说某个东西不出现，却给了正面依据——指着一行代码证明不了「没有」", label)
+		return
+	}
+	checkEvidence(t, src, label, c.Evidence)
+	checkEffectIsRealInUpstream(t, src, label, c)
+}
+
+// checkEvidence 验落点：锚点在指定行上，且那一行真的落在 Within 那个函数里。
+//
+// Within 的判定用语法树的位置区间，不再是「往上找最近的 func 开头」。
+// 原来那个做法，原始字符串里写一行顶格的 func 就能骗过去。
+func checkEvidence(t *testing.T, src, label string, where []Evidence) {
+	t.Helper()
+	for _, e := range where {
+		if e.Path == "" || e.Line < 1 {
+			t.Errorf("%s 的依据 %q 不完整：路径与行号都得有", label, e)
+			continue
+		}
+		// 锚点太短就不是锚点：一个花括号在任何文件里都找得到。
+		if len(strings.Join(strings.Fields(e.Anchor), "")) < 12 {
+			t.Errorf("%s 的依据 %q 锚点太短（%q），钉不住任何东西", label, e, e.Anchor)
+			continue
+		}
+		lines, err := upstreamLines(src, e.Path)
+		if err != nil {
+			t.Errorf("%s 的依据指向 %s，但读不到：%v", label, e.Path, err)
+			continue
+		}
+		if e.Line > len(lines) {
+			t.Errorf("%s 的依据指向 %s，但那个文件只有 %d 行", label, e, len(lines))
+			continue
+		}
+		if !strings.Contains(lines[e.Line-1], e.Anchor) {
+			var elsewhere []int
+			for i, line := range lines {
+				if strings.Contains(line, e.Anchor) {
+					elsewhere = append(elsewhere, i+1)
+				}
+			}
+			if len(elsewhere) == 0 {
+				t.Errorf("%s 的依据 %q 在上游找不到锚点 %q——这条依据讲的事情上游里没有",
+					label, e, e.Anchor)
+				continue
+			}
+			t.Errorf("%s 的依据 %q 行号过期：锚点 %q 现在在第 %v 行，把行号改过来",
+				label, e, e.Anchor, elsewhere)
+			continue
+		}
+		f, fset, err := upstreamFile(src, e.Path)
+		if err != nil {
+			t.Errorf("%s 的依据指向 %s，但解析不了：%v", label, e.Path, err)
+			continue
+		}
+		got := enclosingFuncOf(f, fset, e.Line)
+		// Within 留空表示「这一行在文件顶层」。**留空不是免检**：
+		// 语法树说它其实在某个函数里，照样红。
+		if e.Within == "" {
+			if got != "" {
+				t.Errorf("%s 的依据 %q 没写所属函数，但它其实在 %s 里——"+
+					"留空只能用在文件顶层的声明上", label, e, got)
+			}
+			continue
+		}
+		if got != e.Within {
+			if got == "" {
+				t.Errorf("%s 的依据 %q 说在 %s 里，但那一行在文件顶层，不属于任何函数",
+					label, e, e.Within)
+				continue
+			}
+			t.Errorf("%s 的依据 %q 说在 %s 里，语法树说它在 %s 里", label, e, e.Within, got)
+		}
+	}
+}
+
+// checkEffectIsRealInUpstream 拿 Effect 去上游语法树里查证，**并且钉在依据那一行上**。
+//
+// attempt 13 的版本只在 Within 那个函数里找一个同名调用就算数，
+// 跟 Evidence 指的那一行毫无关系。独立评审用一行改动证明了后果：
+//
+//	Effect{Kind: EffectCalls, Target: "Exit"}            // 换成同函数错误分支里的真实调用
+//	Anchor: "tmuxSession.Attach(ctx, detachByte)"        // 依据原封不动
+//
+// 通过。因为 handleSessionAttach 里确实有 os.Exit。
+// 「封闭枚举让假话编不出来」这个论据到此为止——**你不用编，
+// 在同一个函数里挑另一件真实但无关的事就行。**
+//
+// 所以这一轮把断言和它的出处钉死在同一行：Effect 说的那个调用，
+// 必须是 Evidence.Line 那一行上的调用；说声明就必须是那一行的声明。
+// 同处一室不算有出处。
+func checkEffectIsRealInUpstream(t *testing.T, src, label string, c Claim) {
+	t.Helper()
+	// **一条 Claim 只能挂一条落点。** 挂两条的话，下面只会查第一条，
+	// 第二条就成了没人核对的摆设——这正是这套清单栽过五次的那个形状。
+	if len(c.Evidence) != 1 {
+		t.Errorf("%s 挂了 %d 条落点：一条断言配一条落点，多出来的没人查",
+			label, len(c.Evidence))
+		return
+	}
+	e := c.Evidence[0]
+	f, fset, data, err := upstreamFileWithSource(src, e.Path)
+	if err != nil {
+		t.Errorf("%s 要在 %s 里查证 %s，但解析不了：%v", label, e.Path, c.Effect, err)
+		return
+	}
+	switch c.Effect.Kind {
+	case EffectDeclares:
+		fn := funcDeclAtLine(f, fset, e.Line)
+		if fn == nil {
+			t.Errorf("%s 说 %s 声明在 %s，但那一行上没有函数声明",
+				label, c.Effect.Target, e)
+			return
+		}
+		if got := qualifiedFuncName(fn); got != c.Effect.Target &&
+			fn.Name.Name != c.Effect.Target {
+			t.Errorf("%s 说那一行声明的是 %s，语法树说是 %s", label, c.Effect.Target, got)
+		}
+	case EffectDeclaresConst:
+		names := valueSpecAtLine(f, fset, e.Line)
+		got, ok := names[c.Effect.Target]
+		if !ok {
+			var have []string
+			for n := range names {
+				have = append(have, n)
+			}
+			sort.Strings(have)
+			t.Errorf("%s 说 %s 声明在 %s，但那一行声明的是 %v",
+				label, c.Effect.Target, e, have)
+			return
+		}
+		if c.Effect.Arg != "" && got != c.Effect.Arg {
+			t.Errorf("%s 说常量 %s 的值是 %q，上游那一行写的是 %q",
+				label, c.Effect.Target, c.Effect.Arg, got)
+		}
+	case EffectCalls:
+		if e.Within == "" {
+			t.Errorf("%s 说有个调用，却没说在哪个函数里——没法查", label)
+			return
+		}
+		fn, ferr := findFuncUnique(f, e.Within)
+		if ferr != nil {
+			t.Errorf("%s 要在 %s 里查 %s：%v", label, e.Path, c.Effect, ferr)
+			return
+		}
+		calls := callAtLine(fn, fset, e.Line)
+		if len(calls) == 0 {
+			t.Errorf("%s 说 %s 在 %s，但 %s 里那一行上没有任何调用起始",
+				label, c.Effect, e, e.Within)
+			return
+		}
+		// 同一行可以有好几个调用，所以「在这一行」还不够。
+		// 要的是**锚点落在被选中那个调用自己的源码区间里**。
+		var names []string
+		var hits []*ast.CallExpr
+		var namedButElsewhere []string
+		for _, call := range calls {
+			got := calleeName(call.Fun)
+			names = append(names, got)
+			if got != c.Effect.Target {
+				continue
+			}
+			// 剔掉注释再比：注释里抄一份锚点不算数。
+			text := nodeTextWithoutComments(data, fset, f, call)
+			if !strings.Contains(text, e.Anchor) {
+				namedButElsewhere = append(namedButElsewhere, text)
+				continue
+			}
+			hits = append(hits, call)
+		}
+		switch {
+		case len(hits) == 0 && len(namedButElsewhere) > 0:
+			t.Errorf("%s 说那一行调用的是 %s，这一行上确实有它，"+
+				"但锚点 %q 不在这个调用自己的源码里（它写的是 %q）——"+
+				"同一行上还有别的调用，共线不等于同一件事",
+				label, c.Effect.Target, e.Anchor, strings.Join(namedButElsewhere, " / "))
+			return
+		case len(hits) == 0:
+			t.Errorf("%s 说那一行调用的是 %s，但 %s 那一行上的调用是 %v——"+
+				"断言必须钉在它自己的依据那一行",
+				label, c.Effect.Target, e, names)
+			return
+		case len(hits) > 1:
+			t.Errorf("%s 那一行上有 %d 个都叫 %s、且都含锚点的调用，说不清指的是哪个——"+
+				"把锚点写得更具体，或者把依据指到只有一个的那一行",
+				label, len(hits), c.Effect.Target)
+			return
+		}
+		if c.Effect.Arg == "" {
+			return
+		}
+		for _, arg := range hits[0].Args {
+			if v, ok := constStringOf(arg); ok && v == c.Effect.Arg {
+				return
+			}
+		}
+		t.Errorf("%s 说 %s 带着常量参数 %q，但那个调用的参数里没有这个常量",
+			label, c.Effect.Target, c.Effect.Arg)
+	default:
+		t.Errorf("%s 的 Effect 种类是 %s，正面依据这条路不认识它", label, c.Effect.Kind)
+	}
+}
+
+// checkAbsence 验否定依据：那几个函数体里确实搜不到那些东西。
+//
+// 三件事都走语法树：
+//
+//  1. **搜禁词搜的是折叠成常量之后的字符串**，所以 "send" + "-keys" 也算数。
+//  2. **NotCovered 必须跟真实调用两头对上**：编一个语法树里没有的名字会红，
+//     漏掉一个真实调用也会红。
+//  3. **本条命令自己声称走过的路，必须真的走进去看。**
+//
+// 第三条是 attempt 14 加的。上一轮 In 是人手挑的，挑窄了没人管：
+// 真实链是 handleSessionOutput → Instance.PreviewFull → Session.CaptureFullHistory，
+// 而 In 只有头尾两个，中间的 PreviewFull 被放进 NotCovered 就算交代过了。
+// 独立评审复制上游文件，在 PreviewFull 里加一行 `_ = "send-keys"`，测试照样通过。
+//
+// 所以现在：同一条命令里别的 Claim 说「调用了 X」，而 X 的函数体也在这条路上，
+// 那 X 就必须进 In 被实际搜过，**不能只写进 NotCovered 了事**。
+// 反过来，已经被 In 搜过的，也不许再声称「没追进去」——那是自相矛盾。
+func checkAbsence(t *testing.T, src, label string, c Claim, siblings []Claim) {
+	t.Helper()
+	a := c.Absence
+	if len(a.In) == 0 || len(a.Absent) == 0 {
+		t.Errorf("%s 的缺席依据不完整：要搜哪些函数、搜什么，都得写", label)
+		return
+	}
+	// 否定断言说「不做 X」，那 X 就得真的在被搜的清单里，
+	// 否则这条断言和这次搜索各说各话。
+	var covered bool
+	for _, forbidden := range a.Absent {
+		if forbidden == c.Effect.Target {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Errorf("%s 说不做 %q，但搜的是 %v——断言与搜索对不上",
+			label, c.Effect.Target, a.Absent)
+	}
+
+	// **覆盖资格按调用写法算，不按尾名。**
+	//
+	// 上一轮这里是 searched[lastSegment(ref.Func)]，独立评审往上游副本加了个
+	// (*Other).PreviewFull，把 In 里的 Instance.PreviewFull 换成 Other.PreviewFull，
+	// 真正的那个一字节没搜，测试照样通过——尾名相同就算覆盖，等于谁都能顶替。
+	searched := map[string]bool{}
+	for _, ref := range a.In {
+		if ref.Call != "" {
+			searched[ref.Call] = true
+		}
+	}
+
+	actual := map[string]bool{}
+	// 每个 In 条目各自调了什么，分开记——链是有顺序的。
+	perRef := make([]map[string]bool, len(a.In))
+	for i, ref := range a.In {
+		perRef[i] = map[string]bool{}
+		_ = ref
+	}
+	for i, ref := range a.In {
+		f, _, err := upstreamFile(src, ref.Path)
+		if err != nil {
+			t.Errorf("%s 的缺席依据指向 %s，但解析不了：%v", label, ref.Path, err)
+			continue
+		}
+		fn, ferr := findFuncUnique(f, ref.Func)
+		if ferr != nil {
+			t.Errorf("%s 的缺席依据说要搜 %s：%v", label, ref, ferr)
+			continue
+		}
+		// 非入口的每一跳都要交代：它在上一级里写成什么样，
+		// 以及那个变量凭什么是这个类型——后半句机器验不了，所以必须写出来。
+		if i := strings.LastIndex(ref.Call, "."); ref.Call != "" && i >= 0 {
+			// 带前缀的调用（x.Foo）才需要交代 x 是什么类型；
+			// 同包直接调用（Foo）的身份语法树自己就能定死。
+			holder := ref.Call[:i]
+			switch {
+			case strings.TrimSpace(ref.Note) == "":
+				t.Errorf("%s 的 %s 写了调用写法 %q 却没写 Note——"+
+					"从 %s 这个变量到 %s 这个类型，测试验不了，得有人写清楚",
+					label, ref, ref.Call, holder, ref.Func)
+			case !strings.Contains(ref.Note, holder):
+				t.Errorf("%s 的 %s 的 Note 没提到 %q——"+
+					"要交代的正是这个变量为什么是 %s", label, ref, holder, ref.Func)
+			}
+			if lastSegment(ref.Call) != lastSegment(ref.Func) {
+				t.Errorf("%s 的 %s 说调用写法是 %q，跟定义处的 %q 连名字都对不上",
+					label, ref, ref.Call, ref.Func)
+			}
+		}
+		for _, str := range stringsIn(fn) {
+			for _, forbidden := range a.Absent {
+				if strings.Contains(str, forbidden) {
+					t.Errorf("%s 说这条路不碰 %q，但 %s 里算得出字符串 %q",
+						label, forbidden, ref, str)
+				}
+			}
+		}
+		for _, call := range callsIn(fn) {
+			actual[call.Name] = true
+			perRef[i][call.Name] = true
+		}
+	}
+
+	// **每一跳的调用得出现在它前面那些函数里，不是「In 里随便哪个」。**
+	// 否则 In 只是一堆函数的集合，谈不上覆盖了某条链：
+	// 把链末端的函数摆进去，它自己调的东西就能替前面的跳背书。
+	for i, ref := range a.In {
+		if ref.Call == "" {
+			continue
+		}
+		var reachedFrom = -1
+		for j := 0; j < i; j++ {
+			if perRef[j][ref.Call] {
+				reachedFrom = j
+				break
+			}
+		}
+		if reachedFrom < 0 {
+			t.Errorf("%s 的 %s 说它是通过 %q 被走到的，但 In 里排在它前面的函数"+
+				"没有一个调用了这个——链要按顺序写，前一跳得真的调到后一跳",
+				label, ref, ref.Call)
+		}
+	}
+
+	// 同一条命令里别的 Claim 声称调用过的东西，如果这条路上真的调到了，
+	// 就必须被搜过，不能只记在「没追进去」那一栏。
+	for _, sib := range siblings {
+		if sib.Effect.Kind != EffectCalls {
+			continue
+		}
+		if searched[sib.Effect.Target] {
+			continue
+		}
+		if actual[sib.Effect.Target] {
+			t.Errorf("%s 这条路上调用了 %s，而同一条命令另有一条断言说它就是干活的那一步——"+
+				"这种中间函数必须进 In 被搜过，只写进 NotCovered 等于没查",
+				label, sib.Effect.Target)
+		}
+	}
+
+	declared := map[string]bool{}
+	for _, name := range a.NotCovered {
+		declared[name] = true
+		if searched[name] {
+			t.Errorf("%s 的 NotCovered 里写了 %q，但 In 已经搜过它的函数体——"+
+				"不能既说搜过又说没追进去", label, name)
+			continue
+		}
+		if !actual[name] {
+			t.Errorf("%s 的 NotCovered 里写了 %q，但被搜的那几个函数体里没有这个调用——"+
+				"边界声明不能凭空写", label, name)
+		}
+	}
+	var missing []string
+	for name := range actual {
+		if declared[name] || searched[name] {
+			continue
+		}
+		missing = append(missing, name)
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("%s 的 NotCovered 漏了这些真实调用：%v——"+
+			"函数体级的搜索追不进它们，边界就得把它们算进去", label, missing)
+	}
+}
+
+func upstreamLines(src, path string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(src, path))
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(string(data), "\n"), nil
+}
+
+// checkEvidenceIsNotTheSharedOne 不许拿所有命令共有的 storage 初始化充数。
+//
+// 「每条命令都会初始化 storage」证明不了「session output 跑了 capture-pane」。
+func checkEvidenceIsNotTheSharedOne(t *testing.T, label string, where []Evidence) {
+	t.Helper()
+	for _, e := range where {
+		for _, sc := range SharedStorageInit.Claims {
+			for _, shared := range sc.Evidence {
+				if e.Path == shared.Path && e.Line == shared.Line {
+					t.Errorf("%s 的依据 %q 就是 SharedStorageInit 那条——"+
+						"共有的 storage 初始化证明不了这条命令特有的副作用，"+
+						"要指向它自己的那一行", label, e)
+				}
+			}
+		}
+	}
+}

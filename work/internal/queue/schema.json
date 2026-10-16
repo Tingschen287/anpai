@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Tingschen287/terminal-deck/work/internal/queue/schema.json",
+  "title": "Work Deck 决策队列文件",
+  "description": "queue.json 的结构：Graph 的门与运行时会话的待决事项汇在同一个队列里。TestItemsMatchTheSchema 按本文件校验。",
+  "type": "object",
+  "required": ["version", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["id", "category", "risk", "title", "detail", "options", "recommendation",
+                   "evidence_refs", "blocking_sessions", "deadline", "source",
+                   "first_seen", "last_seen", "status", "answer"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^(graph:.+#[0-9]+:[a-z]+|session:[0-9a-f]{24})$"},
+        "category": {"type": "string", "enum": ["graph_human_gate", "graph_blocked",
+          "session_waiting", "session_error", "session_usage_limit", "session_finished"]},
+        "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+        "title": {"type": "string", "minLength": 1},
+        "detail": {"type": "string"},
+        "options": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/option"}},
+        "recommendation": {"$ref": "#/$defs/recommendation"},
+        "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "blocking_sessions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "deadline": {"type": ["string", "null"], "format": "date-time"},
+        "source": {"$ref": "#/$defs/source"},
+        "first_seen": {"type": "string", "format": "date-time"},
+        "last_seen": {"type": "string", "format": "date-time"},
+        "status": {"type": "string", "enum": ["open", "answered", "resolved"], "description": "Graph 条目只有 open 与 resolved；answered 只用于会话条目"},
+        "answer": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/answer"}]}
+      }
+    },
+    "option": {
+      "type": "object",
+      "required": ["key", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "description": "会话条目：选中后投递回发起会话的文字"},
+        "command": {"type": "string", "description": "Graph 条目：交给 owner 在命令行执行的命令"}
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["option", "confidence", "basis"],
+      "additionalProperties": false,
+      "properties": {
+        "option": {"type": "string", "description": "推荐的选项 key；空串表示不推荐"},
+        "confidence": {"type": "string", "enum": ["none", "low", "medium", "high"]},
+        "basis": {"type": "string", "minLength": 1}
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["kind", "present"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "enum": ["graph", "session"]},
+        "node_id": {"type": "string"},
+        "attempt": {"type": "integer"},
+        "state": {"type": "string"},
+        "session_id": {"type": "string"},
+        "profile": {"type": "string"},
+        "done_status": {"type": "string", "description": "完成回报的 ok/fail，只有 session_finished 条目有"},
+        "reported_at": {"type": "string", "format": "date-time", "description": "上游记录里这件事发生的时间，第一次读到的值"},
+        "present": {"type": "boolean"}
+      }
+    },
+    "answer": {
+      "type": "object",
+      "required": ["option", "answered_at", "delivered"],
+      "additionalProperties": false,
+      "properties": {
+        "option": {"type": "string", "minLength": 1},
+        "answered_at": {"type": "string", "format": "date-time"},
+        "delivered": {"type": "boolean"},
+        "delivery_error": {"type": "string"},
+        "note": {"type": "string"},
+        "in_flight": {"type": "boolean", "description": "投递已开始、结果未记下；重启后看到它表示结果未知，不自动重投"}
+      }
+    }
+  }
+}

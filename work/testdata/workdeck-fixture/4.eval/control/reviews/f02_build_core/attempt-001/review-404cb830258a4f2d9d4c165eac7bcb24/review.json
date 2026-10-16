@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "project_id": "workdeck-fixture",
+  "graph_revision": 3,
+  "graph_sha256": "6b0257e57cf6de60db4bca856b5c0ecf4af201b439eb0da1343b151277775c53",
+  "node_id": "f02_build_core",
+  "node_spec_sha256": "d2e1e3e12b01307ea78380cbc81f4eef2542a6c3ec10cae5b194de4f707695b5",
+  "attempt": 1,
+  "reviewed_manifest_path": "4.eval/control/evidence/f02_build_core/attempt-001/submission-eecb2ac7c71b4cabbe0792d626cf4b7c/manifest.json",
+  "reviewed_manifest_sha256": "d8440798be30922f2581b779b43c531795b6ef5101b3a9d308b4ebc0669afeb2",
+  "reviewer": {
+    "actor": "fixture-reviewer-b1",
+    "role": "fixture_reviewer",
+    "route_class": "balanced",
+    "model": "fixture-model-balanced"
+  },
+  "independent_from_executor": true,
+  "decision": "rework",
+  "reason": "核心产物缺少边界说明，退回补充",
+  "blockers": [
+    "边界说明缺失"
+  ],
+  "usage": {
+    "worker_rounds": 0,
+    "frontier_calls": 0,
+    "input_tokens": 9000,
+    "output_tokens": 2500,
+    "cost_cny": 0.0,
+    "elapsed_seconds": 600.0
+  },
+  "report": {
+    "type": "file",
+    "sha256": "2feee840b5eaa182ab7c319d84b941b97d640dc2b26764ad8343588b7a282ac7",
+    "size_bytes": 86,
+    "source_path": "4.eval/reviews/f02_build_core-review.md",
+    "snapshot_path": "4.eval/control/reviews/f02_build_core/attempt-001/review-404cb830258a4f2d9d4c165eac7bcb24/snapshots/report/f02_build_core-review.md"
+  },
+  "reviewed_at": "2026-09-20T02:32:20+00:00",
+  "review_sha256": "03387a84faa694011dece4644e049d80558dc86aa625240f940b6bf00ff0dd12"
+}
