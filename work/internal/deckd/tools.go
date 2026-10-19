@@ -172,7 +172,7 @@ func (s *Server) getToolModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(e.listArgs) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"models": []string{}, "note": i18n.E("err.deckd.servergettoolmodels.3", e.Name).Error()})
+		writeJSON(w, http.StatusOK, withNote(map[string]any{"models": []string{}}, i18n.E("err.deckd.servergettoolmodels.3", e.Name), 300))
 		return
 	}
 	text, err := listModels(r.Context(), e.Binary, e.listArgs)

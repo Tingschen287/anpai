@@ -9,6 +9,52 @@ import (
 	"strings"
 )
 
+// RedactMark 是落盘用的打码标记，5 个私用区字符，和中文「[已打码]」一样长。
+// 这样先替换再按字符截断，和以前直接写入中文记号的截断位置相同。
+// 渲染时换成当前语言的 err.deckstore.clean.1。Error() 永远换成中文。
+const RedactMark = "\uE000\uE001\uE002\uE003\uE004"
+
+// redactKey 是打码记号的文字键。写在这里，避免 Error() 里出现非常量键。
+const redactKey = Key("err.deckstore.clean.1")
+
+// Present 把落盘标记换成当前语言的打码记号。没有标记时原样返回。
+func Present(s string) string { return swapMark(s, T(redactKey)) }
+
+// revealRedactZH 把落盘标记换成中文打码记号，不看当前语言。Error() 用它，中文原文因此和以前逐字一样。
+func revealRedactZH(s string) string {
+	phrase, ok := zh[redactKey]
+	if !ok || phrase == "" {
+		return s
+	}
+	return swapMark(s, phrase)
+}
+
+// swapMark 把标记换成 phrase。参数先打码、后按字符截断，标记可能只剩前几个字符（接着可能是「…」）。
+// 截断只发生在末尾，所以只认末尾的残缺标记，换成 phrase 的前几个字符：
+// 中文就是「[已」，和以前直接写入中文记号再截断的结果逐字一样。
+func swapMark(s, phrase string) string {
+	if !strings.ContainsAny(s, RedactMark) {
+		return s
+	}
+	s = strings.ReplaceAll(s, RedactMark, phrase)
+	body, tail := s, ""
+	if strings.HasSuffix(body, "…") {
+		body, tail = strings.TrimSuffix(body, "…"), "…"
+	}
+	mark, ph := []rune(RedactMark), []rune(phrase)
+	b := []rune(body)
+	for k := len(mark) - 1; k >= 1; k-- {
+		if len(b) >= k && string(b[len(b)-k:]) == string(mark[:k]) {
+			cut := k
+			if cut > len(ph) {
+				cut = len(ph)
+			}
+			return string(b[:len(b)-k]) + string(ph[:cut]) + tail
+		}
+	}
+	return s
+}
+
 // Nest 是嵌进参数里的另一条带码错误。
 // 线路上它是对象，不是字符串。外部原文即使长得像旧的码标记，也不会被当成内层码。
 type Nest struct {
@@ -86,8 +132,12 @@ func (e *Error) Error() string {
 	if len(e.Args) == 0 {
 		return s
 	}
-	return fmt.Errorf(s, e.Args...).Error()
+	return revealRedactZH(fmt.Errorf(s, e.Args...).Error())
 }
+
+// AsCoded 取出错误自己带的码。没有码就返回 nil。
+// 界面参数要嵌套码时用它，不要先调 Error() 把中文压成字符串。
+func AsCoded(err error) *Error { return codedOf(err) }
 
 // Unwrap 只解开格式串里的一个 %w，和 fmt.Errorf 一样。
 // 多个 %w 时 fmt 只提供 Unwrap() []error，errors.Unwrap 得到 nil。这种情况靠 Is 和 As。

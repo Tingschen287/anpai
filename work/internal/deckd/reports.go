@@ -91,7 +91,7 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if !added && rep.Text != deckstore.Clean(b.Text, 2000) {
 		// 同一次完成的补充说明：不再转告主 agent，记进通知栏，不悄悄丢
-		s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.4", x.Title, deckstore.Clean(b.Text, 300)), x.Key)
+		s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.4", x.Title, deckstore.ArgText(b.Text, 300)), x.Key)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queued": true, "report": rep, "duplicate": !added})
 }
@@ -463,7 +463,7 @@ func (s *Server) expireClaims(now time.Time) {
 	}
 	for _, rep := range reps {
 		sub, _ := s.store.Session(rep.Sub)
-		s.store.NotifyCoded(rep.Project, "report", i18n.E("err.deckd.serverexpireclaims.1", sub.Title, deckstore.Clean(rep.Text, 160)), "deckd")
+		s.store.NotifyCoded(rep.Project, "report", i18n.E("err.deckd.serverexpireclaims.1", sub.Title, deckstore.ArgText(rep.Text, 160)), "deckd")
 	}
 }
 
@@ -504,7 +504,7 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 		default:
 			// 送达未确认或失败：不自动重发，标出来交给 owner
 			s.store.MarkReport(rep.ID, deckstore.ReportUnconfirmed)
-			s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverone.1", sub.Title, deckstore.Clean(err.Error(), 200)), "deckd")
+			s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverone.1", sub.Title, deckstore.Arg(err, 200)), "deckd")
 			return nil
 		}
 	}

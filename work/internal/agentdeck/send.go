@@ -88,7 +88,8 @@ func (c *Client) SendIfIdle(ctx context.Context, p lease.Permit, sessionID, mess
 		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", SubIdleCheck, "--timeout", SubReadyTimeout)
 	if err != nil && (errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || strings.Contains(err.Error(), "signal: killed")) {
 		// 上游没在时限内返回、被结束：可能已经打进去了（attempt 3 自查），按送达未确认，调用方不撤回代次
-		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: i18n.E("err.agentdeck.clientsendifidle.1", err).Error()}
+		coded := i18n.E("err.agentdeck.clientsendifidle.1", err)
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: coded.Error(), coded: coded}
 	}
 	return sendResult(sessionID, out, err, true)
 }

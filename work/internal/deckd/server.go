@@ -133,6 +133,22 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// withNote 在响应里留下中文兜底，并带上码。英文界面用 note_code，不把整句中文当参数。
+func withNote(body map[string]any, err error, max int) map[string]any {
+	if body == nil {
+		body = map[string]any{}
+	}
+	if err == nil {
+		return body
+	}
+	body["note"] = deckstore.Clean(err.Error(), max)
+	if c, a, ok := i18n.Wire(err); ok {
+		body["note_code"] = c
+		body["note_args"] = deckstore.CleanArgs(a, max)
+	}
+	return body
+}
+
 // writeErr 回一条错误。error 字段仍是中文原文。能取出码时再带 code 和 args。
 func writeErr(w http.ResponseWriter, code int, err error) {
 	body := apiError{Error: err.Error()}
@@ -443,7 +459,7 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.progress == nil || p.GraphRoot == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "graph": false, "note": i18n.E("err.deckd.servergetprogress.3").Error()})
+		writeJSON(w, http.StatusOK, withNote(map[string]any{"project": project, "graph": false}, i18n.E("err.deckd.servergetprogress.3"), 300))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)

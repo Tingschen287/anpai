@@ -24,6 +24,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 持有者。
@@ -134,11 +136,11 @@ func Open(path string) (*Store, error) {
 	}
 	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("打不开写入权记账的锁文件：%w", err)
+		return nil, i18n.E("err.lease.open.lock", err)
 	}
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lf.Close()
-		return nil, fmt.Errorf("写入权记账 %s 正被另一个 Work Deck 进程持有（%v）：两份记账不能互斥，本进程不投递任何东西", path, err)
+		return nil, i18n.E("err.lease.open.held", path, err)
 	}
 	s := &Store{path: path, lockFile: lf, leases: map[string]*Lease{}, inflight: map[string]int{}, ttl: DefaultTTL, now: time.Now}
 	data, err := os.ReadFile(path)
@@ -147,33 +149,33 @@ func Open(path string) (*Store, error) {
 	}
 	if err != nil {
 		s.Close()
-		return nil, fmt.Errorf("读写入权记账失败：%w", err)
+		return nil, i18n.E("err.lease.open.read", err)
 	}
 	var f struct {
 		Version int      `json:"version"`
 		Leases  *[]Lease `json:"leases"`
 		Events  []Event  `json:"events"`
 	}
-	bad := func(why string) error {
+	bad := func(why *i18n.Error) error {
 		s.Close()
-		return fmt.Errorf("写入权记账 %s %s；不当成空记账打开，免得把 owner 接管中的会话当成无主", path, why)
+		return i18n.E("err.lease.open.bad", path, why)
 	}
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, bad(fmt.Sprintf("解析不了（%v）", err))
+		return nil, bad(i18n.E("err.lease.open.parse", err))
 	}
 	if f.Version != currentVersion {
-		return nil, bad(fmt.Sprintf("版本是 %d，只认 %d", f.Version, currentVersion))
+		return nil, bad(i18n.E("err.lease.open.version", f.Version, currentVersion))
 	}
 	if f.Leases == nil {
-		return nil, bad("缺少 leases 字段")
+		return nil, bad(i18n.E("err.lease.open.noleases"))
 	}
 	for _, l := range *f.Leases {
 		l := l
 		if l.SessionID == "" || (l.Holder != HolderWorkbench && l.Holder != HolderOwner) {
-			return nil, bad(fmt.Sprintf("有一条记录不完整（会话 %q、持有者 %q）", l.SessionID, l.Holder))
+			return nil, bad(i18n.E("err.lease.open.incomplete", l.SessionID, l.Holder))
 		}
 		if _, dup := s.leases[l.SessionID]; dup {
-			return nil, bad("会话 " + l.SessionID + " 有两条记录")
+			return nil, bad(i18n.E("err.lease.open.dup", l.SessionID))
 		}
 		s.leases[l.SessionID] = &l
 	}
@@ -193,8 +195,14 @@ func (s *Store) Close() {
 // ErrDeliveryInProgress 表示这个会话有一条投递正在进行，此刻不能登记接管。
 type ErrDeliveryInProgress struct{ SessionID string }
 
-func (e *ErrDeliveryInProgress) Error() string {
-	return "会话 " + e.SessionID + " 有一条自动投递正在进行，等它结束再进入（否则消息可能在你进去之后才送达）"
+func (e *ErrDeliveryInProgress) Error() string { return e.I18n().Error() }
+
+func (e *ErrDeliveryInProgress) I18n() *i18n.Error {
+	id := ""
+	if e != nil {
+		id = e.SessionID
+	}
+	return i18n.E("err.lease.deliveryinprogress", id)
 }
 
 // Get 取一个会话的记录。
@@ -229,10 +237,10 @@ func (s *Store) Grant(sessionID, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，不能登记写入权")
+		return i18n.E("err.lease.grant.nosession")
 	}
 	if l, ok := s.leases[sessionID]; ok && (l.Holder == HolderOwner || l.PendingHandback != nil) {
-		return fmt.Errorf("会话 %s 在 owner 手上，Work Deck 不能自行取回写入权", sessionID)
+		return i18n.E("err.lease.grant.owner", sessionID)
 	}
 	now := s.now()
 	from := ""
@@ -250,7 +258,7 @@ func (s *Store) OwnerTakeover(sessionID, via string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，不能登记接管")
+		return i18n.E("err.lease.takeover.nosession")
 	}
 	if s.inflight[sessionID] > 0 {
 		return &ErrDeliveryInProgress{SessionID: sessionID}
@@ -272,7 +280,7 @@ func (s *Store) ExternalTakeover(sessionID string, clients int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，不能登记接管")
+		return i18n.E("err.lease.takeover.nosession")
 	}
 	if s.inflight[sessionID] > 0 {
 		return &ErrDeliveryInProgress{SessionID: sessionID}
@@ -295,7 +303,7 @@ func (s *Store) OwnerReturn(sessionID string, hb Handback) error {
 	defer s.mu.Unlock()
 	l, ok := s.leases[sessionID]
 	if !ok || l.Holder != HolderOwner {
-		return fmt.Errorf("会话 %s 没有登记为 owner 接管中，不能登记返回", sessionID)
+		return i18n.E("err.lease.return.notowner", sessionID)
 	}
 	next := *l
 	h := hb
@@ -325,7 +333,7 @@ func (s *Store) AutoHandback(sessionID string, hb Handback) error {
 	defer s.mu.Unlock()
 	l, ok := s.leases[sessionID]
 	if !ok || l.Holder != HolderOwner {
-		return fmt.Errorf("会话 %s 没有登记为 owner 接管中，不能自动交还", sessionID)
+		return i18n.E("err.lease.autohandback.notowner", sessionID)
 	}
 	now := s.now()
 	reason := fmt.Sprintf("owner 离开，自动交还：接管 %d 秒", hb.DurationSeconds)
@@ -345,7 +353,7 @@ func (s *Store) ConfirmHandback(sessionID string) error {
 	defer s.mu.Unlock()
 	l, ok := s.leases[sessionID]
 	if !ok || l.PendingHandback == nil {
-		return fmt.Errorf("会话 %s 没有等确认的交还", sessionID)
+		return i18n.E("err.lease.confirm.none", sessionID)
 	}
 	now := s.now()
 	next := &Lease{SessionID: sessionID, Holder: HolderWorkbench, Since: now, ExpiresAt: now.Add(s.ttl)}
@@ -358,7 +366,7 @@ func (s *Store) Renew(sessionID string) error {
 	defer s.mu.Unlock()
 	l, ok := s.leases[sessionID]
 	if !ok || l.Holder != HolderWorkbench || l.PendingHandback != nil {
-		return fmt.Errorf("会话 %s 不是 Work Deck 持有的租约，不能续约", sessionID)
+		return i18n.E("err.lease.renew.notours", sessionID)
 	}
 	now := s.now()
 	next := &Lease{SessionID: sessionID, Holder: HolderWorkbench, Since: l.Since, ExpiresAt: now.Add(s.ttl)}
@@ -378,7 +386,7 @@ func (s *Store) Broken() error {
 // 这时签发任何 Permit 都没有依据。
 func (s *Store) commitLocked(sessionID string, next *Lease, ev Event) error {
 	if s.broken != nil {
-		return fmt.Errorf("写入权记账已停用（%v）", s.broken)
+		return i18n.E("err.lease.commit.broken", s.broken)
 	}
 	prev, had := s.leases[sessionID]
 	prevEvents := s.events
@@ -391,7 +399,7 @@ func (s *Store) commitLocked(sessionID string, next *Lease, ev Event) error {
 		s.restore(sessionID, prev, had)
 		s.events = prevEvents
 		s.broken = err
-		return fmt.Errorf("写入权记账落盘失败，记账停用：%w", err)
+		return i18n.E("err.lease.commit.flush", err)
 	}
 	return nil
 }

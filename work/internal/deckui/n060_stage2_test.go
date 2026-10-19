@@ -46,11 +46,14 @@ var ownerChineseAllow = map[string]string{
 	"manifest.go · EffectKind.String":      "给评审看的证明说明，不进界面",
 	"manifest.go · Effect.String":          "给评审看的证明说明，不进界面",
 	"manifest.go · FuncRef.String":         "给评审看的证明说明，不进界面",
+	"viewstate.go · (pkg)":                 "哨兵 codeErr 的中文正文必须留在源码里，和码表逐字相同",
+	"viewstate.go · ErrPartial.Error":      "Error() 拼出来的中文必须和 I18n() 逐字相同",
+	"viewstate.go · ErrHandback.Error":     "Error() 拼出来的中文必须和 I18n() 逐字相同",
 }
 
-// TestOwnerFacingChineseIsCoded：deckd、deckstore、agentdeck、deckclient 里，
+// TestOwnerFacingChineseIsCoded：deckd、deckstore、agentdeck、deckclient、viewstate 里，
 // 没登记的函数不能再留中文字面量。登记的函数必须还留着中文，并且写了理由。
-// viewstate 不在这里扫：哨兵的 Error() 正文必须留在源码里，和码表逐字相同。
+// viewstate 按函数登记哨兵正文，不整包排除。
 func TestOwnerFacingChineseIsCoded(t *testing.T) {
 	hits := map[string][]string{}
 	walkDirs(t, ownerScanDirs(), func(path string, f *ast.File, _ *token.FileSet) {

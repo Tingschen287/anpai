@@ -97,7 +97,9 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		return &Error{Status: resp.StatusCode, Message: e.Error, Code: e.Code, Args: e.Args}
 	}
 	if out != nil {
-		// 数字留成 json.Number。成功响应里的 args 再按 %d 打印时仍是整数，也不会丢过 2^53 的精度。
+		// UseNumber 会把这段 JSON 里所有 interface{} 数字解成 json.Number，不单是错误参数。
+		// 有具体类型的字段（int、int64）仍按字段类型解，不受影响。
+		// 这样 args 再按 %d 打印时仍是整数，也不会丢过 2^53 的精度。
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
 		return dec.Decode(out)

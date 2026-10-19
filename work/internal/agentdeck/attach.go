@@ -226,7 +226,8 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	}
 
 	cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
-	where := i18n.E("err.agentdeck.clientdirectattachcommand.7").Error()
+	// 「默认 server」是本地写的句子，留成码交给嵌套，不先 .Error() 压成中文再当参数。
+	var where any = i18n.E("err.agentdeck.clientdirectattachcommand.7")
 	if socketName != "" {
 		where = "socket " + socketName
 	}

@@ -105,7 +105,8 @@ func expandArg(a any, depth int) any {
 		return v
 	case string:
 		// 普通字符串不是嵌套码。外部原文即使长得像码，也原样显示。
-		return v
+		// 落盘的打码标记在这里换成当前语言的记号。
+		return i18n.Present(v)
 	case i18n.Nest:
 		return renderNest(v, depth)
 	case i18n.List:

@@ -50,6 +50,10 @@ func TestN060NotifyArgsAreCleanedOnDisk(t *testing.T) {
 	if strings.Contains(disk, token) || strings.Contains(disk, "\x1b") || strings.Contains(disk, long) {
 		t.Fatal("落盘的通知仍有原文、控制字符或超长参数")
 	}
+	// 正文 Text 是中文兜底，和 d36dd20 一样带「[已打码]」。参数落盘必须是语言无关的标记（逐条见 checkNote）。
+	if !strings.Contains(disk, i18n.RedactMark) {
+		t.Fatal("落盘的参数应是语言无关的打码标记")
+	}
 
 	s2, err := Open(d)
 	if err != nil {
@@ -67,13 +71,18 @@ func TestN060NotifyArgsAreCleanedOnDisk(t *testing.T) {
 	if nest.Code != "err.deckd.tmuxcenterfind.3" {
 		t.Fatalf("嵌套外层码丢了：%s", nest.Code)
 	}
+	i18n.SetLang(i18n.ZH)
+	zh := deckclient.Text(nest.Code, []any(nest.Args), nest.Text)
+	if strings.Contains(zh, token) || !strings.Contains(zh, "[已打码]") || strings.Contains(zh, i18n.RedactMark) {
+		t.Fatalf("中文渲染应是已打码：%q", zh)
+	}
 	i18n.SetLang(i18n.EN)
 	en := deckclient.Text(nest.Code, []any(nest.Args), nest.Text)
 	if strings.Contains(en, token) || !strings.Contains(en, "cannot send the brief") || !strings.Contains(en, "no longer in the center") {
 		t.Fatalf("嵌套码被洗坏了：%q", en)
 	}
-	if !strings.Contains(en, "[已打码]") {
-		t.Fatalf("英文应保留已打进参数的中文打码记号：%q", en)
+	if strings.Contains(en, "[已打码]") || !strings.Contains(en, "[redacted]") {
+		t.Fatalf("英文渲染应是 redacted：%q", en)
 	}
 }
 
@@ -90,6 +99,9 @@ func checkNote(t *testing.T, name string, n Notification, hide, keep string) {
 		if strings.Contains(s, hide) {
 			t.Errorf("%s 落盘参数仍含 %q：%q", name, hide, s)
 		}
+		if hide == "sk-FAKETOKEN99" && (!strings.Contains(s, i18n.RedactMark) || strings.Contains(s, "[已打码]")) {
+			t.Errorf("%s 落盘参数应是标记：%q", name, s)
+		}
 		if utf8.RuneCountInString(s) > 601 {
 			t.Errorf("%s 参数超长：%d", name, utf8.RuneCountInString(s))
 		}
@@ -103,6 +115,19 @@ func checkNote(t *testing.T, name string, n Notification, hide, keep string) {
 		}
 		if keep != "" && !strings.Contains(text, keep) {
 			t.Errorf("%s %s 渲染应留下 %q：%q", name, lang, keep, text)
+		}
+		if hide == "sk-FAKETOKEN99" {
+			want := "[已打码]"
+			if lang == i18n.EN {
+				want = "[redacted]"
+			}
+			other := "[redacted]"
+			if lang == i18n.EN {
+				other = "[已打码]"
+			}
+			if !strings.Contains(text, want) || strings.Contains(text, other) || strings.Contains(text, i18n.RedactMark) {
+				t.Errorf("%s %s 打码记号不对：%q", name, lang, text)
+			}
 		}
 		if nrunes := utf8.RuneCountInString(text); nrunes > 601 {
 			t.Errorf("%s %s 整句超长：%d", name, lang, nrunes)

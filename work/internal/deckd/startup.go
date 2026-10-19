@@ -255,9 +255,9 @@ func (s *Server) markAwaiting(x deckstore.Session, key, id string, note *i18n.Er
 		// 显示到中间（新主 agent 还不在打开集合里，用 Open），按最新状态放开输入。owner 正接管着别的会话时不动中间：
 		// 切走会把接管交还（自查）；owner 仍可在侧栏点它。失败只影响方便程度，记在通知里
 		if err := s.view.Open(id); err != nil {
-			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.1", deckstore.Clean(err.Error(), 160)), "deckd")
+			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.1", deckstore.Arg(err, 160)), "deckd")
 		} else if err := s.view.OpenMainInput(id); err != nil {
-			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.2", deckstore.Clean(err.Error(), 160)), "deckd")
+			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.2", deckstore.Arg(err, 160)), "deckd")
 		}
 	}
 }
@@ -403,7 +403,7 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, i18n.E("err.deckd.serversendfirstbrief.2").Error())
 		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
 	default:
-		coded := i18n.E("err.deckd.serversendfirstbrief.3", deckstore.Clean(err.Error(), 200))
+		coded := i18n.E("err.deckd.serversendfirstbrief.3", deckstore.Arg(err, 200))
 		why := coded.Error()
 		s.store.FinishStart(key)
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, why)

@@ -7,7 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
@@ -48,14 +49,32 @@ func TestN060RenderNotificationsClipsAndHidesSecrets(t *testing.T) {
 		if !strings.Contains(panel, "RED") {
 			t.Fatalf("%s 面板应留下去掉控制符后的字母", lang)
 		}
+		mark := "[已打码]"
+		if lang == i18n.EN {
+			mark = "[redacted]"
+		}
+		if !strings.Contains(panel, mark) {
+			t.Fatalf("%s 面板应显示 %s", lang, mark)
+		}
 	}
-	i18n.SetLang(i18n.EN)
-	long := deckstore.Clip(deckclient.Text(ns[2].Code, []any(ns[2].Args), ns[2].Text), 600)
-	if n := utf8.RuneCountInString(long); n > 601 {
-		t.Fatalf("英文整句超长：%d", n)
-	}
-	if strings.Contains(long, "\x1b") {
-		t.Fatal("渲染整句仍有 ESC")
+	// 直接量生产面板输出里那一行的长度：整句不能超过 600 字（加一个「…」）。
+	// 不在测试里自己调 Clip，生产里的截断被删掉，这里会失败。
+	prefix := len([]rune("15:04 p · "))
+	for _, lang := range []string{i18n.ZH, i18n.EN} {
+		i18n.SetLang(lang)
+		panel := RenderNotifications(ns, 10)
+		long := ""
+		for _, line := range strings.Split(ansi.Strip(panel), "\n") {
+			if strings.Contains(line, "BBBBBBBB") {
+				long = line
+			}
+		}
+		if long == "" {
+			t.Fatalf("%s 面板里找不到超长通知那一行", lang)
+		}
+		if n := utf8.RuneCountInString(long) - prefix; n > 601 || !strings.HasSuffix(long, "…") {
+			t.Fatalf("%s 面板里的超长通知有 %d 字，应截到 600 字加「…」：%q", lang, n, long[len(long)-20:])
+		}
 	}
 }
 

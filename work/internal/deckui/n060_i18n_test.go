@@ -317,13 +317,13 @@ func checkFormatArgs(t *testing.T) {
 // prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
 // viewstate 在这份名单里，这样哨兵的字面量调用才算「有人用」。
 func prodDirs() []string {
-	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate")
+	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock")
 }
 
-// ownerScanDirs 是「函数里不能再留中文字面量」的包。不含 viewstate：
-// 哨兵 Error() 的中文正文必须留在源码里，和码表逐字相同。
+// ownerScanDirs 是「函数里不能再留中文字面量」的包。
+// viewstate 也在里面，按函数登记哨兵正文，不整包排除。
 func ownerScanDirs() []string {
-	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient")
+	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate")
 }
 
 func pkgDirs(names ...string) []string {
@@ -655,8 +655,8 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 					"st := deckstore.ActivityTypoText()")
 			},
 			also: func(t *testing.T) map[string]string {
-				src := replaceOnce(t, sanitizeOrig, "import (\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)",
-					"import (\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)\n\nfunc ActivityTypoText() string { return i18n.T(\"side.status.\" + \"typo\") }")
+				src := replaceOnce(t, sanitizeOrig, "import (\n\t\"reflect\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n)",
+					"import (\n\t\"reflect\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n)\n\nfunc ActivityTypoText() string { return i18n.T(\"side.status.\" + \"typo\") }")
 				return map[string]string{sanitizePath: src}
 			},
 			want: []string{`"side.status.typo"`, "不在 Keys() 里", "sanitize.go"},

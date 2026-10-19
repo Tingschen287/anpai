@@ -455,7 +455,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if x.Role == "main" {
 		// 接管已结束主 agent 留下的子 agent 与待送汇报（旧主 agent 退出后由 owner 起的新主 agent）
 		if subs, reps, err := s.store.AdoptOrphans(x.Project, key); err != nil {
-			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.46", deckstore.Clean(err.Error(), 160)), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.46", deckstore.Arg(err, 160)), "deckd")
 		} else if subs > 0 || reps > 0 {
 			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.25", subs, reps), "deckd")
 		}
@@ -474,12 +474,12 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		got, _ := s.store.Session(key)
 		noteErr = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
 	} else if derr := s.sendFirstMessage(ctx, key, permit, id, plan.brief); derr != nil {
-		noteErr = i18n.E("err.deckd.serverrunspawn.brief", deckstore.Clean(derr.Error(), 200))
+		noteErr = i18n.E("err.deckd.serverrunspawn.brief", deckstore.Arg(derr, 200))
 		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
 		// 主 agent 照常放开输入；记下并请 owner 看一眼（没提交的话，brief 留在输入框里看得见）
 		if x.Role == "main" && agentdeck.IsDeliveryUnconfirmed(derr) {
 			s.store.ConfirmBrief(key)
-			noteErr = i18n.E("err.deckd.serverrunspawn.48", deckstore.Clean(derr.Error(), 160))
+			noteErr = i18n.E("err.deckd.serverrunspawn.48", deckstore.Arg(derr, 160))
 			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
 		} else {
 			s.store.FinishStart(key)
@@ -516,7 +516,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if noteErr != nil {
 		if c, a, ok := i18n.Wire(noteErr); ok {
 			body["note_code"] = c
-			body["note_args"] = a
+			body["note_args"] = deckstore.CleanArgs(a, 300)
 		}
 	}
 	writeJSON(w, http.StatusCreated, body)
@@ -584,9 +584,9 @@ func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.S
 	}
 	note := deckstore.Clean(textOf(why), 300)
 	if stopErr != nil {
-		note += i18n.E("err.deckd.serverstoplaunched.4", deckstore.Clean(stopErr.Error(), 200)).Error()
+		note += i18n.E("err.deckd.serverstoplaunched.4", deckstore.Arg(stopErr, 200)).Error()
 		s.store.LaunchFailed(key, true, note)
-		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.1", x.Title, what, deckstore.Clean(stopErr.Error(), 120), id), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.1", x.Title, what, deckstore.Arg(stopErr, 120), id), "deckd")
 		return
 	}
 	s.store.LaunchFailed(key, keep, note)
@@ -604,15 +604,16 @@ func textOf(v any) string {
 	return fmt.Sprint(v)
 }
 
-// nestOrText：没被截断时保留码，截断后只留清洗过的原文，中文通知才和以前一样长。
+// nestOrText 把停止原因收成参数。中文 Error() 仍是截断后的原文。
+// 超长时也留下码，英文不再显示截断后的中文。
 func nestOrText(v any, max int) any {
-	full := textOf(v)
-	cleaned := deckstore.Clean(full, max)
-	if cleaned != full {
-		return cleaned
-	}
-	if v == nil {
+	switch x := v.(type) {
+	case nil:
 		return ""
+	case error:
+		return deckstore.Arg(x, max)
+	case string:
+		return deckstore.ArgText(x, max)
 	}
 	return v
 }
@@ -630,12 +631,12 @@ func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain 
 		}
 		return id, false, ""
 	}
-	// 上游 stderr 是外部原文，保持字符串，不套码。
-	cleaned := deckstore.Clean(err.Error(), 300)
+	// 有码就留下码。没有码的上游原文清洗后仍是字符串。
+	why = deckstore.Arg(err, 300)
 	if out.Error != "" || out.Code != "" {
-		return "", false, cleaned
+		return "", false, why
 	}
-	return "", true, cleaned
+	return "", true, why
 }
 
 // DeckCommand 是 brief 里写给 agent 的 deck 命令（daemon 换成 deckd 自己的可执行文件绝对路径）。
@@ -857,7 +858,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 	if err == nil || agentdeck.IsDeliveryUnconfirmed(err) {
 		// 发话返回：之后到的完成都属于新的一代（发的途中到的，按上一代有没有完成来归，见 deckstore EnqueueReport）
 		if eerr := s.store.EndSend(x.Key); eerr != nil {
-			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.8", deckstore.Clean(eerr.Error(), 160)), "deckd")
+			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.8", deckstore.Arg(eerr, 160)), "deckd")
 		}
 	}
 	switch {
@@ -865,12 +866,12 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
 	case agentdeck.IsDeliveryUnconfirmed(err):
 		// 话可能已打进去、只是没证实提交（Codex 总是这样）：新的一代保留
-		writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
+		writeJSON(w, http.StatusAccepted, withNote(map[string]any{"session": x.Key, "delivered": false}, err, 300))
 	default:
 		// 没送成（还在跑，或上游投递失败）：撤回这一代。撤回前已经收到这一代的完成就不撤——那是上一件在这一刻做完的报告，
 		// 照常转告；下次发话再开新的一代
 		if _, rerr := s.store.RevertTaskGen(x.Key, gen); rerr != nil {
-			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.9", deckstore.Clean(rerr.Error(), 160)), "deckd")
+			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.9", deckstore.Arg(rerr, 160)), "deckd")
 		}
 		if errors.Is(err, agentdeck.ErrTargetBusy) {
 			writeErr(w, http.StatusConflict, i18n.E("err.deckd.busysubtext"))

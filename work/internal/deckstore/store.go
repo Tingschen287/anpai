@@ -139,7 +139,7 @@ func Open(dirs Dirs) (*Store, error) {
 	// 送到一半（sending）时停了的汇报转为未确认、不重发；告诉 owner，不悄悄留着（n051 评审 1 B5）
 	for _, r := range recovered {
 		// 通知写不进去也照常启动（汇报已标为未确认、留在注册表里，右侧面板与 deck agent list 看得到）
-		s.NotifyCoded(r.Project, "report", i18n.E("err.deckstore.open.3", r.Sub, Clean(r.Text, 160)), "deckd")
+		s.NotifyCoded(r.Project, "report", i18n.E("err.deckstore.open.3", r.Sub, ArgText(r.Text, 160)), "deckd")
 	}
 	return s, nil
 }
@@ -894,7 +894,7 @@ const maxScopeValue = 300
 // 不超过 scope 值上限（目录会原样进批准范围），且不含任何控制字符——包括 Clean 会保留的换行与制表符、DEL 与 C1。
 func CheckPath(p string) error {
 	if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
-		return i18n.E("err.deckstore.checkpath.1", Clean(p, 120))
+		return i18n.E("err.deckstore.checkpath.1", ArgText(p, 120))
 	}
 	if len(p) > maxScopeValue {
 		return i18n.E("err.deckstore.checkpath.2", maxScopeValue, len(p))
@@ -904,7 +904,7 @@ func CheckPath(p string) error {
 	}
 	for _, r := range p {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return i18n.E("err.deckstore.checkpath.4", r, Clean(p, 120))
+			return i18n.E("err.deckstore.checkpath.4", r, ArgText(p, 120))
 		}
 	}
 	return nil
