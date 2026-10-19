@@ -899,9 +899,9 @@ func (m *Settings) hl(s string) string {
 func (m *Settings) tabBar() string {
 	var tabs []string
 	for i := range pageText {
-		name := " " + T(i18n.Key(pageText[i])) + " "
+		name := " " + T(pageText[i]) + " "
 		if page(i) == pageTrust && len(m.trust) > 0 {
-			name = " " + T(i18n.Key(pageText[i])) + fmt.Sprintf(" %d ", len(m.trust))
+			name = " " + T(pageText[i]) + fmt.Sprintf(" %d ", len(m.trust))
 		}
 		if page(i) == m.page {
 			tabs = append(tabs, tabOn+name+reset)

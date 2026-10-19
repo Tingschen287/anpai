@@ -316,16 +316,16 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 }
 
 func kindLabel(k string) string {
-	// 写成 kindKey[k]。先放进局部变量再传入，检查器会拒绝。
+	// 表的值已经是 Key，直接传入。再套一层 i18n.Key 没有新信息。
 	if _, ok := kindKey[k]; ok {
-		return i18n.T(i18n.Key(kindKey[k]))
+		return i18n.T(kindKey[k])
 	}
 	return k
 }
 
 func label(opt string) string {
 	if _, ok := optionKey[opt]; ok {
-		return i18n.T(i18n.Key(optionKey[opt]))
+		return i18n.T(optionKey[opt])
 	}
 	return opt
 }
@@ -342,7 +342,7 @@ func RenderProgress(p deckd.Progress) string {
 	var parts []string
 	for _, k := range order {
 		if n := p.Counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(i18n.Key(progressCountKey[k])), n))
+			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), n))
 		}
 	}
 	if p.Unknown > 0 {
@@ -399,7 +399,7 @@ func RenderActivity(ss []deckstore.Session, now time.Time) string {
 		if x.Role == "main" {
 			role = i18n.T("act.role.main")
 		}
-		st := i18n.T(i18n.Key(activityStatusKey[x.Status]))
+		st := i18n.T(activityStatusKey[x.Status])
 		if x.Status == deckstore.StatusUncertain || x.Status == deckstore.StatusFailed {
 			st = warn.Render(st)
 		}

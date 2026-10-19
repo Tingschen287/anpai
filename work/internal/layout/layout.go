@@ -321,8 +321,8 @@ var layoutKeyRows = []struct {
 func Keys() []struct{ Key, What string } {
 	out := make([]struct{ Key, What string }, len(layoutKeyRows))
 	for i, r := range layoutKeyRows {
-		// 用包级表的下标，不用 r.text。检查器不认局部变量上的字段。
-		out[i] = struct{ Key, What string }{r.key, i18n.T(i18n.Key(layoutKeyRows[i].text))}
+		// 表的值已经是 Key。用下标取出，不再套 i18n.Key。
+		out[i] = struct{ Key, What string }{r.key, i18n.T(layoutKeyRows[i].text)}
 	}
 	return out
 }

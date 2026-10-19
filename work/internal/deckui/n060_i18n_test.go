@@ -1,20 +1,35 @@
 // n060 文字键检查器。
 //
-// 普通 Go 代码里，传给翻译函数的键只有两个来源：
-//  1. 类型（先 Unalias）为 i18n.Key、并且有常量值的最外层表达式。值必须在 i18n.Keys() 里。
-//  2. i18n 包之外，把非常量转成 i18n.Key 的显式转换（Fun 解析到 Key 这个类型，含别名）。
-//     操作数只能是返工 3 的三种形状：已登记包级键表的下标、.text 字段、
-//     "tier." + string(deckstore.Tier)。绑定按对象比对，不按名字。
+// Key 的底层是 string。不靠 reflect / unsafe，i18n 包外要得到一个不在表里的 Key，
+// Go 规范里只剩下面几条。本检查器对模块内 i18n 包外的全部非测试包逐条处理。
+// 表达式先 ast.Unparen 去括号，类型先 types.Unalias。
 //
-// 以 i18n.Key 为类型实参的泛型实例化（info.Instances）一律报错，除非 genericKeyAllow 写明。
+//  1. 转换。目标类型「含有 Key」就要查。含有是递归的：Key 本身、指针、切片、数组、
+//     map、chan、函数签名、结构体字段（mentionsKey）。
+//     - 目标恰是 Key，操作数是常量：交给第 5 条。
+//     - 目标恰是 Key，操作数非常量：只放行返工 3 登记过的形状，按对象绑定。
+//     - 目标是别的含 Key 的类型（例如 *Key、带 Key 字段的结构体指针），操作数非常量：一律报错。
+//  2. 运算。结果类型是 Key 的非常量二元表达式 + 报错。左边类型是 Key 的 += 报错。
+//  3. 切片。结果类型是 Key 的切片表达式 k[i:j] 报错。
+//  4. 泛型。类型实参里含有 Key 的实例化（info.Instances，含 *Key、[]Key）报错，
+//     除非 genericKeyAllow 写明。
+//  5. 常量。类型是 Key 的最外层常量，值必须在 Keys() 里。
+//
+// 这就盖住了规范里的全部途径：
+//   - 字符串不可变。要改出一段新文本，只能 +、+= 或切片，上面都报了。
+//   - 下标 k[i] 得到的是 byte，不是 Key。
+//   - min / max 只返回其中一个操作数，不造新字符串。
+//   - 接口断言、信道接收、map 或数组下标，取回的都是已经有的 Key，不造新值。
+//   - 方法只能写在声明 Key 的 i18n 包里，包外加不了。包内的转换和运算由 i18n 的证明测试锁住。
 //
 // 不在范围：reflect、unsafe、go:linkname、cgo、代码生成，
 // 以及经 encoding/json、fmt.Sscan 等反射式解码得到的 Key。
-// 这些路径编译器追踪不到，本检查器不假装盖住它们。
+// 这些路径编译器追踪不到。运行时由 RecordMisses 在渲染测试里兜住。
 package deckui
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -25,6 +40,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -82,7 +98,7 @@ func dynamicTextKeys() []string {
 	return out
 }
 
-// dynamicCallAllow 是非常量转换的放行清单。粒度是「文件 · 函数 · 操作数原文」。
+// dynamicCallAllow 是「非常量、目标恰为 Key」的转换放行清单。粒度是「文件 · 函数 · 操作数原文」。
 // 原文用 go/printer 打印。改一个字符就对不上，测试失败，要人工复核后再改清单。
 // 清单不是放行依据。依据是 go/types 的符号绑定，坏绑定写进清单也过不了：
 //   - 表[下标]、表[下标].字段：被下标的标识符必须绑定到包级变量（Parent 是包作用域），
@@ -90,19 +106,15 @@ func dynamicTextKeys() []string {
 //   - "tier." + string(参数)：string 必须是 Universe 里的预声明类型。参数类型先 Unalias，再认 deckstore.Tier。
 //     前缀另由 checkTierConcat 锁成 tier.。
 //
+// 表的值本身已经是 Key 时不再套转换，所以那些下标不在这张清单里。
 // 函数调用、局部变量、参数、闭包参数、接收者、字段、未登记拼接、被遮蔽的名字，一律拒绝。
+// 目标不是 Key、但类型里含有 Key 的非常量转换，不走这张清单，一律拒绝。
 // 常量键不走这张清单，直接对 i18n.Keys()。
 var dynamicCallAllow = []string{
-	"layout.go · Keys · layoutKeyRows[i].text",
-	"render.go · RenderActivity · activityStatusKey[x.Status]",
-	"render.go · RenderProgress · progressCountKey[k]",
-	"render.go · kindLabel · kindKey[k]",
-	"render.go · label · optionKey[opt]",
-	"settings.go · tabBar · pageText[i]",
 	"settings.go · tierName · \"tier.\" + string(t)",
 }
 
-// genericKeyAllow 是以 i18n.Key 为类型实参的泛型实例化。现在没有。
+// genericKeyAllow 是类型实参里含有 Key 的泛型实例化。现在没有。
 // 写进来之前先说明这次实例化为什么造不出表外的键。
 var genericKeyAllow []string
 
@@ -401,33 +413,34 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		}
 	})
 	cases := []struct {
-		name   string
-		file   string
-		pass   bool
-		edit   func(t *testing.T, src string) string
-		also   func(t *testing.T) map[string]string
-		want   []string
-		need   int
-		needle string
+		name    string
+		file    string
+		pass    bool
+		edit    func(t *testing.T, src string) string
+		also    func(t *testing.T) map[string]string
+		want    []string
+		need    int
+		needle  string
+		runtime bool
 	}{
 		{
 			name: "Sprintf",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", `i18n.T(i18n.Key(fmt.Sprintf("side.status.%s", "typo")))`)
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T(i18n.Key(fmt.Sprintf("side.status.%s", "typo")))`)
 			},
 			want: []string{"函数调用 fmt.Sprintf", "render.go"},
 		},
 		{
 			name: "LocalVar",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))", "k := \"side.status.\" + x.Status\n\t\tst := i18n.T(i18n.Key(k))")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])", "k := \"side.status.\" + x.Status\n\t\tst := i18n.T(i18n.Key(k))")
 			},
 			want: []string{"局部变量或参数 k", "render.go"},
 		},
 		{
 			name: "UnregisteredConcat",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", `i18n.T(i18n.Key("side.status." + x.Status))`)
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T(i18n.Key("side.status." + x.Status))`)
 			},
 			want: []string{"未登记的字符串拼接", "render.go"},
 		},
@@ -435,7 +448,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			name: "UnregisteredMap",
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, "func TextKeys() []string {", "var otherStatusKey = map[string]i18n.Key{\"launching\": \"side.status.launching\"}\n\nfunc TextKeys() []string {")
-				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", "i18n.T(i18n.Key(otherStatusKey[x.Status]))")
+				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", "i18n.T(i18n.Key(otherStatusKey[x.Status]))")
 			},
 			want: []string{"键表 otherStatusKey 没有被 TextKeys 枚举", "render.go"},
 		},
@@ -456,7 +469,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "ClosureParam",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
 					"st := func(activityStatusKey map[string]string) string {\n\t\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\t\treturn st\n\t\t}(map[string]string{\"launching\": \"side.status.\" + \"typo\"})")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
@@ -473,7 +486,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "LocalShadow",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
 					"activityStatusKey := map[string]string{\"launching\": \"side.status.\" + \"typo\"}\n\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
@@ -489,7 +502,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "FieldShadow",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
 					"box := struct{ activityStatusKey map[string]string }{activityStatusKey: map[string]string{\"launching\": \"side.status.\" + \"typo\"}}\n\t\tst := i18n.T(i18n.Key(box.activityStatusKey[x.Status]))")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
@@ -499,8 +512,8 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
 					"tr \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = tr.T(\"side.status.\" + \"typo\")")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = tr.T(\"side.status.\" + \"typo\")")
 			},
 			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
@@ -509,16 +522,16 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
 					". \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = T(\"side.status.\" + \"typo\")")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = T(\"side.status.\" + \"typo\")")
 			},
 			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
 		{
 			name: "FuncValue",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"f := i18n.T\n\t\t_ = f(\"side.status.\" + \"typo\")\n\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"f := i18n.T\n\t\t_ = f(\"side.status.\" + \"typo\")\n\t\tst := i18n.T(activityStatusKey[x.Status])")
 			},
 			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
@@ -534,8 +547,8 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "Ellipsis",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = i18n.T(i18n.Key(\"side.status.\"+\"typo\"), []any{}...)\n\t\tst = i18n.T(\"side.status.\" + \"typo\", []any{}...)")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = i18n.T(i18n.Key(\"side.status.\"+\"typo\"), []any{}...)\n\t\tst = i18n.T(\"side.status.\" + \"typo\", []any{}...)")
 			},
 			want:   []string{"不在 Keys() 里", "render.go"},
 			need:   2,
@@ -553,7 +566,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "OutsidePackage",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
 					"st := deckstore.ActivityTypoText()")
 			},
 			also: func(t *testing.T) map[string]string {
@@ -566,16 +579,16 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "ConstTypo",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = i18n.T(\"side.status.typoo\")")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = i18n.T(\"side.status.typoo\")")
 			},
 			want: []string{`"side.status.typoo"`, "不在 Keys() 里", "render.go"},
 		},
 		{
 			name: "FormatErrorfDynamic",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
-					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\t_ = i18n.Format(i18n.Key(\"side.status.\" + x.Status))\n\t\t_ = i18n.Errorf(i18n.Key(\"act.status.\" + x.Status))")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\t_ = i18n.Format(i18n.Key(\"side.status.\" + x.Status))\n\t\t_ = i18n.Errorf(i18n.Key(\"act.status.\" + x.Status))")
 			},
 			want: []string{`"side.status." + x.Status`, `"act.status." + x.Status`, "未登记的字符串拼接", "render.go"},
 		},
@@ -584,10 +597,82 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, "func TextKeys() []string {",
 					"func keyAs[S ~string](s string) S { return S(s) }\n\nfunc TextKeys() []string {")
-				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
 					"st := i18n.T(keyAs[i18n.Key](\"side.status.typo\"))")
 			},
 			want: []string{"泛型实例化", "i18n.Key", "render.go"},
+		},
+		{
+			name: "ParenConv",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				src = withI18nImport(t, src)
+				return beforeReturn(t, src, "\ts := \"idle.\" + \"typo\"\n\tlines[2] = T((i18n.Key)(s))\n")
+			},
+			want: []string{"局部变量或参数 s", "idle.go"},
+		},
+		{
+			name: "KeyAddAssign",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				return beforeReturn(t, src, "\tk := pageText[0]\n\tk += k\n\tlines[2] = T(k)\n")
+			},
+			want: []string{"复合赋值 += 的左边是 Key", "idle.go"},
+		},
+		{
+			name: "PtrConv",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				src = withI18nImport(t, src)
+				return beforeReturn(t, src, "\ts := \"idle.\" + \"typo\"\n\tlines[2] = T(*(*i18n.Key)(&s))\n")
+			},
+			want: []string{"非常量转换成含有 Key 的类型", "*i18n.Key", "idle.go"},
+		},
+		{
+			name: "GenericPtr",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				src = withI18nImport(t, src)
+				src = replaceOnce(t, src, "func IdleLines", "func reviewKeyPtr[P ~*i18n.Key](s *string) P { return P(s) }\n\nfunc IdleLines")
+				return beforeReturn(t, src, "\ts := \"idle.\" + \"typo\"\n\tlines[2] = T(*reviewKeyPtr[*i18n.Key](&s))\n")
+			},
+			want: []string{"泛型实例化", "*i18n.Key", "idle.go"},
+		},
+		{
+			name: "KeyBinaryAdd",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				return beforeReturn(t, src, "\tk := pageText[0]\n\tlines[2] = T(k + k)\n")
+			},
+			want: []string{"二元表达式 + 的结果是 Key", "idle.go"},
+		},
+		{
+			name: "KeySlice",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				return beforeReturn(t, src, "\tlines[2] = T(pageText[0][1:])\n")
+			},
+			want: []string{"切片表达式的结果是 Key", "idle.go"},
+		},
+		{
+			name: "NestedTypeConv",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				src = withI18nImport(t, src)
+				return beforeReturn(t, src, "\ttype keyNest struct{ K i18n.Key }\n\tb := keyNest{K: pageText[0]}\n\t_ = (*struct{ K i18n.Key })(&b)\n")
+			},
+			want: []string{"非常量转换成含有 Key 的类型", "i18n.Key", "idle.go"},
+		},
+		{
+			name:    "RuntimeNet",
+			file:    "idle.go",
+			pass:    true,
+			runtime: true,
+			edit: func(t *testing.T, src string) string {
+				src = replaceOnce(t, src, "import (\n\t\"fmt\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/layout\"\n)",
+					"import (\n\t\"fmt\"\n\t\"reflect\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/layout\"\n)")
+				return beforeReturn(t, src, "\ts := \"idle.\" + \"typo\"\n\tvar k i18n.Key\n\treflect.ValueOf(&k).Elem().Set(reflect.ValueOf(s).Convert(reflect.TypeOf(k)))\n\tlines[2] = T(k)\n")
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -617,6 +702,9 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			if tc.pass {
 				if err != nil || len(probs) != 0 {
 					t.Fatalf("应通过，实际：\n%s", blob)
+				}
+				if tc.runtime {
+					assertRenderMiss(t, overlay)
 				}
 				return
 			}
@@ -1095,6 +1183,15 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 		for _, pf := range cp.files {
 			base := filepath.Base(pf.path)
 			walkStack(pf.file, func(n ast.Node, stack []ast.Node) {
+				if outside {
+					if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.ADD_ASSIGN {
+						for _, lhs := range as.Lhs {
+							if tv, ok := cp.info.Types[lhs]; ok && isI18nKey(tv.Type) {
+								probs = append(probs, fmt.Sprintf("%s：复合赋值 += 的左边是 Key", fset.Position(lhs.Pos())))
+							}
+						}
+					}
+				}
 				e, ok := n.(ast.Expr)
 				if !ok {
 					return
@@ -1110,12 +1207,36 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 						}
 					}
 				}
-				call, ok := e.(*ast.CallExpr)
-				if !ok || !outside {
+				if !outside {
 					return
 				}
-				op, ok := keyConvOperand(cp.info, call)
-				if !ok || cp.info.Types[call].Value != nil {
+				if bin, ok := e.(*ast.BinaryExpr); ok && bin.Op == token.ADD {
+					if tv, ok := cp.info.Types[e]; ok && isI18nKey(tv.Type) && tv.Value == nil {
+						probs = append(probs, fmt.Sprintf("%s：二元表达式 + 的结果是 Key", fset.Position(e.Pos())))
+					}
+				}
+				if _, ok := e.(*ast.SliceExpr); ok {
+					if tv, ok := cp.info.Types[e]; ok && isI18nKey(tv.Type) {
+						probs = append(probs, fmt.Sprintf("%s：切片表达式的结果是 Key", fset.Position(e.Pos())))
+					}
+				}
+				call, ok := e.(*ast.CallExpr)
+				if !ok {
+					return
+				}
+				target, op, ok := conversionTarget(cp.info, call)
+				if !ok {
+					return
+				}
+				pos := fset.Position(call.Pos())
+				// 目标恰是 Key 的常量交给上面的常量规则。其它含 Key 的类型没有常量转换可放。
+				if isI18nKey(target) && cp.info.Types[call].Value != nil {
+					return
+				}
+				if !isI18nKey(target) {
+					if cp.info.Types[call].Value == nil {
+						probs = append(probs, fmt.Sprintf("%s：非常量转换成含有 Key 的类型 %s", pos, shortType(target)))
+					}
 					return
 				}
 				fn := nearestFunc(stack)
@@ -1124,7 +1245,6 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 					probs = append(probs, err.Error())
 					return
 				}
-				pos := fset.Position(call.Pos())
 				if fn == "" {
 					probs = append(probs, fmt.Sprintf("%s：非常量转换不在函数里（%s）", pos, expr))
 					return
@@ -1136,25 +1256,28 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 				got[base+" · "+fn+" · "+expr] = true
 			})
 		}
+		if !outside {
+			continue
+		}
 		for id, inst := range cp.info.Instances {
 			if inst.TypeArgs == nil {
 				continue
 			}
-			hit := false
+			var hit []string
 			for i := 0; i < inst.TypeArgs.Len(); i++ {
-				if isI18nKey(inst.TypeArgs.At(i)) {
-					hit = true
-					break
+				arg := inst.TypeArgs.At(i)
+				if mentionsKey(arg) {
+					hit = append(hit, shortType(arg))
 				}
 			}
-			if !hit {
+			if len(hit) == 0 {
 				continue
 			}
 			fileBase := filepath.Base(fset.Position(id.Pos()).Filename)
 			fn := funcNameAt(cp.files, id.Pos())
 			site := fileBase + " · " + fn + " · " + id.Name
 			if !genAllow[site] {
-				probs = append(probs, fmt.Sprintf("%s：泛型实例化以 i18n.Key 为类型实参（%s）", fset.Position(id.Pos()), id.Name))
+				probs = append(probs, fmt.Sprintf("%s：泛型实例化的类型实参含有 Key（%s）", fset.Position(id.Pos()), strings.Join(hit, ", ")))
 				continue
 			}
 			genGot[site] = true
@@ -1230,15 +1353,92 @@ func keyString(v constant.Value) (string, bool) {
 	return constant.StringVal(v), true
 }
 
-func keyConvOperand(info *types.Info, call *ast.CallExpr) (ast.Expr, bool) {
-	if call == nil || len(call.Args) != 1 || call.Ellipsis.IsValid() {
-		return nil, false
+// conversionTarget 认出一次类型转换。括号先去掉。Fun 在类型信息里必须是类型，不是函数。
+// 目标类型含有 Key 才返回真。操作数原样返回，调用方再分类。
+func conversionTarget(info *types.Info, call *ast.CallExpr) (types.Type, ast.Expr, bool) {
+	if info == nil || call == nil || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return nil, nil, false
 	}
-	tn, ok := objOf(info, callFunIdent(call)).(*types.TypeName)
-	if !ok || !isI18nKey(tn.Type()) {
-		return nil, false
+	fun := ast.Unparen(call.Fun)
+	tv, ok := info.Types[fun]
+	if !ok || !tv.IsType() {
+		tv, ok = info.Types[call.Fun]
 	}
-	return call.Args[0], true
+	if !ok || !tv.IsType() || tv.Type == nil || !mentionsKey(tv.Type) {
+		return nil, nil, false
+	}
+	return tv.Type, call.Args[0], true
+}
+
+// mentionsKey 为真表示 t 里递归出现了 i18n.Key。
+// 看：Key 本身、指针、切片、数组、map、chan、函数签名、结构体字段。别名先 Unalias。
+func mentionsKey(t types.Type) bool {
+	return mentionKey(t, map[types.Type]bool{})
+}
+
+func mentionKey(t types.Type, seen map[types.Type]bool) bool {
+	if t == nil {
+		return false
+	}
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if isI18nKey(t) {
+		return true
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return mentionKey(u.Elem(), seen)
+	case *types.Slice:
+		return mentionKey(u.Elem(), seen)
+	case *types.Array:
+		return mentionKey(u.Elem(), seen)
+	case *types.Map:
+		return mentionKey(u.Key(), seen) || mentionKey(u.Elem(), seen)
+	case *types.Chan:
+		return mentionKey(u.Elem(), seen)
+	case *types.Signature:
+		if u.Recv() != nil && mentionKey(u.Recv().Type(), seen) {
+			return true
+		}
+		return mentionTuple(u.Params(), seen) || mentionTuple(u.Results(), seen)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if mentionKey(u.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	case *types.Union:
+		for i := 0; i < u.Len(); i++ {
+			if mentionKey(u.Term(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mentionTuple(t *types.Tuple, seen map[types.Type]bool) bool {
+	if t == nil {
+		return false
+	}
+	for i := 0; i < t.Len(); i++ {
+		if mentionKey(t.At(i).Type(), seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func shortType(t types.Type) string {
+	return types.TypeString(t, func(p *types.Package) string {
+		if p == nil {
+			return ""
+		}
+		return p.Name()
+	})
 }
 
 func funcNameAt(files []parsedFile, pos token.Pos) string {
@@ -1257,7 +1457,10 @@ func funcNameAt(files []parsedFile, pos token.Pos) string {
 }
 
 func callFunIdent(call *ast.CallExpr) *ast.Ident {
-	switch fun := call.Fun.(type) {
+	if call == nil {
+		return nil
+	}
+	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.Ident:
 		return fun
 	case *ast.SelectorExpr:
@@ -1614,13 +1817,10 @@ func unwrapKeyConv(e ast.Expr) ast.Expr {
 }
 
 func unparen(e ast.Expr) ast.Expr {
-	for {
-		p, ok := e.(*ast.ParenExpr)
-		if !ok {
-			return e
-		}
-		e = p.X
+	if e == nil {
+		return nil
 	}
+	return ast.Unparen(e)
 }
 
 func printExpr(fset *token.FileSet, e ast.Expr) (string, error) {
@@ -1644,6 +1844,62 @@ func coveredPath(base string) (string, error) {
 		return "", fmt.Errorf("文件 %s 匹配到 %d 个", base, len(hits))
 	}
 	return hits[0], nil
+}
+
+func withI18nImport(t *testing.T, src string) string {
+	t.Helper()
+	const old = "\t\"github.com/Tingschen287/terminal-deck/work/internal/layout\""
+	const neu = "\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/layout\""
+	return replaceOnce(t, src, old, neu)
+}
+
+func beforeReturn(t *testing.T, src, stmt string) string {
+	t.Helper()
+	return replaceOnce(t, src, "\treturn lines\n", stmt+"\treturn lines\n")
+}
+
+// assertRenderMiss 用临时目录里的源码跑英文渲染。仓库里的文件不动。
+// 静态检查按威胁模型不管 reflect。渲染测试必须因为缺键记录不为零而失败。
+func assertRenderMiss(t *testing.T, overlay map[string]string) {
+	t.Helper()
+	if len(overlay) != 1 {
+		t.Fatalf("运行时反例应只改一个文件，实际 %d 个", len(overlay))
+	}
+	dir := t.TempDir()
+	repl := map[string]string{}
+	for srcPath, body := range overlay {
+		dst := filepath.Join(dir, filepath.Base(srcPath))
+		if err := os.WriteFile(dst, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		repl[srcPath] = dst
+	}
+	buf, err := json.Marshal(map[string]any{"Replace": repl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ov := filepath.Join(dir, "overlay.json")
+	if err := os.WriteFile(ov, buf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/home/linux/.local/go/bin/go", "test", "-overlay", ov, "-count=1", "-timeout", "180s", "-run", "^TestEnglishUIHasNoHan$", "./internal/deckui")
+	cmd.Dir = moduleRoot()
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GOTOOLCHAIN=") || strings.HasPrefix(e, "GOPROXY=") || strings.HasPrefix(e, "GOFLAGS=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	cmd.Env = append(env, "GOTOOLCHAIN=local", "GOPROXY=off", "GOFLAGS=-mod=readonly")
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if err == nil {
+		t.Fatalf("渲染测试应因缺键失败，实际通过：\n%s", text)
+	}
+	if !strings.Contains(text, "渲染用了表外的键") || !strings.Contains(text, "idle.typo") {
+		t.Fatalf("失败原因不是缺键记录：\n%s", text)
+	}
 }
 
 func replaceOnce(t *testing.T, src, old, neu string) string {
@@ -1701,6 +1957,38 @@ func addView(t *testing.T, views *[]string, name, s string) {
 	*views = append(*views, name)
 }
 
+// enViewKey 是英文渲染里每个主要画面对上的一条译文。期望值从英文表取，不写死。
+// 像 idle.typo 这种纯 ASCII 错键过不了「没有汉字」，但过不了这里。
+var enViewKey = map[string]i18n.Key{
+	"sidebar":          "side.status.waiting",
+	"idle-wide":        "idle.hint",
+	"tabs-taken":       "tabs.taken",
+	"tabs-pending":     "tabs.pending",
+	"tabs-readonly":    "tabs.readonly",
+	"tabs-empty":       "tabs.empty",
+	"settings-1":       "project.tiers",
+	"settings-2":       "agents.add",
+	"settings-3":       "trust.title",
+	"sub-agent":        "agent.keys",
+	"sub-add-loading":  "add.loading",
+	"sub-add":          "add.title",
+	"sub-tier":         "tierview.keys",
+	"form-browse":      "form.browse.title",
+	"form-confirm":     "form.confirm.title",
+	"quota":            "quota.title",
+	"quota-empty":      "quota.empty",
+	"quota-err":        "ui.loadfail",
+	"decisions":        "decide.kind.cost",
+	"progress":         "progress.accepted",
+	"progress-nograph": "progress.nograph",
+	"notify-empty":     "notify.empty",
+	"notify":           "notify.title",
+	"activity":         "act.role.main",
+	"activity-empty":   "act.empty",
+	"layout-base":      "layout.conf.base",
+	"layout-keys":      "layout.conf.keys",
+}
+
 // TestEnglishUIHasNoHan 在英文下渲染本段的主要画面。
 // 英文产品名一律 Anpai，不出现「安排」。
 // 「安排」只允许出现在中文界面、而且 BrandFor 的列数 ≥ 10 的时候（n058）。本测试是英文，所以一处都不允许。
@@ -1708,16 +1996,39 @@ func addView(t *testing.T, views *[]string, name, s string) {
 func TestEnglishUIHasNoHan(t *testing.T) {
 	i18n.SetLang(i18n.EN)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
+	renderStage1(t, true)
+}
+
+// TestChineseUINoKeyMiss 用同一组画面走中文。缺键记录必须是空的。
+func TestChineseUINoKeyMiss(t *testing.T) {
+	i18n.SetLang(i18n.ZH)
+	renderStage1(t, false)
+}
+
+func renderStage1(t *testing.T, english bool) {
+	t.Helper()
+	stop := i18n.RecordMisses()
+	t.Cleanup(func() { stop() })
 
 	var got []string
-	keep := func(name, s string) { addView(t, &got, name, ansi.Strip(s)) }
+	type snap struct{ name, text string }
+	var snaps []snap
+	keep := func(name, s string) {
+		plain := ansi.Strip(s)
+		if english {
+			addView(t, &got, name, plain)
+		} else {
+			got = append(got, name)
+		}
+		snaps = append(snaps, snap{name, plain})
+	}
 
 	sb := &Sidebar{Data: englishData(), Mode: "none"}
 	f := sb.Render(80, 80)
 	keep("sidebar", strings.Join(f.Lines, "\n"))
 
 	wide, narrow := IdleLines(80), IdleLines(8)
-	if wide[0] != "Anpai" || narrow[0] != "Anpai" {
+	if english && (wide[0] != "Anpai" || narrow[0] != "Anpai") {
 		t.Fatalf("英文品牌一律 Anpai：宽 %q 窄 %q", wide[0], narrow[0])
 	}
 	keep("idle-wide", strings.Join(wide, "\n"))
@@ -1815,6 +2126,25 @@ func TestEnglishUIHasNoHan(t *testing.T) {
 	keep("layout-keys", layout.BindingsConf(layout.Spec{Deck: "/opt/deck"}, layout.Built{Center: "%1", Tabs: "%7"}))
 	keep("layout-err", i18n.Errorf("layout.err.restore", "Tab bar", errors.New("busy")).Error())
 
+	if miss := stop(); len(miss) != 0 {
+		t.Fatalf("渲染用了表外的键：%v", miss)
+	}
+	if english {
+		for _, v := range snaps {
+			key, ok := enViewKey[v.name]
+			if !ok {
+				continue
+			}
+			want, ok := i18n.TextEN(key)
+			if !ok {
+				t.Errorf("英文表没有 %s", key)
+				continue
+			}
+			if !strings.Contains(v.text, want) {
+				t.Errorf("%s 应含 %s 的英文 %q", v.name, key, want)
+			}
+		}
+	}
 	if len(got) < 20 {
 		t.Fatalf("画面太少：%d", len(got))
 	}

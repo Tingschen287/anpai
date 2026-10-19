@@ -7,8 +7,9 @@
 // 中文也没有时返回键名，方便测试发现漏网。
 // 带 %w 的错误用 Errorf，不要用 T：T 走 fmt.Sprintf，包不住下层错误。
 //
-// Key 是键的类型。无类型字符串常量可以直接当 Key 用。运行时拼出来的键要写 Key(...)，
-// 检查器只认这种显式转换，以及编译期就定下来的 Key 常量。
+// Key 是键的类型。无类型字符串常量可以直接当 Key 用。
+// 包外要造出一个新的 Key，只允许检查器逐个放过的显式转换。
+// +、+=、切片，以及转成其它含有 Key 的类型，都会被检查器拒绝。
 //
 // 加一条文字：zh.go 与 en.go 用同一个键，占位符的个数和种类（%s、%d、%q、%w…）要一致。
 // 键名小写、用点分开，例如 side.status.running。
@@ -17,6 +18,7 @@ package i18n
 import (
 	"fmt"
 	"sort"
+	"sync"
 	"sync/atomic"
 )
 
@@ -32,7 +34,56 @@ const (
 
 var lang atomic.Value
 
+// 缺键记录默认关。depth 用原子读，生产路径上 T 只多一次加载。
+// 真正追加时再拿 missMu。测试用 RecordMisses 打开。
+var (
+	missDepth atomic.Int32
+	missMu    sync.Mutex
+	missKeys  []Key
+)
+
 func init() { lang.Store(ZH) }
+
+// RecordMisses 开始记下 T、Format、Errorf 收到、并且中文表里也没有的键。
+// stop 结束这一层记录，返回这段时间里的缺键（按出现顺序，同一个键可以出现多次）。
+// stop 只生效一次。默认关闭；关掉时缺译文仍回退中文，中文也没有仍返回键名。
+func RecordMisses() (stop func() []Key) {
+	missMu.Lock()
+	missDepth.Add(1)
+	start := len(missKeys)
+	missMu.Unlock()
+	var once sync.Once
+	return func() []Key {
+		var out []Key
+		once.Do(func() {
+			missMu.Lock()
+			defer missMu.Unlock()
+			if start > len(missKeys) {
+				start = len(missKeys)
+			}
+			out = append([]Key{}, missKeys[start:]...)
+			if missDepth.Add(-1) <= 0 {
+				missDepth.Store(0)
+				missKeys = nil
+			}
+		})
+		return out
+	}
+}
+
+func noteMiss(key Key) {
+	if missDepth.Load() == 0 {
+		return
+	}
+	if _, ok := zh[key]; ok {
+		return
+	}
+	missMu.Lock()
+	if missDepth.Load() > 0 {
+		missKeys = append(missKeys, key)
+	}
+	missMu.Unlock()
+}
 
 // SetLang 切换本进程的界面语言。只认 zh 与 en，其他值都回到中文。
 func SetLang(code string) {
@@ -53,6 +104,9 @@ func lookup(key Key) (string, bool) {
 		}
 	}
 	s, ok := zh[key]
+	if !ok {
+		noteMiss(key)
+	}
 	return s, ok
 }
 
