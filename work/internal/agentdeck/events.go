@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"strings"
 )
@@ -13,11 +13,11 @@ import (
 //
 // 上游每次推的是全量，不是增量，所以收到就整份替换，不要自己合并。
 type MenuEvent struct {
-	Profile       string      `json:"profile"`
-	GeneratedAt   string      `json:"generatedAt"`
-	TotalGroups   int         `json:"totalGroups"`
-	TotalSessions int         `json:"totalSessions"`
-	Items         []MenuItem  `json:"items"`
+	Profile       string     `json:"profile"`
+	GeneratedAt   string     `json:"generatedAt"`
+	TotalGroups   int        `json:"totalGroups"`
+	TotalSessions int        `json:"totalSessions"`
+	Items         []MenuItem `json:"items"`
 }
 
 // MenuItem 是菜单里的一行，可能是分组也可能是会话。
@@ -47,7 +47,7 @@ func (m MenuEvent) SessionsOf() []Session {
 // 因为「连不上」这件事必须让界面知道，而不是悄悄地在后台空转。
 func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 	if c.Addr == "" {
-		return fmt.Errorf("没有配置 upstream agent-deck 的服务地址")
+		return i18n.E("err.agentdeck.clientget.1")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+c.Addr+"/events/menu", nil)
 	if err != nil {
@@ -61,11 +61,11 @@ func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 	// SSE 是长连接，不能套用普通请求的超时。
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return fmt.Errorf("订阅 upstream agent-deck 事件流失败：%w", err)
+		return i18n.E("err.agentdeck.clientwatchmenu.1", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upstream agent-deck 事件流返回 HTTP %d", resp.StatusCode)
+		return i18n.E("err.agentdeck.clientwatchmenu.2", resp.StatusCode)
 	}
 
 	sc := bufio.NewScanner(resp.Body)
@@ -84,7 +84,7 @@ func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 			var ev MenuEvent
 			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 				// 单条解析不了不该掀翻整条流，但也不能装作没发生。
-				return fmt.Errorf("解析 upstream agent-deck 菜单事件失败：%w", err)
+				return i18n.E("err.agentdeck.clientwatchmenu.3", err)
 			}
 			onEvent(ev)
 		case line == "":
@@ -92,7 +92,7 @@ func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("读 upstream agent-deck 事件流出错：%w", err)
+		return i18n.E("err.agentdeck.clientwatchmenu.4", err)
 	}
 	return ctx.Err()
 }

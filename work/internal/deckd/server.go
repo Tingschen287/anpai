@@ -18,6 +18,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
@@ -122,6 +123,8 @@ func (s *Server) caller(r *http.Request) Caller {
 
 type apiError struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
+	Args  []any  `json:"args,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -130,8 +133,24 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// writeErr 回一条错误。error 字段仍是中文原文。能取出码时再带 code 和 args。
+func writeErr(w http.ResponseWriter, code int, err error) {
+	body := apiError{Error: err.Error()}
+	if c, args, ok := i18n.Wire(err); ok {
+		body.Code = c
+		body.Args = args
+	}
+	writeJSON(w, code, body)
+}
+
 func fail(w http.ResponseWriter, code int, format string, a ...any) {
-	writeJSON(w, code, apiError{Error: fmt.Sprintf(format, a...)})
+	if len(a) == 1 {
+		if err, ok := a[0].(error); ok && (format == "%v" || format == "%s" || format == "%w") {
+			writeErr(w, code, err)
+			return
+		}
+	}
+	writeErr(w, code, fmt.Errorf(format, a...))
 }
 
 // storeErr 把存储错误映射成状态码：存储已停止 → 503。
@@ -140,11 +159,11 @@ func storeErr(w http.ResponseWriter, err error) {
 	var ve *deckstore.ErrVersion
 	switch {
 	case errors.As(err, &be):
-		fail(w, http.StatusServiceUnavailable, "%v", err)
+		writeErr(w, http.StatusServiceUnavailable, err)
 	case errors.As(err, &ve):
-		fail(w, http.StatusConflict, "%v", err)
+		writeErr(w, http.StatusConflict, err)
 	default:
-		fail(w, http.StatusBadRequest, "%v", err)
+		writeErr(w, http.StatusBadRequest, err)
 	}
 }
 
@@ -155,7 +174,7 @@ func readBody(r *http.Request, v any) error {
 		return err
 	}
 	if len(data) > max {
-		return fmt.Errorf("请求体超过 %d 字节", max)
+		return i18n.E("err.deckd.readbody.1", max)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
@@ -163,11 +182,11 @@ func readBody(r *http.Request, v any) error {
 		return err
 	}
 	if dec.More() {
-		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+		return i18n.E("err.deckd.readbody.2")
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+		return i18n.E("err.deckd.readbody.2")
 	}
 	return nil
 }
@@ -175,7 +194,7 @@ func readBody(r *http.Request, v any) error {
 // need 检查角色。写操作另要求身份查询本身没有出错。
 func need(w http.ResponseWriter, c Caller, write bool, roles ...string) bool {
 	if write && c.Err != nil {
-		fail(w, http.StatusForbidden, "认不出调用者（%v），拒绝写入", c.Err)
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.need.1", c.Err))
 		return false
 	}
 	for _, r := range roles {
@@ -183,20 +202,20 @@ func need(w http.ResponseWriter, c Caller, write bool, roles ...string) bool {
 			return true
 		}
 	}
-	fail(w, http.StatusForbidden, "%s 不能调用这个接口", roleName(c.Role))
+	writeErr(w, http.StatusForbidden, i18n.E("err.deckd.need.2", roleName(c.Role)))
 	return false
 }
 
-func roleName(r string) string {
+func roleName(r string) *i18n.Error {
 	switch r {
 	case RoleOwner:
-		return "owner 界面"
+		return i18n.E("err.deckd.rolename.1")
 	case RoleMain:
-		return "主 agent"
+		return i18n.E("err.deckd.serverrunspawn.49")
 	case RoleSub:
-		return "子 agent"
+		return i18n.E("err.deckd.serverrunspawn.50")
 	}
-	return "未知调用者"
+	return i18n.E("err.deckd.rolename.2")
 }
 
 // projectScope 决定本次请求能看哪个项目：owner 可指定任意项目（空 = 全部）；主/子 agent 只能是自己的项目。
@@ -205,7 +224,7 @@ func projectScope(w http.ResponseWriter, c Caller, asked string) (string, bool) 
 		return asked, true
 	}
 	if asked != "" && asked != c.Project {
-		fail(w, http.StatusForbidden, "%s 不能访问其他项目 %s", roleName(c.Role), asked)
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.projectscope.1", roleName(c.Role), asked))
 		return "", false
 	}
 	return c.Project, true
@@ -246,7 +265,7 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 	if s.quota == nil {
-		fail(w, http.StatusServiceUnavailable, "没接 Token 看板")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetquota.1"))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.quota.Display(r.Context())) // 面板用：OpenCode 的估算窗口只在这里补（n056）
@@ -390,7 +409,7 @@ func (s *Server) getView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.view == nil {
-		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetview.1"))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.view.State())
@@ -407,18 +426,18 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	p, found := s.store.Settings().Project(project)
 	if !found {
-		fail(w, http.StatusNotFound, "没有项目 %s", project)
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.servergetprogress.1", project))
 		return
 	}
 	if s.progress == nil || p.GraphRoot == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "graph": false, "note": "这个项目没有接 Graph"})
+		writeJSON(w, http.StatusOK, map[string]any{"project": project, "graph": false, "note": i18n.E("err.deckd.servergetprogress.3").Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	out, err := s.progress(ctx, p)
 	if err != nil {
-		fail(w, http.StatusBadGateway, "读项目进度失败：%v", err)
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.servergetprogress.2", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -445,17 +464,17 @@ func (s *Server) postDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	var b postDecisionBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if !agentKinds[b.Kind] {
-		fail(w, http.StatusBadRequest, "主 agent 只能上报 cost、config、push、disagree、deviation，不是 %q", b.Kind)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostdecision.1", b.Kind))
 		return
 	}
 	// 开子 agent 的超额例外与 Codex trust 的批准范围只能由 deckd 在开子 agent 时生成（n051 自查）：
 	// 主 agent 自己写的话，owner 在面板上只看到说明，批准的却是一个藏在范围里的启动
 	if a := b.Scope["action"]; a == "spawn" || a == "codex_trust" {
-		fail(w, http.StatusBadRequest, "action=%s 的批准范围只能由 deck 在开子 agent 时生成；超额请直接运行 deck agent spawn，deck 会自己生成决定", a)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostdecision.2", a))
 		return
 	}
 	d, err := s.store.CreateDecision(deckstore.NewDecision{Project: c.Project, Kind: b.Kind, Summary: b.Summary,
@@ -464,7 +483,7 @@ func (s *Server) postDecision(w http.ResponseWriter, r *http.Request) {
 		storeErr(w, err)
 		return
 	}
-	s.store.Notify(c.Project, "decision", "主 agent 有 1 件事要你决定："+d.Summary, c.Session)
+	s.store.NotifyCoded(c.Project, "decision", i18n.E("err.deckd.serverpostdecision.3", d.Summary), c.Session)
 	writeJSON(w, http.StatusCreated, d)
 }
 
@@ -480,7 +499,7 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	var b answerBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	d, err := s.store.Answer(r.PathValue("id"), b.Option, b.Version, "owner@"+c.Pane)
@@ -490,7 +509,7 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	// Codex trust 批准即记住（§14.3，n051）；记不下就如实报出，决定转为 failed
 	if err := s.executeCodexTrust(d); err != nil {
-		fail(w, http.StatusServiceUnavailable, "已批准，但记不下授权：%v", err)
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serveranswerdecision.1", err))
 		return
 	}
 	if got, ok := s.store.Decision(d.ID); ok {
@@ -525,15 +544,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		Generation *int                    `json:"generation"`
 	}
 	if err := readBody(r, &body); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if body.Agents == nil || body.Projects == nil {
-		fail(w, http.StatusBadRequest, "整份替换设置须同时给出 agents 与 projects")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverputsettings.1"))
 		return
 	}
 	if body.Generation == nil || *body.Generation < 0 {
-		fail(w, http.StatusBadRequest, "整份替换设置须带上读到的 generation（不小于 0）")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverputsettings.2"))
 		return
 	}
 	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
@@ -576,10 +595,10 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
-		fail(w, http.StatusNotFound, "没有项目 %s、工具 %s 的已记住授权", q.Get("project"), q.Get("tool"))
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.serverdeletetrust.1", q.Get("project"), q.Get("tool")))
 		return
 	}
-	s.store.Notify(q.Get("project"), "trust", "已撤销 "+q.Get("tool")+" 的已记住授权：下次启动会重新问你", "owner")
+	s.store.NotifyCoded(q.Get("project"), "trust", i18n.E("err.deckd.serverdeletetrust.2", q.Get("tool")), "owner")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -596,7 +615,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	}
 	var b viewBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if b.Op == "fence" {
@@ -609,7 +628,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.view == nil {
-		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetview.1"))
 		return
 	}
 	if err := s.stopped(); err != nil {
@@ -635,7 +654,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		// 中间 client 断开（Ctrl-Q）后、新 client 以只读连上时：焦点会话按隐藏处理（架构稿 §1、§7）
 		err = s.view.CenterReset(b.Client)
 	default:
-		fail(w, http.StatusBadRequest, "不认识的操作 %q", b.Op)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostview.1", b.Op))
 		return
 	}
 	if err != nil {
@@ -683,7 +702,7 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 	}
 	var b panelBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
@@ -706,7 +725,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		fail(w, http.StatusInternalServerError, "不支持流式响应")
+		writeErr(w, http.StatusInternalServerError, i18n.E("err.deckd.serverevents.1"))
 		return
 	}
 	last := r.Header.Get("Last-Event-ID")

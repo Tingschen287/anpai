@@ -2,7 +2,7 @@ package deckd
 
 import (
 	"context"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"regexp"
 	"strings"
 	"time"
@@ -24,16 +24,16 @@ import (
 
 // startupMarkers 是 CLI 启动确认的特征文字（Claude Code 2.x 二进制里的原文；Codex 的目录信任上游通常已预先接受）。
 var startupMarkers = []struct{ needle, what string }{
-	{"quick safety check", "目录信任确认"},
-	{"is this a project you created or one you trust", "目录信任确认"},
-	{"is this a directory you created or one you trust", "目录信任确认"},
-	{"yes, i trust this folder", "目录信任确认"},
-	{"do you trust the files in this folder", "目录信任确认"},
-	{"yes, i trust these settings", "项目设置确认"},
-	{"do you trust the contents of this directory", "目录信任确认"},
-	{"allow codex to work in this folder", "目录信任确认"},
-	{"do you want to use this api key", "API key 确认"},
-	{"enter to confirm", "启动时的选择确认"},
+	{"quick safety check", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"is this a project you created or one you trust", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"is this a directory you created or one you trust", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"yes, i trust this folder", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"do you trust the files in this folder", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"yes, i trust these settings", i18n.MustTextZH("err.deckd.startup.settings")},
+	{"do you trust the contents of this directory", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"allow codex to work in this folder", i18n.MustTextZH("err.deckd.startup.trust")},
+	{"do you want to use this api key", i18n.MustTextZH("err.deckd.startup.apikey")},
+	{"enter to confirm", i18n.MustTextZH("err.deckd.startup.choice")},
 }
 
 // 带光标的编号选项（「❯ 2. No」与另一条编号选项同屏），启动时出现就是在等人选。光标停在哪一项都算（自查：API key 确认默认在 2 上）；
@@ -74,7 +74,7 @@ func StartupDialog(screen string) string {
 		}
 	}
 	if cursor && items >= 2 {
-		return "启动时的选择确认"
+		return i18n.MustTextZH("err.deckd.startup.choice")
 	}
 	return ""
 }
@@ -127,7 +127,7 @@ const codexPlaceholder = "Ask Codex to do anything"
 // sendFirstMessage 送第一条消息（brief 或任务）：先落盘「正在送」，重启时据此不补送（n055 评审 2 R2）。
 func (s *Server) sendFirstMessage(ctx context.Context, key string, permit lease.Permit, id, text string) error {
 	if err := s.store.MarkBriefSending(key); err != nil {
-		return fmt.Errorf("记不下「正在送」，没有送：%w", err)
+		return i18n.E("err.deckd.serversendfirstmessage.1", err)
 	}
 	return s.agents.upstream.SendMessage(ctx, permit, id, text)
 }
@@ -150,7 +150,7 @@ func (s *Server) startupTiming() startupTiming {
 
 // notReady 是 settleScreen 在等不到就绪画面（取不到画面、一直空屏、一直在变或认不出输入框）时给的说明：这时不直接送，
 // 走与启动确认同一条后台路径，等到真正的输入框再送（自查与评审 1 B3：退回直送会让之后才出现的确认框挨打字）。
-const notReady = "启动（取不到画面或还没出现输入框）"
+var notReady = i18n.MustTextZH("err.deckd.startup.notready")
 
 // settleScreen 等 CLI 启动后就绪：画面连续两次一样、没有启动确认、并且认得出这个 CLI 的输入框（ComposerReady）。
 // 返回确认的说明；就绪返回空；等到上限仍没就绪返回 notReady。
@@ -191,7 +191,7 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	var note string
 	switch {
 	case what == notReady:
-		note = "CLI 还没就绪（取不到画面或还没出现输入框）：deck 等到输入框、确认没有启动确认后自动送第一条消息，请在中间看一眼"
+		note = i18n.E("err.deckd.serverholdforowner.1").Error()
 	default:
 		note = dialogNote(x, what, false)
 	}
@@ -203,16 +203,20 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 
 // dialogNote 是 CLI 停在启动确认上时给 owner 的说明。uncertain 为真时第一条消息送没送到不确定（重启时见到「正在送」），deck 不会补送。
 func dialogNote(x deckstore.Session, what string, uncertain bool) string {
+	return dialogCoded(x, what, uncertain).Error()
+}
+
+func dialogCoded(x deckstore.Session, what string, uncertain bool) *i18n.Error {
 	if uncertain {
 		if x.Role == "main" {
-			return fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选。deckd 重启前第一条 brief 正在送，送没送到不确定，deck 不会补送，选完请看一眼它有没有收到", what)
+			return i18n.E("err.deckd.startup.mainunc", what)
 		}
-		return fmt.Sprintf("CLI 停在%s上：请把它显示在中间、按 F2 接管后自己选。deckd 重启前任务正在送，送没送到不确定，deck 不会补送", what)
+		return i18n.E("err.deckd.startup.subunc", what)
 	}
 	if x.Role == "main" {
-		return fmt.Sprintf("CLI 停在%s上：请在中间窗格自己选，选完 deck 会自动送第一条 brief", what)
+		return i18n.E("err.deckd.startup.main", what)
 	}
-	return fmt.Sprintf("CLI 停在%s上：请把它显示在中间、按 F2 接管后自己选，交还后 deck 会自动送任务", what)
+	return i18n.E("err.deckd.startup.sub", what)
 }
 
 // markAwaiting 记下「等 owner 处理」、通知。open 为真（owner 刚起的会话）时，主 agent 在 owner 没接管别的会话时换进中间；
@@ -220,7 +224,7 @@ func dialogNote(x deckstore.Session, what string, uncertain bool) string {
 func (s *Server) markAwaiting(x deckstore.Session, key, id, note string, open bool) {
 	s.store.SetAwaitingOwner(key, note)
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
-	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, note), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, note), "deckd")
 	if !open {
 		if x.Role == "main" && s.view != nil {
 			s.view.OpenMainInput(id)
@@ -231,9 +235,9 @@ func (s *Server) markAwaiting(x deckstore.Session, key, id, note string, open bo
 		// 显示到中间（新主 agent 还不在打开集合里，用 Open），按最新状态放开输入。owner 正接管着别的会话时不动中间：
 		// 切走会把接管交还（自查）；owner 仍可在侧栏点它。失败只影响方便程度，记在通知里
 		if err := s.view.Open(id); err != nil {
-			s.store.Notify(x.Project, "view", "把主 agent 显示到中间失败（请在侧栏点它）："+deckstore.Clean(err.Error(), 160), "deckd")
+			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.1", deckstore.Clean(err.Error(), 160)), "deckd")
 		} else if err := s.view.OpenMainInput(id); err != nil {
-			s.store.Notify(x.Project, "view", "放开主 agent 输入失败："+deckstore.Clean(err.Error(), 160), "deckd")
+			s.store.NotifyCoded(x.Project, "view", i18n.E("err.deckd.servermarkawaiting.2", deckstore.Clean(err.Error(), 160)), "deckd")
 		}
 	}
 }
@@ -253,14 +257,15 @@ func (s *Server) uncertainAfterOwner(x deckstore.Session, key, id string) {
 // finishUncertain 结束「送没送到不确定」的启动期：不补送，主 agent 记为已确认（owner 能在中间直接和它说话，汇报照常转告），
 // 子 agent 解除启动期，并请 owner 看一眼。
 func (s *Server) finishUncertain(x deckstore.Session, key string) {
-	why := "deckd 重启时第一条消息正在送，送没送到不确定：请在中间看一眼，没收到就停掉它重新开"
+	coded := i18n.E("err.deckd.serverfinishuncertain.1")
+	why := coded.Error()
 	if x.Role == "main" {
 		s.store.ConfirmBrief(key)
 	} else {
 		s.store.FinishStart(key)
 	}
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
 }
 
 // waitForComposer 是启动期的后台等待：等启动确认消失、认出这个 CLI 的空输入框、画面稳定，再调 ready（返回 true 表示结束）。
@@ -282,27 +287,29 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 		if alive := s.agents.bypass.Alive; alive != nil && cur.TmuxSession != "" {
 			// CLI 已经退出（例如 owner 在信任框里选了 No, exit）：不再等，记为已停止（自查：原先会一直轮询下去）
 			if up, err := alive(ctx, cur.TmuxSession); err == nil && !up {
-				why := "CLI 已经退出（可能在启动确认上选了退出），没有送第一条消息"
+				coded := i18n.E("err.deckd.serverwaitforcomposer.4")
 				if uncertain {
-					why = "CLI 已经退出（可能在启动确认上选了退出）；deckd 重启前第一条消息正在送，送没送到不确定"
+					coded = i18n.E("err.deckd.serverwaitforcomposer.5")
 				}
+				why := coded.Error()
 				s.store.FinishStart(key)
 				s.store.SetSessionStatus(key, deckstore.StatusStopped, why)
-				s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+				s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
 				return
 			}
 		}
 		if !told && time.Now().After(deadline) {
 			// 等久了：说明一次，之后放慢继续等（attempt 2 自查：原先到点就放弃，启动期标记永远不清、owner 之后处理了也不送）
-			why := fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或一直没出现输入框），还没送第一条 brief；处理完 deck 仍会自动送，不想要了就停掉它", int(tm.await.Minutes()))
+			coded := i18n.E("err.deckd.serverwaitforcomposer.1", int(tm.await.Minutes()))
 			if uncertain {
-				why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框）；deckd 重启后 deck 没再往它写，重启前的第一条消息送没送到不确定。请在中间处理，不想要了就停掉它", int(tm.await.Minutes()))
+				coded = i18n.E("err.deckd.serverwaitforcomposer.2", int(tm.await.Minutes()))
 				if x.Role != "main" {
-					why = fmt.Sprintf("等了 %d 分钟，CLI 仍停在启动确认上（或输入框里还有文字、一直没出现空输入框）；deckd 重启后 deck 没再往它写，重启前的任务送没送到不确定。请显示在中间、按 F2 接管处理，不想要了就停掉它", int(tm.await.Minutes()))
+					coded = i18n.E("err.deckd.serverwaitforcomposer.3", int(tm.await.Minutes()))
 				}
 			}
+			why := coded.Error()
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
 			told, poll = true, 10*tm.poll
 		}
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
@@ -371,15 +378,16 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 	switch {
 	case err == nil:
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, "")
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的启动确认已处理，第一条 brief 已送达", x.Title), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serversendfirstbrief.1", x.Title), "deckd")
 	case agentdeck.IsDeliveryUnconfirmed(err):
-		s.store.SetSessionStatus(key, deckstore.StatusRunning, "brief 已送出，上游没证实提交，请在中间窗格看一眼")
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的第一条 brief 已送出，但上游没证实提交，请在中间窗格看一眼", x.Title), "deckd")
+		s.store.SetSessionStatus(key, deckstore.StatusRunning, i18n.E("err.deckd.serversendfirstbrief.2").Error())
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
 	default:
-		why := "启动确认处理后送第一条 brief 失败：" + deckstore.Clean(err.Error(), 200)
+		coded := i18n.E("err.deckd.serversendfirstbrief.3", deckstore.Clean(err.Error(), 200))
+		why := coded.Error()
 		s.store.FinishStart(key)
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
 	}
 	return true
 }
@@ -406,9 +414,9 @@ func (s *Server) ResumeAwaiting() {
 				s.finishUncertain(x, x.Key)
 				continue
 			}
-			note := "deckd 重启时第一条消息正在送，送没送到不确定，deck 不会补送；等它出现空输入框之前不往它转告任何东西，请在中间看一眼（输入框里留着半截消息就自己处理）"
+			note := i18n.E("err.deckd.serverresumeawaiting.1").Error()
 			if x.Role != "main" {
-				note = "deckd 重启时任务正在送，送没送到不确定，deck 不会补送；等它出现空输入框之前不往它写，请显示在中间、按 F2 接管看一眼"
+				note = i18n.E("err.deckd.serverresumeawaiting.2").Error()
 			}
 			s.markAwaiting(x, x.Key, x.AgentDeckID, note, false)
 			x := x
@@ -419,10 +427,11 @@ func (s *Server) ResumeAwaiting() {
 		// 没有「正在送」：第一条消息肯定还没送（评审 2 R1：不能当成已确认），保持启动期、接着等
 		p, ok := set.Project(x.Project)
 		if x.Role != "main" || !ok {
-			why := "deckd 重启前它还没收到任务，任务正文没有保存、送不了：请停掉它重新派"
+			coded := i18n.E("err.deckd.serverresumeawaiting.3")
+			why := coded.Error()
 			s.store.SetAwaitingOwner(x.Key, why)
 			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
-			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s", x.Title, why), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
 			continue
 		}
 		permit, err := s.agents.leases.Manual(x.AgentDeckID)
@@ -431,7 +440,7 @@ func (s *Server) ResumeAwaiting() {
 		}
 		if x.AwaitingOwner == "" {
 			// 与正常启动的「还没就绪」一致：记下等待、对 owner 放开输入（不切中间），看到确认框或输入框再往下走（attempt 4 自查）
-			s.markAwaiting(x, x.Key, x.AgentDeckID, "deckd 重启时它还在启动、还没出现输入框：deck 等到输入框后自动送第一条 brief，请在中间看一眼", false)
+			s.markAwaiting(x, x.Key, x.AgentDeckID, i18n.E("err.deckd.serverresumeawaiting.4").Error(), false)
 		}
 		x := x
 		s.bgWG.Add(1)

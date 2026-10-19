@@ -3,7 +3,7 @@ package deckd
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net"
 	"net/http"
 	"os"
@@ -89,11 +89,11 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	}
 	defer lf.Close()
 	if err := flockRetry(lf, 2*time.Second); err != nil {
-		return fmt.Errorf("deckd 已经在运行（%s 被占用）", lockPath)
+		return i18n.E("err.deckd.run.1", lockPath)
 	}
 	wl, err := writerlock.Acquire(cfg.Profile, "deckd")
 	if err != nil {
-		return fmt.Errorf("不启动：%w", err)
+		return i18n.E("err.deckd.run.2", err)
 	}
 	defer wl.Release()
 
@@ -167,12 +167,12 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		go func() { defer close(rdone); srv.runReports(rctx) }()
 		defer func() { rcancel(); <-rdone; srv.WaitBackground() }()
 	} else {
-		store.Notify("", "deckd", "没接上 agent-deck，开子 agent 不可用："+err.Error(), "deckd")
+		store.NotifyCoded("", "deckd", i18n.E("err.deckd.run.4", err), "deckd")
 	}
 
 	sock := SocketPath(cfg.Dirs)
 	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("清理残留 socket 失败：%w", err)
+		return i18n.E("err.deckd.run.3", err)
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {

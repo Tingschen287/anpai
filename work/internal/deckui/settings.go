@@ -838,7 +838,7 @@ var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 func sanitizeFull(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
 
 // errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。
-func errLong(err error) string { return oneLine(deckstore.Clean(err.Error(), textCap)) }
+func errLong(err error) string { return oneLine(deckstore.Clean(deckclient.Show(err), textCap)) }
 
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
 func (m *Settings) wrap(s string, lead int) []string {

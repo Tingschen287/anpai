@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -187,7 +188,7 @@ func (s Settings) CheckModelIDs() error {
 	for _, a := range s.Agents {
 		for _, m := range a.Models {
 			if !ValidModelID(m.ID) {
-				return fmt.Errorf("agent %s 的模型 id %q 不合规：只能是字母数字和 . _ / : @ + -，不能有空格", a.ID, m.ID)
+				return i18n.E("err.deckstore.settingscheckmodelids.1", a.ID, m.ID)
 			}
 		}
 	}
@@ -202,21 +203,21 @@ func (s Settings) Validate() error {
 	agents := map[string]AgentDef{}
 	for _, a := range s.Agents {
 		if !idRe.MatchString(a.ID) {
-			return fmt.Errorf("agent id %q 不合规（小写字母数字、-、_）", a.ID)
+			return i18n.E("err.deckstore.settingsvalidate.1", a.ID)
 		}
 		if _, dup := agents[a.ID]; dup {
-			return fmt.Errorf("agent %s 重复", a.ID)
+			return i18n.E("err.deckstore.settingsvalidate.2", a.ID)
 		}
 		if a.Tool == "" {
-			return fmt.Errorf("agent %s 没写 tool", a.ID)
+			return i18n.E("err.deckstore.settingsvalidate.3", a.ID)
 		}
 		seen := map[string]bool{}
 		for _, m := range a.Models {
 			if m.ID == "" || !validTier(m.Tier) {
-				return fmt.Errorf("agent %s 的模型 %q 档位 %q 不合规", a.ID, m.ID, m.Tier)
+				return i18n.E("err.deckstore.settingsvalidate.4", a.ID, m.ID, m.Tier)
 			}
 			if seen[m.ID] {
-				return fmt.Errorf("agent %s 的模型 %s 重复", a.ID, m.ID)
+				return i18n.E("err.deckstore.settingsvalidate.5", a.ID, m.ID)
 			}
 			seen[m.ID] = true
 		}
@@ -225,53 +226,53 @@ func (s Settings) Validate() error {
 	projects := map[string]bool{}
 	for _, p := range s.Projects {
 		if !idRe.MatchString(p.ID) {
-			return fmt.Errorf("项目 id %q 不合规", p.ID)
+			return i18n.E("err.deckstore.settingsvalidate.6", p.ID)
 		}
 		if projects[p.ID] {
-			return fmt.Errorf("项目 %s 重复", p.ID)
+			return i18n.E("err.deckstore.settingsvalidate.7", p.ID)
 		}
 		projects[p.ID] = true
 		// 项目目录会原样进批准范围（scope），长度上限与 scope 的值一致
 		if err := CheckPath(p.Path); err != nil {
-			return fmt.Errorf("项目 %s 的 path %w", p.ID, err)
+			return i18n.E("err.deckstore.settingsvalidate.8", p.ID, err)
 		}
 		selected := map[string]bool{}
 		for _, id := range p.Agents {
 			if _, ok := agents[id]; !ok {
-				return fmt.Errorf("项目 %s 选用了不存在的 agent %s", p.ID, id)
+				return i18n.E("err.deckstore.settingsvalidate.9", p.ID, id)
 			}
 			selected[id] = true
 		}
 		for tier, models := range p.Models {
 			if !validTier(tier) {
-				return fmt.Errorf("项目 %s 的档位 %q 不合规", p.ID, tier)
+				return i18n.E("err.deckstore.settingsvalidate.10", p.ID, tier)
 			}
 			seen := map[string]bool{}
 			for _, model := range models {
 				if seen[model] {
-					return fmt.Errorf("项目 %s 的 %s 档里模型 %s 重复", p.ID, tier, model)
+					return i18n.E("err.deckstore.settingsvalidate.11", p.ID, tier, model)
 				}
 				seen[model] = true
 				owner, mtier, ok := s.findModel(model, selected)
 				if !ok {
-					return fmt.Errorf("项目 %s 的 %s 档模型 %s 不属于本项目选用的 agent", p.ID, tier, model)
+					return i18n.E("err.deckstore.settingsvalidate.12", p.ID, tier, model)
 				}
 				if mtier != tier {
-					return fmt.Errorf("项目 %s 把 %s 的 %s（全局登记为 %s 档）放进了 %s 档", p.ID, owner, model, mtier, tier)
+					return i18n.E("err.deckstore.settingsvalidate.13", p.ID, owner, model, mtier, tier)
 				}
 			}
 		}
 		if p.MainAgent.Agent != "" {
 			if !selected[p.MainAgent.Agent] {
-				return fmt.Errorf("项目 %s 的主 agent %s 不在本项目选用范围内", p.ID, p.MainAgent.Agent)
+				return i18n.E("err.deckstore.settingsvalidate.14", p.ID, p.MainAgent.Agent)
 			}
 			if !validTier(p.MainAgent.Tier) {
-				return fmt.Errorf("项目 %s 的主 agent 档位 %q 不合规", p.ID, p.MainAgent.Tier)
+				return i18n.E("err.deckstore.settingsvalidate.15", p.ID, p.MainAgent.Tier)
 			}
 		}
 		e := p.Envelope
 		if e.ID == "" || e.Version < 1 || e.MaxSubagents < 0 || e.MaxFrontier < 0 || e.TokenSoftCap < 0 {
-			return fmt.Errorf("项目 %s 的预算包络不完整", p.ID)
+			return i18n.E("err.deckstore.settingsvalidate.16", p.ID)
 		}
 	}
 	return nil
@@ -331,7 +332,7 @@ func (s Settings) ResolveTier(projectID string, tier Tier) (Resolved, error) {
 func (s Settings) ResolveTierFor(projectID string, tier Tier, agentID string, exhausted func(AgentDef) bool) (Resolved, error) {
 	p, ok := s.Project(projectID)
 	if !ok {
-		return Resolved{}, fmt.Errorf("没有项目 %s", projectID)
+		return Resolved{}, i18n.E("err.deckstore.storecreatedecision.2", projectID)
 	}
 	return s.pick(p, tier, agentID, exhausted)
 }
@@ -339,7 +340,7 @@ func (s Settings) ResolveTierFor(projectID string, tier Tier, agentID string, ex
 func (s Settings) pick(p ProjectDef, tier Tier, agentID string, exhausted func(AgentDef) bool) (Resolved, error) {
 	models := p.Models[tier]
 	if len(models) == 0 {
-		return Resolved{}, fmt.Errorf("项目 %s 没有为 %s 档指定模型", p.ID, tier)
+		return Resolved{}, i18n.E("err.deckstore.settingspick.1", p.ID, tier)
 	}
 	var skipped []string
 	known := map[string]bool{}
@@ -365,7 +366,7 @@ func (s Settings) pick(p ProjectDef, tier Tier, agentID string, exhausted func(A
 		return res, nil
 	}
 	if len(skipped) == 0 {
-		return Resolved{}, fmt.Errorf("项目 %s 的 %s 档清单里没有 %s 的模型", p.ID, tier, agentID)
+		return Resolved{}, i18n.E("err.deckstore.settingspick.2", p.ID, tier, agentID)
 	}
 	first, err := s.ResolveModel(p.ID, skipped[0])
 	if err != nil {
@@ -383,9 +384,10 @@ type ErrAllExhausted struct {
 	First   Resolved
 }
 
-func (e *ErrAllExhausted) Error() string {
-	return fmt.Sprintf("项目 %s 的 %s 档清单里能用的模型额度都已用尽（%s）：不派；等额度恢复，或在设置里给这一档加别家的模型",
-		e.Project, e.Tier, strings.Join(e.Skipped, "、"))
+func (e *ErrAllExhausted) Error() string { return e.I18n().Error() }
+
+func (e *ErrAllExhausted) I18n() *i18n.Error {
+	return i18n.E("err.deckstore.errallexhausted", e.Project, e.Tier, strings.Join(e.Skipped, i18n.MustTextZH("sep.list")))
 }
 
 // CheckMainAgents：设了主 agent 的项目，主 agent 那一档清单里得有它自己的模型（n057）。
@@ -396,7 +398,7 @@ func (s Settings) CheckMainAgents() error {
 			continue
 		}
 		if _, err := s.pick(p, p.MainAgent.Tier, p.MainAgent.Agent, nil); err != nil {
-			return fmt.Errorf("项目 %s 的主 agent %s · %s：%w", p.ID, p.MainAgent.Agent, p.MainAgent.Tier, err)
+			return i18n.E("err.deckstore.settingscheckmainagents.1", p.ID, p.MainAgent.Agent, p.MainAgent.Tier, err)
 		}
 	}
 	return nil
@@ -406,7 +408,7 @@ func (s Settings) CheckMainAgents() error {
 func (s Settings) ResolveModel(projectID, model string) (Resolved, error) {
 	p, ok := s.Project(projectID)
 	if !ok {
-		return Resolved{}, fmt.Errorf("没有项目 %s", projectID)
+		return Resolved{}, i18n.E("err.deckstore.storecreatedecision.2", projectID)
 	}
 	selected := map[string]bool{}
 	for _, id := range p.Agents {
@@ -414,7 +416,7 @@ func (s Settings) ResolveModel(projectID, model string) (Resolved, error) {
 	}
 	agentID, tier, ok := s.findModel(model, selected)
 	if !ok {
-		return Resolved{}, fmt.Errorf("模型 %s 不在项目 %s 选用的 agent 里", model, projectID)
+		return Resolved{}, i18n.E("err.deckstore.settingsresolvemodel.1", model, projectID)
 	}
 	a, _ := s.Agent(agentID)
 	return Resolved{Agent: a, Model: model, Tier: tier}, nil
@@ -443,15 +445,17 @@ type ErrMixedSettings struct {
 	ProjMissing        bool // projects.yaml 不存在（第一次保存只写成了 agents.yaml）
 }
 
-func (e *ErrMixedSettings) Error() string {
-	proj := fmt.Sprintf("projects.yaml（第 %d 代）", e.ProjGen)
+func (e *ErrMixedSettings) Error() string { return e.I18n().Error() }
+
+func (e *ErrMixedSettings) projErr() *i18n.Error {
 	if e.ProjMissing {
-		proj = "projects.yaml（不存在，按第 0 代）"
+		return i18n.E("err.deckstore.errmixed.missing")
 	}
-	return fmt.Sprintf("%s 下的 agents.yaml（第 %d 代）与 %s来自不同的保存，上一次保存只写成了一半；"+
-		"不用这份新旧混合的配置。恢复：把代数较新的那份换回它的 .prev（上一代；没有 .prev 说明它是第一次写，删掉即回到默认），"+
-		"或核对内容后把两份的 generation 改成一样（缺的那份补上）",
-		e.Dir, e.AgentsGen, proj)
+	return i18n.E("err.deckstore.errmixed.proj", e.ProjGen)
+}
+
+func (e *ErrMixedSettings) I18n() *i18n.Error {
+	return i18n.E("err.deckstore.errmixed.body", e.Dir, e.AgentsGen, e.projErr())
 }
 
 // readSettings 只读两份文件（不存在的按空的第 0 代处理），返回内容与各自的代数。
@@ -467,7 +471,7 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 		return a, p, false, err
 	default:
 		if err := yaml.Unmarshal(data, &a); err != nil {
-			return a, p, false, fmt.Errorf("agents.yaml 解析不了：%w", err)
+			return a, p, false, i18n.E("err.deckstore.readsettings.1", err)
 		}
 	}
 	data, err = os.ReadFile(filepath.Join(cfgDir, "projects.yaml"))
@@ -477,7 +481,7 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 		return a, p, false, err
 	default:
 		if err := yaml.Unmarshal(data, &p); err != nil {
-			return a, p, false, fmt.Errorf("projects.yaml 解析不了：%w", err)
+			return a, p, false, i18n.E("err.deckstore.readsettings.2", err)
 		}
 	}
 	// 代数范围（n057 attempt 3 自查）：手改写了负数或很大的数（加一会溢出成负数，之后每次保存都被拒），
@@ -487,7 +491,7 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 		gen  int
 	}{{"agents.yaml", a.Generation}, {"projects.yaml", p.Generation}} {
 		if g.gen < 0 || g.gen > maxGeneration {
-			return a, p, false, fmt.Errorf("%s 的 generation %d 不对（应在 0 到 %d 之间）：两份都改成 0 再启动 deck", g.name, g.gen, maxGeneration)
+			return a, p, false, i18n.E("err.deckstore.readsettings.3", g.name, g.gen, maxGeneration)
 		}
 	}
 	if haveAgents && a.Generation != p.Generation {
@@ -511,7 +515,7 @@ func LoadSettings(cfgDir string) (Settings, error) {
 	}
 	sort.SliceStable(s.Projects, func(i, j int) bool { return s.Projects[i].ID < s.Projects[j].ID })
 	if err := s.Validate(); err != nil {
-		return Settings{}, fmt.Errorf("%s 下的设置不合规：%w（改好后再启动；可先运行 deck settings -check 自查）", cfgDir, err)
+		return Settings{}, i18n.E("err.deckstore.loadsettings.1", cfgDir, err)
 	}
 	return s, nil
 }
@@ -577,12 +581,14 @@ type ErrSettingsChanged struct {
 	HandEdited bool
 }
 
-func (e *ErrSettingsChanged) Error() string {
+func (e *ErrSettingsChanged) Error() string { return e.I18n().Error() }
+
+func (e *ErrSettingsChanged) I18n() *i18n.Error {
 	// 不写代数：按时间前推后是十几位的数（n057 rev 127），对 owner 没有意义
 	if e.HandEdited {
-		return "设置文件在 deckd 之外被改过（手改）：没有保存，免得盖掉；deck 已读入改过的那份，重新读取后再改"
+		return i18n.E("err.deckstore.errsettings.hand")
 	}
-	return "设置在你打开之后被别处改过（另一个设置窗口、deck project add，或 deck 重启过）：没有保存；重新读取后再改"
+	return i18n.E("err.deckstore.errsettings.else")
 }
 
 // settingsFilesHash 是两份设置文件当前内容的指纹（不存在的按空）。

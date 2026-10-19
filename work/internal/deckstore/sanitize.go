@@ -1,6 +1,7 @@
 package deckstore
 
 import (
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -45,7 +46,7 @@ func Clean(s string, max int) string {
 		return r
 	}, s)
 	for _, re := range secrets {
-		s = re.ReplaceAllString(s, "[已打码]")
+		s = re.ReplaceAllString(s, i18n.E("err.deckstore.clean.1").Error())
 	}
 	if max > 0 && utf8.RuneCountInString(s) > max {
 		r := []rune(s)

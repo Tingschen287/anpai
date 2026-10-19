@@ -22,6 +22,11 @@
 //   - 接口断言、信道接收、map 或数组下标，取回的都是已经有的 Key，不造新值。
 //   - 方法只能写在声明 Key 的 i18n 包里，包外加不了。包内的转换和运算由 i18n 的证明测试锁住。
 //
+// 零值来源：var k i18n.Key、*new(i18n.Key)、map 里没有的项，得到的都是空键。
+// 这几种造不出新文本，检查器不报。运行时保险兜住：空键不在中文表里，
+// T 会记一笔缺键并返回空串。渲染路径上出现空键时，缺键记录不为零
+// （TestEmptyKeyOnRenderRecordsMiss）。
+//
 // 不在范围：reflect、unsafe、go:linkname、cgo、代码生成，
 // 以及经 encoding/json、fmt.Sscan 等反射式解码得到的 Key。
 // 这些路径编译器追踪不到。运行时由 RecordMisses 在渲染测试里兜住。
@@ -105,6 +110,9 @@ func dynamicTextKeys() []string {
 //     并且就是本包 TextKeys 枚举到的那张表。按对象比对，不按名字。字段也按对象比对。
 //   - "tier." + string(参数)：string 必须是 Universe 里的预声明类型。参数类型先 Unalias，再认 deckstore.Tier。
 //     前缀另由 checkTierConcat 锁成 tier.。
+//   - 线路码：操作数是当前函数自己的参数。函数体里对真正的 i18n.Keys 做 range，
+//     用预声明 string 把 range 变量转成字符串后和这个参数比较。转换必须直接写在这个函数里。
+//     形状不齐就按原来的规则拒绝，不因为名字像就放行。
 //
 // 表的值本身已经是 Key 时不再套转换，所以那些下标不在这张清单里。
 // 函数调用、局部变量、参数、闭包参数、接收者、字段、未登记拼接、被遮蔽的名字，一律拒绝。
@@ -112,6 +120,7 @@ func dynamicTextKeys() []string {
 // 常量键不走这张清单，直接对 i18n.Keys()。
 var dynamicCallAllow = []string{
 	"settings.go · tierName · \"tier.\" + string(t)",
+	"wire.go · renderCoded · code",
 }
 
 // genericKeyAllow 是类型实参里含有 Key 的泛型实例化。现在没有。
@@ -182,7 +191,7 @@ func isTextCall(n *ast.CallExpr) (name, key string, argc int, literal bool) {
 		}
 	case *ast.SelectorExpr:
 		id, ok := fun.X.(*ast.Ident)
-		if ok && id.Name == "i18n" && (fun.Sel.Name == "T" || fun.Sel.Name == "Tf" || fun.Sel.Name == "Format" || fun.Sel.Name == "Errorf") {
+		if ok && id.Name == "i18n" && (fun.Sel.Name == "T" || fun.Sel.Name == "Tf" || fun.Sel.Name == "Format" || fun.Sel.Name == "Errorf" || fun.Sel.Name == "E" || fun.Sel.Name == "MustTextZH" || fun.Sel.Name == "TextZH") {
 			name = "i18n." + fun.Sel.Name
 		}
 	}
@@ -240,6 +249,35 @@ func checkNoStrayChinese(t *testing.T) {
 			return true
 		})
 	})
+	// 第 2 段的错误码用在 deckd、deckstore、agentdeck、deckclient。这里只记「有人用」，不禁中文。
+	// 给 owner 看的中文另由 TestOwnerFacingChineseIsCoded 按函数卡。
+	walkProd(t, func(_ string, f *ast.File, _ *token.FileSet) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil || !strings.Contains(v, ".") {
+				return true
+			}
+			if _, ok := i18n.TextZH(i18n.Key(v)); ok {
+				used[v] = true
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			_, key, _, literal := isTextCall(call)
+			if literal {
+				used[key] = true
+			}
+			return true
+		})
+	})
 	for k := range used {
 		if _, ok := i18n.TextZH(i18n.Key(k)); !ok {
 			t.Errorf("文字表里没有 %q", k)
@@ -262,7 +300,7 @@ func checkFormatArgs(t *testing.T) {
 	verbs := func(s string) []string {
 		return verbRe.FindAllString(strings.ReplaceAll(s, "%%", ""), -1)
 	}
-	walkCovered(t, func(_ string, f *ast.File, fset *token.FileSet) {
+	check := func(_ string, f *ast.File, fset *token.FileSet) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -286,7 +324,44 @@ func checkFormatArgs(t *testing.T) {
 			}
 			return true
 		})
-	})
+	}
+	walkCovered(t, check)
+	walkProd(t, check)
+}
+
+// prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
+func prodDirs() []string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("caller")
+	}
+	root := filepath.Dir(filepath.Dir(file))
+	var out []string
+	for _, name := range []string{"deckd", "deckstore", "agentdeck", "deckclient"} {
+		out = append(out, filepath.Join(root, name))
+	}
+	return out
+}
+
+func walkProd(t *testing.T, fn func(path string, f *ast.File, fset *token.FileSet)) {
+	t.Helper()
+	fset := token.NewFileSet()
+	for _, dir := range prodDirs() {
+		ms, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range ms {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatalf("解析 %s：%v", path, err)
+			}
+			fn(path, f, fset)
+		}
+	}
 }
 
 // absentTextKeys 返回不在中文表或英文表里的键。正例和反例走同一条。
@@ -570,8 +645,8 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 					"st := deckstore.ActivityTypoText()")
 			},
 			also: func(t *testing.T) map[string]string {
-				src := replaceOnce(t, sanitizeOrig, "import (\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)",
-					"import (\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n)\n\nfunc ActivityTypoText() string { return i18n.T(\"side.status.\" + \"typo\") }")
+				src := replaceOnce(t, sanitizeOrig, "import (\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)",
+					"import (\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)\n\nfunc ActivityTypoText() string { return i18n.T(\"side.status.\" + \"typo\") }")
 				return map[string]string{sanitizePath: src}
 			},
 			want: []string{`"side.status.typo"`, "不在 Keys() 里", "sanitize.go"},
@@ -1249,6 +1324,10 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 					probs = append(probs, fmt.Sprintf("%s：非常量转换不在函数里（%s）", pos, expr))
 					return
 				}
+				if wireCodeShape(cp.info, op, stack) {
+					got[base+" · "+fn+" · "+expr] = true
+					return
+				}
 				if okShape, why := w.classify(op); !okShape {
 					probs = append(probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
 					return
@@ -1629,6 +1708,128 @@ func objOf(info *types.Info, id *ast.Ident) types.Object {
 	return info.Defs[id]
 }
 
+// wireCodeShape 认「线路码，转换前已用 Keys() 校验」。
+// 只认一个函数里的这一处形状。对不齐就返回 false，调用方按原分类报错。
+func wireCodeShape(info *types.Info, op ast.Expr, stack []ast.Node) bool {
+	id, ok := unparen(op).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	var fn *ast.FuncDecl
+	for i := len(stack) - 1; i >= 0; i-- {
+		if _, isLit := stack[i].(*ast.FuncLit); isLit {
+			return false
+		}
+		fd, ok := stack[i].(*ast.FuncDecl)
+		if ok {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil || fn.Body == nil || fn.Type == nil || fn.Type.Params == nil {
+		return false
+	}
+	codeObj := objOf(info, id)
+	if codeObj == nil {
+		return false
+	}
+	param := false
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			if objOf(info, name) == codeObj {
+				param = true
+			}
+		}
+	}
+	if !param {
+		return false
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		rng, ok := n.(*ast.RangeStmt)
+		if !ok || !isI18nKeysCall(info, rng.X) {
+			return true
+		}
+		val, ok := rng.Value.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		valObj := objOf(info, val)
+		if valObj == nil || rng.Body == nil {
+			return true
+		}
+		ast.Inspect(rng.Body, func(m ast.Node) bool {
+			if found || m == nil {
+				return false
+			}
+			if _, isLit := m.(*ast.FuncLit); isLit {
+				return false
+			}
+			bin, ok := m.(*ast.BinaryExpr)
+			if !ok || bin.Op != token.EQL {
+				return true
+			}
+			if wireStringEq(info, bin, valObj, codeObj) {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
+}
+
+func isI18nKeysCall(info *types.Info, e ast.Expr) bool {
+	call, ok := unparen(e).(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 || call.Ellipsis.IsValid() {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	pn, ok := objOf(info, pkg).(*types.PkgName)
+	if !ok || pn.Imported() == nil || pn.Imported().Path() != i18nImport {
+		return false
+	}
+	fn, ok := objOf(info, sel.Sel).(*types.Func)
+	return ok && fn.Name() == "Keys" && fn.Pkg() != nil && fn.Pkg().Path() == i18nImport
+}
+
+func wireStringEq(info *types.Info, bin *ast.BinaryExpr, valObj, codeObj types.Object) bool {
+	left := predeclaredStringOf(info, bin.X, valObj) && identSame(info, bin.Y, codeObj)
+	right := predeclaredStringOf(info, bin.Y, valObj) && identSame(info, bin.X, codeObj)
+	return left || right
+}
+
+func predeclaredStringOf(info *types.Info, e ast.Expr, argObj types.Object) bool {
+	call, ok := unparen(e).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return false
+	}
+	fun, ok := call.Fun.(*ast.Ident)
+	if !ok || objOf(info, fun) != types.Universe.Lookup("string") {
+		return false
+	}
+	return identSame(info, call.Args[0], argObj)
+}
+
+func identSame(info *types.Info, e ast.Expr, obj types.Object) bool {
+	id, ok := unparen(e).(*ast.Ident)
+	return ok && obj != nil && objOf(info, id) == obj
+}
+
 func (w *bindWorld) classify(arg ast.Expr) (bool, string) {
 	if ok, why := w.tierConcat(arg); ok || why != "" {
 		return ok, why
@@ -1962,6 +2163,8 @@ func addView(t *testing.T, views *[]string, name, s string) {
 var enViewKey = map[string]i18n.Key{
 	"sidebar":          "side.status.waiting",
 	"idle-wide":        "idle.hint",
+	"idle-narrow":      "idle.hint",
+	"tabs":             "tabs.taken",
 	"tabs-taken":       "tabs.taken",
 	"tabs-pending":     "tabs.pending",
 	"tabs-readonly":    "tabs.readonly",
@@ -1987,6 +2190,11 @@ var enViewKey = map[string]i18n.Key{
 	"activity-empty":   "act.empty",
 	"layout-base":      "layout.conf.base",
 	"layout-keys":      "layout.conf.keys",
+}
+
+// enViewSkip 是渲染了、但不能用一条无占位符的英文当子串去对的画面。必须写理由。没登记的画面让测试失败。
+var enViewSkip = map[string]string{
+	"layout-err": "layout.err.restore 带占位符，英文整句对不上子串；中文原文由这条错误自己的 Error() 保住",
 }
 
 // TestEnglishUIHasNoHan 在英文下渲染本段的主要画面。
@@ -2133,6 +2341,9 @@ func renderStage1(t *testing.T, english bool) {
 		for _, v := range snaps {
 			key, ok := enViewKey[v.name]
 			if !ok {
+				if enViewSkip[v.name] == "" {
+					t.Errorf("%s 渲染了，但没有登记英文样本，也没有写例外理由", v.name)
+				}
 				continue
 			}
 			want, ok := i18n.TextEN(key)

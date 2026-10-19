@@ -2,6 +2,7 @@ package deckd
 
 import (
 	"bufio"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"strings"
 
@@ -148,7 +149,7 @@ func (s *Server) getTools(w http.ResponseWriter, r *http.Request) {
 			path, ver, err := info(r.Context(), e.Binary)
 			st.Path, st.Version, st.Installed = path, deckstore.Clean(ver, 80), path != ""
 			if err != nil && path == "" {
-				st.Error = "没装（PATH 里找不到 " + e.Binary + "）"
+				st.Error = i18n.E("err.deckd.servergettools.1", e.Binary).Error()
 			}
 		}
 		out = append(out, st)
@@ -167,16 +168,16 @@ func (s *Server) getToolModels(w http.ResponseWriter, r *http.Request) {
 	}
 	e, ok := CatalogTool(r.URL.Query().Get("tool"))
 	if !ok {
-		fail(w, http.StatusNotFound, "不认识的工具 %q", r.URL.Query().Get("tool"))
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.servergettoolmodels.1", r.URL.Query().Get("tool")))
 		return
 	}
 	if len(e.listArgs) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"models": []string{}, "note": e.Name + " 没有列模型的命令：手填模型 id"})
+		writeJSON(w, http.StatusOK, map[string]any{"models": []string{}, "note": i18n.E("err.deckd.servergettoolmodels.3", e.Name).Error()})
 		return
 	}
 	text, err := listModels(r.Context(), e.Binary, e.listArgs)
 	if err != nil {
-		fail(w, http.StatusBadGateway, "%s %s 没有成功：%v（可以手填模型 id）", e.Binary, strings.Join(e.listArgs, " "), err)
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.servergettoolmodels.2", e.Binary, strings.Join(e.listArgs, " "), err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": e.parse(text)})

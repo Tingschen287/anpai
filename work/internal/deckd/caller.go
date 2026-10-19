@@ -3,6 +3,7 @@ package deckd
 import (
 	"context"
 	"errors"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net"
 	"syscall"
 	"time"
@@ -63,7 +64,7 @@ func peerOf(c *net.UnixConn, at time.Time) (identity.Peer, func(), error) {
 func (s *Server) resolve(ctx context.Context) Caller {
 	c, _ := ctx.Value(connKey{}).(*net.UnixConn)
 	if c == nil {
-		return Caller{Role: RoleUnknown, Err: errors.New("不是 unix socket 连接")}
+		return Caller{Role: RoleUnknown, Err: i18n.E("err.deckd.serverresolve.1")}
 	}
 	at, _ := ctx.Value(connAtKey{}).(time.Time)
 	peer, done, err := peerOf(c, at)

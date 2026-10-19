@@ -1,7 +1,7 @@
 package deckd
 
 import (
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"slices"
 
@@ -20,24 +20,24 @@ func checkAgentEdits(cur, next deckstore.Settings) error {
 		if ok {
 			switch {
 			case a.Tool != old.Tool:
-				return fmt.Errorf("agent %s 的工具名不能在设置界面里改（%s → %s）", a.ID, old.Tool, a.Tool)
+				return i18n.E("err.deckd.checkagentedits.1", a.ID, old.Tool, a.Tool)
 			case a.Binary != old.Binary:
-				return fmt.Errorf("agent %s 的命令（binary）不能在设置界面里改：要改请手改 agents.yaml", a.ID)
+				return i18n.E("err.deckd.checkagentedits.2", a.ID)
 			case a.Agent != old.Agent:
-				return fmt.Errorf("agent %s 的 agent 标记不能在设置界面里改：要改请手改 agents.yaml", a.ID)
+				return i18n.E("err.deckd.checkagentedits.3", a.ID)
 			case !slices.EqualFunc(a.ExtraArgs, old.ExtraArgs, slices.Equal[[]string]):
-				return fmt.Errorf("agent %s 的启动额外参数（extra_args）是安全白名单，不能在设置界面里改：要改请手改 agents.yaml", a.ID)
+				return i18n.E("err.deckd.checkagentedits.4", a.ID)
 			}
 			continue
 		}
 		t, ok := CatalogTool(a.Tool)
 		switch {
 		case !ok:
-			return fmt.Errorf("新加的 agent %s 用的工具 %q 不在安排 Anpai 认识的工具里", a.ID, a.Tool)
+			return i18n.E("err.deckd.checkagentedits.5", a.ID, a.Tool)
 		case a.Binary != t.Binary || a.Agent != t.Agent:
-			return fmt.Errorf("新加的 agent %s 的命令与 agent 标记须照工具目录（%s）", a.ID, t.Binary)
+			return i18n.E("err.deckd.checkagentedits.6", a.ID, t.Binary)
 		case len(a.ExtraArgs) > 0:
-			return fmt.Errorf("新加的 agent %s 不能带启动额外参数：要加请手改 agents.yaml", a.ID)
+			return i18n.E("err.deckd.checkagentedits.7", a.ID)
 		}
 	}
 	return nil

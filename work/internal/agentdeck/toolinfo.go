@@ -2,7 +2,7 @@ package agentdeck
 
 import (
 	"context"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os/exec"
 	"strings"
 	"time"
@@ -14,13 +14,13 @@ import (
 func ToolInfo(ctx context.Context, binary string) (path, version string, err error) {
 	path, err = exec.LookPath(binary)
 	if err != nil {
-		return "", "", fmt.Errorf("找不到 %s：%w", binary, err)
+		return "", "", i18n.E("err.agentdeck.toolinfo.1", binary, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binary, "--version").Output() // 与 LookPath 按同一个 PATH 解析
 	if err != nil {
-		return path, "", fmt.Errorf("读不到 %s 的版本：%w", binary, err)
+		return path, "", i18n.E("err.agentdeck.toolinfo.2", binary, err)
 	}
 	version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
 	return path, strings.TrimSpace(version), nil

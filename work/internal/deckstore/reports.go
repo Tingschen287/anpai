@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"regexp"
 	"sort"
 	"strconv"
@@ -66,11 +67,11 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 	added := false
 	err := s.mutate(func() (func() error, []Event, error) {
 		if r.Source != ReportActive && r.Source != ReportInferred && r.Source != ReportGraph {
-			return nil, nil, fmt.Errorf("不认识的汇报来源 %q", r.Source)
+			return nil, nil, i18n.E("err.deckstore.storeenqueuereport.1", r.Source)
 		}
 		sub, ok := s.sessions[r.Sub]
 		if !ok || sub.Role != "sub" {
-			return nil, nil, fmt.Errorf("%s 不是已登记的子 agent", r.Sub)
+			return nil, nil, i18n.E("err.deckstore.storeenqueuereport.2", r.Sub)
 		}
 		switch {
 		case r.Source == ReportActive && r.CompletionID == "":
@@ -85,18 +86,18 @@ func (s *Store) EnqueueReport(r Report) (Report, bool, error) {
 		case r.Source == ReportGraph:
 			// 账本提醒（owner 在 attempt 4 设计复审选 B2-A）：不占完成，按 节点#attempt 编号、只送一次
 			if r.Ref == "" {
-				return nil, nil, fmt.Errorf("账本提醒没有 节点#attempt")
+				return nil, nil, i18n.E("err.deckstore.storeenqueuereport.3")
 			}
 			// 编号用 节点#attempt 的摘要：节点 id 长时也不超过编号上限（attempt 4 自查）
 			sum := sha256.Sum256([]byte(r.Ref))
 			r.CompletionID = "ledger:" + hex.EncodeToString(sum[:8])
 		}
 		if !completionRe.MatchString(r.CompletionID) {
-			return nil, nil, fmt.Errorf("完成编号 %q 不合规（1–64 个字母、数字或 ._:-）", r.CompletionID)
+			return nil, nil, i18n.E("err.deckstore.storeenqueuereport.4", r.CompletionID)
 		}
 		main, ok := s.sessions[sub.Parent]
 		if !ok || main.Role != "main" || main.Project != sub.Project {
-			return nil, nil, fmt.Errorf("子 agent %s 没有登记主 agent", r.Sub)
+			return nil, nil, i18n.E("err.deckstore.storeenqueuereport.5", r.Sub)
 		}
 		for _, x := range s.reports {
 			// 同一次真正的完成（主动报告、同一代）或同一条账本提醒（同一 节点#attempt）只收一次
@@ -284,7 +285,7 @@ func (s *Store) AdoptOrphans(project, newMain string) (subs, reports int, err er
 	err = s.mutate(func() (func() error, []Event, error) {
 		nm, ok := s.sessions[newMain]
 		if !ok || nm.Role != "main" || nm.Project != project {
-			return nil, nil, fmt.Errorf("%s 不是项目 %s 的主 agent", newMain, project)
+			return nil, nil, i18n.E("err.deckstore.storeadoptorphans.1", newMain, project)
 		}
 		gone := map[string]bool{}
 		for _, x := range s.sessions {
@@ -414,20 +415,20 @@ func (s *Store) MarkReport(id, state string) error {
 	next := map[string]string{ReportSending: ReportPending, ReportDelivered: ReportSending, ReportUnconfirmed: ReportSending, ReportPending: ReportSending}
 	from, ok := next[state]
 	if !ok {
-		return fmt.Errorf("汇报状态只能推进到 sending、delivered 或 unconfirmed")
+		return i18n.E("err.deckstore.storemarkreport.1")
 	}
 	return s.mutate(func() (func() error, []Event, error) {
 		for _, x := range s.reports {
 			if x.ID == id {
 				if x.State != from {
-					return nil, nil, fmt.Errorf("汇报 %s 是 %s，不能改成 %s", id, x.State, state)
+					return nil, nil, i18n.E("err.deckstore.storemarkreport.2", id, x.State, state)
 				}
 				x.State, x.UpdatedAt = state, s.now()
 				s.absorbLocked(x)
 				return s.saveReports, []Event{{Kind: "report", Project: x.Project, ID: x.ID}}, nil
 			}
 		}
-		return nil, nil, fmt.Errorf("没有汇报 %s", id)
+		return nil, nil, i18n.E("err.deckstore.storemarkreport.3", id)
 	})
 }
 

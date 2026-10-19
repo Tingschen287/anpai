@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
@@ -379,6 +380,9 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 			line += dim.Render(n.Project + " · ")
 		}
 		text := n.Text
+		if n.Code != "" {
+			text = deckclient.Text(n.Code, n.Args, n.Text)
+		}
 		if n.Kind == "decision" {
 			text = warn.Render(text)
 		}

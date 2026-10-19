@@ -15,7 +15,7 @@ package agentdeck
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
 	"strconv"
@@ -33,7 +33,7 @@ func runMux(cmd *exec.Cmd) ([]byte, error) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return out, fmt.Errorf("%w：%s", err, strings.TrimSpace(string(ee.Stderr)))
+			return out, i18n.E("err.agentdeck.runmux.1", err, strings.TrimSpace(string(ee.Stderr)))
 		}
 		return out, err
 	}
@@ -41,7 +41,7 @@ func runMux(cmd *exec.Cmd) ([]byte, error) {
 }
 
 // ErrNoServer 表示 socket 上没有 tmux server 在跑。
-var ErrNoServer = errors.New("tmux server 没有在跑")
+var ErrNoServer = i18n.E("err.agentdeck.pkg.1")
 
 func noServer(socket string, err error) bool {
 	if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
@@ -67,7 +67,7 @@ func LayoutNewSession(ctx context.Context, socket, conf, session, window, width,
 	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "-f", conf, "new-session", "-d", "-P", "-F", "#{pane_id}",
 		"-s", session, "-n", window, "-x", width, "-y", height, command))
 	if err != nil {
-		return "", fmt.Errorf("起布局 server 失败：%w", err)
+		return "", i18n.E("err.agentdeck.layoutnewsession.1", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -99,7 +99,7 @@ func LayoutSplit(ctx context.Context, socket, target string, spec SplitSpec, com
 	args = append(args, "-l", spec.Size, "-t", target, command)
 	out, err := runMux(exec.CommandContext(ctx, "tmux", args...))
 	if err != nil {
-		return "", fmt.Errorf("切窗格失败：%w", err)
+		return "", i18n.E("err.agentdeck.layoutsplit.1", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -143,7 +143,7 @@ func LayoutPanes(ctx context.Context, socket string) ([]LayoutPane, error) {
 		if noServer(socket, err) {
 			return nil, ErrNoServer
 		}
-		return nil, fmt.Errorf("列布局窗格失败：%w", err)
+		return nil, i18n.E("err.agentdeck.layoutpanes.1", err)
 	}
 	var panes []LayoutPane
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -295,7 +295,7 @@ func ListTmuxClients(ctx context.Context, socket string) ([]TmuxClient, error) {
 		if noServer(socket, err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("列 client 失败：%w", err)
+		return nil, i18n.E("err.agentdeck.listtmuxclients.1", err)
 	}
 	return parseClients(string(out)), nil
 }
@@ -321,14 +321,14 @@ func parseClients(out string) []TmuxClient {
 func ClientState(ctx context.Context, socket, tty string) (TmuxClient, error) {
 	list, err := ListTmuxClients(ctx, socket)
 	if err != nil {
-		return TmuxClient{}, fmt.Errorf("读 client %s 失败：%w", tty, err)
+		return TmuxClient{}, i18n.E("err.agentdeck.clientstate.1", tty, err)
 	}
 	for _, c := range list {
 		if c.TTY == tty {
 			return c, nil
 		}
 	}
-	return TmuxClient{}, fmt.Errorf("client %s 不在了", tty)
+	return TmuxClient{}, i18n.E("err.agentdeck.clientstate.2", tty)
 }
 
 // ToggleClientReadOnly 翻转 client 的只读标记。tmux 3.4 只有翻转（switch-client -r），没有「设为」：
@@ -358,7 +358,7 @@ func CaptureSession(ctx context.Context, socket, session string) ([]string, erro
 	// 「=会话:」：精确匹配会话名，取它当前窗口的当前窗格（只写「=会话」时 capture-pane 找不到窗格，实测）
 	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "capture-pane", "-p", "-t", exactTarget(session)+":"))
 	if err != nil {
-		return nil, fmt.Errorf("抓不到 %s 的画面：%w", session, err)
+		return nil, i18n.E("err.agentdeck.capturesession.1", session, err)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	return lines, nil
@@ -373,7 +373,7 @@ func EnsureSession(ctx context.Context, socket, session, command string) error {
 	}
 	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "new-session", "-d", "-s", session, command))
 	if err != nil {
-		return fmt.Errorf("建会话 %s 失败：%w", session, err)
+		return i18n.E("err.agentdeck.ensuresession.1", session, err)
 	}
 	return nil
 }

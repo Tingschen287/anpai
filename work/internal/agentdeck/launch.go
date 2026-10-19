@@ -3,7 +3,7 @@ package agentdeck
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
 )
 
@@ -39,20 +39,20 @@ type LaunchRequest struct {
 // Validate 检查这次派工说不说得清楚。
 func (r LaunchRequest) Validate() error {
 	if r.ProjectPath == "" {
-		return fmt.Errorf("派工缺少项目路径")
+		return i18n.E("err.agentdeck.launchrequestvalidate.1")
 	}
 	if r.Tool == "" {
-		return fmt.Errorf("派工缺少要运行的工具")
+		return i18n.E("err.agentdeck.launchrequestvalidate.2")
 	}
 	switch {
 	case r.Model == "" && !r.ModelNotApplicable:
-		return fmt.Errorf("派工缺少模型 ID：模型未知时拒绝派工，不替你挑默认值")
+		return i18n.E("err.agentdeck.launchrequestvalidate.3")
 	case r.Model != "" && r.ModelNotApplicable:
-		return fmt.Errorf("请求自相矛盾：既声明了工具没有模型，又给了模型 %q", r.Model)
+		return i18n.E("err.agentdeck.launchrequestvalidate.4", r.Model)
 	}
 	if len(r.Extra) > 0 {
 		if r.Tool != "claude" && r.Tool != "codex" {
-			return fmt.Errorf("%s 不支持声明额外参数", r.Tool)
+			return i18n.E("err.agentdeck.launchrequestvalidate.5", r.Tool)
 		}
 		if err := CheckExtraArgs(r.Tool, r.Extra); err != nil {
 			return err
@@ -135,7 +135,7 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 	}
 	var res LaunchResult
 	if jsonErr := json.Unmarshal(out, &res); jsonErr != nil {
-		return LaunchResult{}, fmt.Errorf("upstream agent-deck launch 的输出不是合法 JSON：%w", jsonErr)
+		return LaunchResult{}, i18n.E("err.agentdeck.clientlaunch.1", jsonErr)
 	}
 	// 上游失败时退出码可能仍是 0，真正的结论在 success 字段上，
 	// 原因在 error/code 里。把它的原话带出来，不要只说一句「失败了」。
@@ -145,13 +145,13 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 			detail = res.Code + ": " + detail
 		}
 		if detail == "" {
-			detail = "上游没有说明原因"
+			detail = i18n.E("err.agentdeck.clientlaunch.4").Error()
 		}
-		return res, fmt.Errorf("upstream agent-deck launch 报告失败（%s）", detail)
+		return res, i18n.E("err.agentdeck.clientlaunch.2", detail)
 	}
 	if res.SessionID == "" {
 		// 拿不到会话号就绑不上，这时宁可报错，也不落一条绑不住的记录。
-		return res, fmt.Errorf("upstream agent-deck launch 没有回传 session_id")
+		return res, i18n.E("err.agentdeck.clientlaunch.3")
 	}
 	return res, nil
 }

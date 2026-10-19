@@ -35,6 +35,8 @@ type StartMainResult struct {
 	Session        deckstore.Session `json:"session"`
 	BriefDelivered bool              `json:"brief_delivered"`
 	Note           string            `json:"note"`
+	NoteCode       string            `json:"note_code,omitempty"`
+	NoteArgs       []any             `json:"note_args,omitempty"`
 	Pending        string            `json:"pending"`
 	Next           string            `json:"next"`
 }
@@ -86,13 +88,17 @@ func startMainText(project string, r StartMainResult, err error) (text string, o
 	case r.Pending != "":
 		return T("main.start.pending", project, r.Pending), true
 	case r.Note != "":
-		return oneLine(deckstore.Clean(T("main.start.note", project, r.Note), 160)), true
+		note := r.Note
+		if r.NoteCode != "" {
+			note = deckclient.Text(r.NoteCode, r.NoteArgs, r.Note)
+		}
+		return oneLine(deckstore.Clean(T("main.start.note", project, note), 160)), true
 	}
 	return T("main.start.ok", project), true
 }
 
-// errText 把错误清洗成一行可显示的文字。
-func errText(err error) string { return oneLine(deckstore.Clean(err.Error(), 120)) }
+// errText 把错误清洗成一行可显示的文字。中文仍是原文。英文按错误码翻译。
+func errText(err error) string { return oneLine(deckstore.Clean(deckclient.Show(err), 120)) }
 
 type driver struct {
 	old    *term.State

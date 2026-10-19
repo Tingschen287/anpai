@@ -20,13 +20,17 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // ErrBroken 表示存储曾经写失败，已停止接受写入。
 type ErrBroken struct{ Cause error }
 
-func (e *ErrBroken) Error() string {
-	return fmt.Sprintf("deck 的存储写失败过（%v），已停止接受写入与派工；修好后重启 deckd", e.Cause)
+func (e *ErrBroken) Error() string { return e.I18n().Error() }
+
+func (e *ErrBroken) I18n() *i18n.Error {
+	return i18n.E("err.deckstore.errbroken", e.Cause)
 }
 
 // Event 是一次状态变化，deckd 用它推 SSE。
@@ -61,7 +65,7 @@ func Open(dirs Dirs) (*Store, error) {
 	s := &Store{dirs: dirs, now: time.Now, sessions: map[string]*Session{}, decs: map[string]*Decision{}}
 	set, err := LoadSettings(dirs.Config)
 	if err != nil {
-		return nil, fmt.Errorf("agent 设置不可用：%w", err)
+		return nil, i18n.E("err.deckstore.open.1", err)
 	}
 	s.settings = set
 	s.filesHash = settingsFilesHash(dirs.Config)
@@ -78,7 +82,7 @@ func Open(dirs Dirs) (*Store, error) {
 	for _, x := range sessions {
 		if x.Status == StatusLaunching {
 			x.Status = StatusUncertain
-			x.Note = "deckd 重启时仍在启动中，结果不明"
+			x.Note = i18n.E("err.deckstore.open.4").Error()
 			changed = true
 		}
 		if x.SendInFlight {
@@ -97,7 +101,7 @@ func Open(dirs Dirs) (*Store, error) {
 	for _, d := range decs {
 		if d.State == StateExecuting {
 			d.State = StateUncertain
-			d.Result = "deckd 重启时仍在执行，效果不明；不自动重做"
+			d.Result = i18n.E("err.deckstore.open.5").Error()
 			d.Version++
 			changed = true
 		}
@@ -119,7 +123,7 @@ func Open(dirs Dirs) (*Store, error) {
 		}
 	}
 	if s.panels, err = LoadPanels(dirs.Config); err != nil {
-		return nil, fmt.Errorf("面板注册表不可用：%w", err)
+		return nil, i18n.E("err.deckstore.open.2", err)
 	}
 	if changed {
 		if err := s.saveRegistry(); err != nil {
@@ -135,7 +139,7 @@ func Open(dirs Dirs) (*Store, error) {
 	// 送到一半（sending）时停了的汇报转为未确认、不重发；告诉 owner，不悄悄留着（n051 评审 1 B5）
 	for _, r := range recovered {
 		// 通知写不进去也照常启动（汇报已标为未确认、留在注册表里，右侧面板与 deck agent list 看得到）
-		s.Notify(r.Project, "report", fmt.Sprintf("deckd 重启时有一条汇报正在转告（子 agent %s），送没送到不确定，不会重发；请在主 agent 那里核对：%s", r.Sub, Clean(r.Text, 160)), "deckd")
+		s.NotifyCoded(r.Project, "report", i18n.E("err.deckstore.open.3", r.Sub, Clean(r.Text, 160)), "deckd")
 	}
 	return s, nil
 }
@@ -230,7 +234,7 @@ func (s *Store) replaceSettings(next Settings, generation int) (int, error) {
 			// 两份文件在 deckd 之外被改过（手改，n057 自查：以前会被界面保存悄悄盖掉）：不保存，读入改过的那份
 			disk, err := LoadSettings(s.dirs.Config)
 			if err != nil {
-				return nil, nil, fmt.Errorf("设置文件在 deckd 之外被改过，而且读不了：%w（没有保存；改好后重启 deck）", err)
+				return nil, nil, i18n.E("err.deckstore.storereplacesettings.1", err)
 			}
 			h = settingsFilesHash(s.dirs.Config) // agents.yaml 被删时 LoadSettings 会写出默认的：按写完的算（自查：否则重新读取后还要再被误拒一次）
 			// 旧窗口拿着的代数都要作废（n057 评审 1 B1：以前只挡住第一次，同一个旧窗口再存、或另一个旧窗口存，照样盖掉手改）：
@@ -427,9 +431,10 @@ type ErrOverEnvelope struct {
 	Reason  string
 }
 
-func (e *ErrOverEnvelope) Error() string {
-	return fmt.Sprintf("项目 %s 超出预算包络 %s v%d：%s（当前子 agent %d/%d，frontier %d/%d）",
-		e.Project, e.Env.ID, e.Env.Version, e.Reason, e.Use.Subagents, e.Env.MaxSubagents, e.Use.Frontier, e.Env.MaxFrontier)
+func (e *ErrOverEnvelope) Error() string { return e.I18n().Error() }
+
+func (e *ErrOverEnvelope) I18n() *i18n.Error {
+	return i18n.E("err.deckstore.erroverenvelope", e.Project, e.Env.ID, e.Env.Version, e.Reason, e.Use.Subagents, e.Env.MaxSubagents, e.Use.Frontier, e.Env.MaxFrontier)
 }
 
 // Reservation 是一次启动前的名额预留。
@@ -469,13 +474,13 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 		}
 		for _, y := range s.sessions {
 			if y.RequestID == x.RequestID {
-				return nil, nil, fmt.Errorf("启动请求 %s 已经预留过（会话 %s），同一请求不能预留两次", x.RequestID, y.Key)
+				return nil, nil, i18n.E("err.deckstore.storereserve.1", x.RequestID, y.Key)
 			}
 		}
 		var consumed *Decision
 		p, ok := s.settings.Project(x.Project)
 		if !ok {
-			return nil, nil, fmt.Errorf("没有项目 %s", x.Project)
+			return nil, nil, i18n.E("err.deckstore.storecreatedecision.2", x.Project)
 		}
 		if x.Role == "sub" {
 			use := s.slotsLocked(x.Project)
@@ -483,9 +488,9 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 			var why string
 			switch {
 			case use.Subagents+1 > env.MaxSubagents:
-				why = "同时运行的子 agent 已达上限"
+				why = i18n.E("err.deckstore.storereserve.5").Error()
 			case x.Tier == Frontier && use.Frontier+1 > env.MaxFrontier:
-				why = "frontier 子 agent 已达上限"
+				why = i18n.E("err.deckstore.storereserve.6").Error()
 			}
 			if why != "" {
 				if exceptionDecision == "" {
@@ -493,16 +498,16 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 				}
 				d, ok := s.decs[exceptionDecision]
 				if !ok || d.Kind != KindCost || d.Project != x.Project || d.State != StateExecuting {
-					return nil, nil, fmt.Errorf("超额例外 %s 无效（须是本项目、正在执行的 cost 决定；用过的不能再用）", exceptionDecision)
+					return nil, nil, i18n.E("err.deckstore.storereserve.2", exceptionDecision)
 				}
 				if !d.ExpiresAt.IsZero() && s.now().After(d.ExpiresAt) {
-					d.State, d.Result, d.UpdatedAt = StateExpired, "超额例外过了有效期仍未使用", s.now()
+					d.State, d.Result, d.UpdatedAt = StateExpired, i18n.E("err.deckstore.storereserve.7").Error(), s.now()
 					d.Version++
 					return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}},
-						fmt.Errorf("超额例外 %s 已过有效期，已作废", exceptionDecision)
+						i18n.E("err.deckstore.storereserve.3", exceptionDecision)
 				}
 				if ScopeHash(SpawnScope(x, p)) != d.ScopeHash {
-					return nil, nil, fmt.Errorf("超额例外 %s 批准的是另一个请求（目录、任务、启动参数、请求 id、工具、模型、档位、标题、父会话或包络不一致）", exceptionDecision)
+					return nil, nil, i18n.E("err.deckstore.storereserve.4", exceptionDecision)
 				}
 				consumed = d
 			}
@@ -515,7 +520,7 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 		res.Key = x.Key
 		evs := []Event{{Kind: "session", Project: x.Project, ID: x.Key}}
 		if consumed != nil {
-			consumed.State, consumed.Result, consumed.UpdatedAt = StateApplied, "已用于预留 "+x.Key, s.now()
+			consumed.State, consumed.Result, consumed.UpdatedAt = StateApplied, i18n.E("err.deckstore.storereserve.8", x.Key).Error(), s.now()
 			consumed.Version++
 			evs = append(evs, Event{Kind: "decision", Project: consumed.Project, ID: consumed.ID})
 			return func() error {
@@ -534,7 +539,7 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 func (s *Store) LaunchSucceeded(key, agentDeckID, tmuxSession string) error {
 	return s.setSession(key, func(x *Session) error {
 		if x.Status != StatusLaunching && x.Status != StatusUncertain {
-			return fmt.Errorf("会话 %s 不在启动中（%s）", key, x.Status)
+			return i18n.E("err.deckstore.storelaunchsucceeded.1", key, x.Status)
 		}
 		x.Status, x.AgentDeckID, x.TmuxSession, x.Note = StatusRunning, agentDeckID, tmuxSession, ""
 		return nil
@@ -640,7 +645,7 @@ func (s *Store) setSession(key string, f func(*Session) error) error {
 	return s.mutate(func() (func() error, []Event, error) {
 		x, ok := s.sessions[key]
 		if !ok {
-			return nil, nil, fmt.Errorf("注册表里没有会话 %s", key)
+			return nil, nil, i18n.E("err.deckstore.storesetsession.1", key)
 		}
 		before := *x
 		if err := f(x); err != nil {
@@ -739,6 +744,9 @@ type Notification struct {
 	Kind    string    `json:"kind"`
 	Text    string    `json:"text"`
 	Source  string    `json:"source,omitempty"`
+	// Code 和 Args 给界面翻译。旧的 jsonl 没有这两项，读出来是空，界面就显示 Text。
+	Code string `json:"code,omitempty"`
+	Args []any  `json:"args,omitempty"`
 }
 
 const keepNotes = 2000
@@ -757,6 +765,30 @@ func (s *Store) Notify(project, kind, text, source string) (Notification, error)
 		return func() error { return appendLine(s.path("notifications.jsonl"), line) }, []Event{{Kind: "notification", Project: project}}, nil
 	})
 	return n, err
+}
+
+// NotifyCoded 追加一条带错误码的通知。Text 仍是中文原文，Code 和 Args 给界面翻译。
+func (s *Store) NotifyCoded(project, kind string, err *i18n.Error, source string) (Notification, error) {
+	if err == nil {
+		return s.Notify(project, kind, "", source)
+	}
+	text := err.Error()
+	code, args, _ := i18n.Wire(err)
+	var n Notification
+	merr := s.mutate(func() (func() error, []Event, error) {
+		s.noteSeq++
+		n = Notification{
+			Seq: s.noteSeq, At: s.now(), Project: project, Kind: kind,
+			Text: Clean(text, 600), Source: Clean(source, 120), Code: code, Args: args,
+		}
+		s.notes = append(s.notes, n)
+		if len(s.notes) > keepNotes {
+			s.notes = s.notes[len(s.notes)-keepNotes:]
+		}
+		line, _ := json.Marshal(n)
+		return func() error { return appendLine(s.path("notifications.jsonl"), line) }, []Event{{Kind: "notification", Project: project}}, nil
+	})
+	return n, merr
 }
 
 // Notifications 返回 seq 之后的通知；project 非空只返回该项目与全局的。
@@ -842,7 +874,7 @@ func ScopeHash(scope map[string]string) string {
 func checkIDs(x Session) error {
 	for name, v := range map[string]string{"agent": x.Agent, "tool": x.Tool, "model": x.Model, "parent": x.Parent, "created_by": x.CreatedBy} {
 		if len(v) > 120 || Clean(v, 0) != v {
-			return fmt.Errorf("会话的 %s 含非法字符或过长", name)
+			return i18n.E("err.deckstore.checkids.1", name)
 		}
 	}
 	return nil
@@ -855,17 +887,17 @@ const maxScopeValue = 300
 // 不超过 scope 值上限（目录会原样进批准范围），且不含任何控制字符——包括 Clean 会保留的换行与制表符、DEL 与 C1。
 func CheckPath(p string) error {
 	if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
-		return fmt.Errorf("须是规整的绝对路径：%q", Clean(p, 120))
+		return i18n.E("err.deckstore.checkpath.1", Clean(p, 120))
 	}
 	if len(p) > maxScopeValue {
-		return fmt.Errorf("超过 %d 字节（%d）：目录会原样写进批准范围，请换短一点的路径", maxScopeValue, len(p))
+		return i18n.E("err.deckstore.checkpath.2", maxScopeValue, len(p))
 	}
 	if !utf8.ValidString(p) {
-		return fmt.Errorf("不是合法的 UTF-8")
+		return i18n.E("err.deckstore.checkpath.3")
 	}
 	for _, r := range p {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return fmt.Errorf("含控制字符（U+%04X）：%q", r, Clean(p, 120))
+			return i18n.E("err.deckstore.checkpath.4", r, Clean(p, 120))
 		}
 	}
 	return nil
@@ -879,14 +911,14 @@ var (
 // checkLaunch 校验启动请求的指纹：一律原样校验、不清洗（同 B8 的做法），不合格就拒绝。
 func checkLaunch(x Session) error {
 	if !requestRe.MatchString(x.RequestID) {
-		return fmt.Errorf("启动请求 id 缺失或不合格（只许字母数字与 ._:-，最长 64）")
+		return i18n.E("err.deckstore.checklaunch.1")
 	}
 	// 目录会原样进批准范围（scope），所以长度上限与 scope 的值一致：否则长目录能预留，却申请不了对应的例外（评审 A3 建议 S1）
 	if err := CheckPath(x.Dir); err != nil {
-		return fmt.Errorf("工作目录 %w", err)
+		return i18n.E("err.deckstore.checklaunch.2", err)
 	}
 	if !sha256Re.MatchString(x.TaskSHA256) || !sha256Re.MatchString(x.ArgsSHA256) {
-		return fmt.Errorf("任务与启动参数的 sha256 须是 64 位小写十六进制")
+		return i18n.E("err.deckstore.checklaunch.3")
 	}
 	return nil
 }

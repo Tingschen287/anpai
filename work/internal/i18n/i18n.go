@@ -139,6 +139,16 @@ func Errorf(key Key, args ...any) error {
 // 名字不叫 ZH：ZH 是语言代码常量。
 func TextZH(key Key) (string, bool) { s, ok := zh[key]; return s, ok }
 
+// MustTextZH 返回中文原文。键不在表里就 panic。
+// 给错误的 Error() 和要逐字保持中文的生产路径用：不跟当前语言走。
+func MustTextZH(key Key) string {
+	s, ok := zh[key]
+	if !ok {
+		panic("i18n: 缺中文 " + string(key))
+	}
+	return s
+}
+
 // TextEN 返回英文。测试用来核对键在不在。
 func TextEN(key Key) (string, bool) { s, ok := en[key]; return s, ok }
 

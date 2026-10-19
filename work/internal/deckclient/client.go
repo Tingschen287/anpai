@@ -6,11 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Client 经 unix socket 调 deckd。
@@ -41,12 +42,15 @@ func (c *Client) WithTimeout(d time.Duration) *Client {
 }
 
 // Error 是 deckd 返回的错误。
+// Code 和 Args 是给界面翻译用的。旧客户端只读 Message。
 type Error struct {
 	Status  int
 	Message string
+	Code    string
+	Args    []any
 }
 
-func (e *Error) Error() string { return fmt.Sprintf("deckd %d：%s", e.Status, e.Message) }
+func (e *Error) Error() string { return i18n.E("err.deckclient.status", e.Status, e.Message).Error() }
 
 // Do 发一个请求，把 JSON 结果解到 out（可为 nil）。
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
@@ -72,21 +76,25 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		dial := errors.As(err, &op) && op.Op == "dial"
 		if !dial && (errors.As(err, &ne) && ne.Timeout() || errors.Is(err, context.DeadlineExceeded)) {
 			// 已经连上、只是等答复超时：操作可能还在 deckd 里进行，不能当成没发生
-			return fmt.Errorf("deckd 在 %s 内没有答复（%w）：操作可能仍在进行，先用 deck agent list 核对，不要直接重试", c.hc.Timeout, err)
+			return i18n.E("err.deckclient.timeout", c.hc.Timeout, err)
 		}
-		return fmt.Errorf("连不上 deckd（%w）：先运行 deck daemon", err)
+		return i18n.E("err.deckclient.dial", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 300 {
 		var e struct {
 			Error string `json:"error"`
+			Code  string `json:"code"`
+			Args  []any  `json:"args"`
 		}
-		json.Unmarshal(data, &e)
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		_ = dec.Decode(&e)
 		if e.Error == "" {
 			e.Error = string(data)
 		}
-		return &Error{Status: resp.StatusCode, Message: e.Error}
+		return &Error{Status: resp.StatusCode, Message: e.Error, Code: e.Code, Args: e.Args}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)

@@ -2,7 +2,7 @@ package deckstore
 
 import (
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 
@@ -35,13 +35,13 @@ func validatePanels(ps []PanelDef) error {
 	seen := map[string]bool{}
 	for _, p := range ps {
 		if !idRe.MatchString(p.Name) || p.Command == "" {
-			return fmt.Errorf("面板 %q 不完整", p.Name)
+			return i18n.E("err.deckstore.validatepanels.1", p.Name)
 		}
 		if p.Region != "right" && p.Region != "bottom" {
-			return fmt.Errorf("面板 %s 的区域只能是 right 或 bottom", p.Name)
+			return i18n.E("err.deckstore.validatepanels.2", p.Name)
 		}
 		if seen[p.Name] {
-			return fmt.Errorf("面板 %s 重复", p.Name)
+			return i18n.E("err.deckstore.validatepanels.3", p.Name)
 		}
 		seen[p.Name] = true
 	}
@@ -65,7 +65,7 @@ func LoadPanels(cfgDir string) ([]PanelDef, error) {
 		Panels []PanelDef `yaml:"panels"`
 	}
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("panels.yaml 解析不了：%w", err)
+		return nil, i18n.E("err.deckstore.loadpanels.1", err)
 	}
 	return f.Panels, validatePanels(f.Panels)
 }
@@ -88,7 +88,7 @@ func (s *Store) SetPanel(name string, on bool) error {
 			}
 		}
 		if !found {
-			return nil, nil, fmt.Errorf("没有面板 %s", name)
+			return nil, nil, i18n.E("err.deckstore.storesetpanel.1", name)
 		}
 		s.panels = next
 		return func() error {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
@@ -26,16 +26,16 @@ import (
 // 边界：它挡得住经 Work Deck 登记的接管；别人不经 Work Deck 直接进入会话，要靠 arbiter 投递前的客户端探测。
 func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, message string) error {
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，无法投递消息")
+		return i18n.E("err.agentdeck.clientsendmessage.1")
 	}
 	release, err := p.Begin(sessionID)
 	if err != nil {
-		return fmt.Errorf("不投递：%w", err)
+		return i18n.E("err.agentdeck.clientsendmessage.2", err)
 	}
 	defer release()
 	// 只有空白也算空（n039 attempt 4 评审）：送出去对方照样不知道要做什么。
 	if strings.TrimSpace(message) == "" {
-		return fmt.Errorf("消息是空的，不投递：说不清要对方做什么，就别派这一趟")
+		return i18n.E("err.agentdeck.clientsendmessage.3")
 	}
 	// 默认行为是等对方的 agent 起来再发，这正是刚 launch 出来的会话需要的；
 	// 不等的话消息可能落在 CLI 还没就绪的窗口里。超时由 Client.Timeout 兜着。
@@ -50,15 +50,15 @@ func (c *Client) SendMessage(ctx context.Context, p lease.Permit, sessionID, mes
 // 与 SendMessage 一样必须带许可、先核对登记再调上游（TestEveryWriteIntoASessionNeedsAPermit）。
 func (c *Client) SendToMain(ctx context.Context, p lease.Permit, sessionID, message string) error {
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，无法投递消息")
+		return i18n.E("err.agentdeck.clientsendmessage.1")
 	}
 	release, err := p.Begin(sessionID)
 	if err != nil {
-		return fmt.Errorf("不投递：%w", err)
+		return i18n.E("err.agentdeck.clientsendmessage.2", err)
 	}
 	defer release()
 	if strings.TrimSpace(message) == "" {
-		return fmt.Errorf("消息是空的，不投递")
+		return i18n.E("err.agentdeck.clientsendtomain.1")
 	}
 	out, err := c.execWithStdin(ctx, strings.NewReader(message),
 		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", MainDeferTimeout)
@@ -74,21 +74,21 @@ const MainDeferTimeout = "10s"
 // 与 SendMessage 一样必须带许可、先核对登记再调上游（TestEveryWriteIntoASessionNeedsAPermit）。
 func (c *Client) SendIfIdle(ctx context.Context, p lease.Permit, sessionID, message string) error {
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，无法投递消息")
+		return i18n.E("err.agentdeck.clientsendmessage.1")
 	}
 	release, err := p.Begin(sessionID)
 	if err != nil {
-		return fmt.Errorf("不投递：%w", err)
+		return i18n.E("err.agentdeck.clientsendmessage.2", err)
 	}
 	defer release()
 	if strings.TrimSpace(message) == "" {
-		return fmt.Errorf("消息是空的，不投递")
+		return i18n.E("err.agentdeck.clientsendtomain.1")
 	}
 	out, err := c.execWithStdin(ctx, strings.NewReader(message),
 		"session", "send", sessionID, "--message-file", "-", "--json", "--defer-if-busy", "--defer-timeout", SubIdleCheck, "--timeout", SubReadyTimeout)
 	if err != nil && (errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || strings.Contains(err.Error(), "signal: killed")) {
 		// 上游没在时限内返回、被结束：可能已经打进去了（attempt 3 自查），按送达未确认，调用方不撤回代次
-		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: "上游没在时限内返回（" + err.Error() + "），话可能已经打进去"}
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: i18n.E("err.agentdeck.clientsendifidle.1", err).Error()}
 	}
 	return sendResult(sessionID, out, err, true)
 }
@@ -101,7 +101,7 @@ const SubReadyTimeout = "30s"
 const SubIdleCheck = "1s"
 
 // ErrTargetBusy：--defer-if-busy 等到时限对方还在忙，上游没有投递（session_cmd.go:2825、internal/send/deferbusy.go:80）。
-var ErrTargetBusy = errors.New("对方还在回答，这次没送（稍后再试）")
+var ErrTargetBusy = i18n.E("err.agentdeck.pkg.2")
 
 // deferBusyMarker 是上游 WaitUntilNotBusy 超时报错的前缀。
 const deferBusyMarker = "defer-if-busy: target still busy"
@@ -121,9 +121,9 @@ func sendResult(sessionID string, out []byte, err error, deferIfBusy bool) error
 		if jsonErr == nil && rep.Submitted != nil && *rep.Submitted {
 			return nil
 		}
-		detail := "上游成功退出，但回执没有证实提交"
+		detail := i18n.E("err.agentdeck.sendresult.2").Error()
 		if jsonErr == nil && rep.Delivery != "" {
-			detail += "（delivery=" + rep.Delivery + "）"
+			detail += i18n.E("err.agentdeck.sendresult.delivery", rep.Delivery).Error()
 		}
 		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: detail}
 	}
@@ -138,7 +138,7 @@ func sendResult(sessionID string, out []byte, err error, deferIfBusy bool) error
 	if jsonErr == nil && rep.Delivery == DeliveryTyped {
 		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: rep.Error, Reached: true}
 	}
-	return fmt.Errorf("向会话 %s 投递消息失败：%w", sessionID, err)
+	return i18n.E("err.agentdeck.sendresult.1", sessionID, err)
 }
 
 // DeliveryTyped 是上游 session send --json 的 delivery 取值之一：正文到了画面、提交没得到确认。
@@ -155,11 +155,13 @@ type ErrDeliveryUnconfirmed struct {
 	Reached   bool
 }
 
-func (e *ErrDeliveryUnconfirmed) Error() string {
+func (e *ErrDeliveryUnconfirmed) Error() string { return e.I18n().Error() }
+
+func (e *ErrDeliveryUnconfirmed) I18n() *i18n.Error {
 	if e.Reached {
-		return fmt.Sprintf("消息到了会话 %s 的画面，但上游没确认提交（%s）", e.SessionID, e.Detail)
+		return i18n.E("err.agentdeck.errdelivery.reached", e.SessionID, e.Detail)
 	}
-	return fmt.Sprintf("上游没证实消息到了会话 %s、也没证实提交（%s）", e.SessionID, e.Detail)
+	return i18n.E("err.agentdeck.errdelivery.missed", e.SessionID, e.Detail)
 }
 
 // IsDeliveryUnconfirmed 判断一个错误是不是「送达未确认」。

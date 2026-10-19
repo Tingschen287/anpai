@@ -3,7 +3,7 @@ package agentdeck
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
 	"strconv"
@@ -30,7 +30,7 @@ func ListTmuxPanes(ctx context.Context, socket string) ([]TmuxPane, error) {
 		if errors.As(err, &ee) && (strings.Contains(string(ee.Stderr), "no server running") || strings.Contains(string(ee.Stderr), "error connecting")) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("列 tmux 窗格失败（%s）：%w", socket, err)
+		return nil, i18n.E("err.agentdeck.listtmuxpanes.1", socket, err)
 	}
 	var panes []TmuxPane
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

@@ -1,7 +1,7 @@
 package deckstore
 
 import (
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"regexp"
 	"sort"
 	"time"
@@ -92,13 +92,13 @@ func (s *Store) CreateDecision(in NewDecision) (Decision, error) {
 	var out Decision
 	err := s.mutate(func() (func() error, []Event, error) {
 		if !kinds[in.Kind] {
-			return nil, nil, fmt.Errorf("不认识的决定类别 %q", in.Kind)
+			return nil, nil, i18n.E("err.deckstore.storecreatedecision.1", in.Kind)
 		}
 		if _, ok := s.settings.Project(in.Project); !ok && in.Project != "" {
-			return nil, nil, fmt.Errorf("没有项目 %s", in.Project)
+			return nil, nil, i18n.E("err.deckstore.storecreatedecision.2", in.Project)
 		}
 		if in.Summary == "" || in.CreatedBy == "" {
-			return nil, nil, fmt.Errorf("决定缺少摘要或创建者")
+			return nil, nil, i18n.E("err.deckstore.storecreatedecision.3")
 		}
 		opts := []string{}
 		seen := map[string]bool{}
@@ -146,14 +146,14 @@ var scopeKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 // 键只许小写字母开头的字母、数字与下划线，值限长、不许控制字符，疑似密钥直接拒（n050 评审 B7）。
 func checkScope(scope map[string]string) error {
 	if len(scope) > 32 {
-		return fmt.Errorf("scope 字段太多")
+		return i18n.E("err.deckstore.checkscope.1")
 	}
 	for k, v := range scope {
 		if !scopeKeyRe.MatchString(k) {
-			return fmt.Errorf("scope 的键 %q 不合规（小写字母开头，只含小写字母、数字、下划线）", k)
+			return i18n.E("err.deckstore.checkscope.2", k)
 		}
 		if len(v) > maxScopeValue || Clean(v, 0) != v {
-			return fmt.Errorf("scope 的 %s 含控制字符、疑似密钥或过长", k)
+			return i18n.E("err.deckstore.checkscope.3", k)
 		}
 	}
 	return nil
@@ -175,8 +175,10 @@ func (d *Decision) clone() Decision {
 // ErrVersion 表示回答时带的 version 已过时（别人先改了）。
 type ErrVersion struct{ Want, Have int }
 
-func (e *ErrVersion) Error() string {
-	return fmt.Sprintf("这个决定已经变了（你看到的是第 %d 版，现在是第 %d 版），请刷新后再答", e.Want, e.Have)
+func (e *ErrVersion) Error() string { return e.I18n().Error() }
+
+func (e *ErrVersion) I18n() *i18n.Error {
+	return i18n.E("err.deckstore.errversion", e.Want, e.Have)
 }
 
 // Answer 记录 owner 的回答。by 只能是 owner 界面的身份（调用方保证）；version 必须等于当前版本。
@@ -185,14 +187,14 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 	err := s.mutate(func() (func() error, []Event, error) {
 		d, ok := s.decs[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("没有决定 %s", id)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.1", id)
 		}
 		if s.expireLocked(d) {
 			out = d.clone()
-			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期，不能再答", id)
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, i18n.E("err.deckstore.storeanswer.2", id)
 		}
 		if d.State != StateOpen {
-			return nil, nil, fmt.Errorf("决定 %s 已是 %s，不能再答", id, d.State)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.3", id, d.State)
 		}
 		if d.Version != version {
 			return nil, nil, &ErrVersion{Want: version, Have: d.Version}
@@ -204,7 +206,7 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 			}
 		}
 		if !valid {
-			return nil, nil, fmt.Errorf("选项 %q 不在决定 %s 的选项里", option, id)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.4", option, id)
 		}
 		switch option {
 		case OptApprove:
@@ -231,20 +233,20 @@ func (s *Store) BeginExecute(id string, scopeNow map[string]string) (Decision, e
 	err := s.mutate(func() (func() error, []Event, error) {
 		d, ok := s.decs[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("没有决定 %s", id)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.1", id)
 		}
 		if s.expireLocked(d) {
 			out = d.clone()
-			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期", id)
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, i18n.E("err.deckstore.storebeginexecute.1", id)
 		}
 		if d.State != StateApproved {
-			return nil, nil, fmt.Errorf("决定 %s 是 %s，不能执行", id, d.State)
+			return nil, nil, i18n.E("err.deckstore.storebeginexecute.2", id, d.State)
 		}
 		if ScopeHash(scopeNow) != d.ScopeHash {
-			d.State, d.Result, d.UpdatedAt = StateStale, "执行时的请求与批准时不一致，不执行", s.now()
+			d.State, d.Result, d.UpdatedAt = StateStale, i18n.E("err.deckstore.storebeginexecute.4").Error(), s.now()
 			d.Version++
 			out = d.clone()
-			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 批准的范围与本次请求不一致，已作废", id)
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, i18n.E("err.deckstore.storebeginexecute.3", id)
 		}
 		d.State, d.UpdatedAt = StateExecuting, s.now()
 		d.Version++
@@ -258,15 +260,15 @@ func (s *Store) BeginExecute(id string, scopeNow map[string]string) (Decision, e
 // FinishExecute 记录执行结果：applied、failed 或 uncertain。
 func (s *Store) FinishExecute(id, state, result string) error {
 	if state != StateApplied && state != StateFailed && state != StateUncertain {
-		return fmt.Errorf("执行结果只能是 applied、failed、uncertain，不是 %q", state)
+		return i18n.E("err.deckstore.storefinishexecute.1", state)
 	}
 	return s.mutate(func() (func() error, []Event, error) {
 		d, ok := s.decs[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("没有决定 %s", id)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.1", id)
 		}
 		if d.State != StateExecuting {
-			return nil, nil, fmt.Errorf("决定 %s 不在执行中（%s）", id, d.State)
+			return nil, nil, i18n.E("err.deckstore.storefinishexecute.2", id, d.State)
 		}
 		d.State, d.Result, d.UpdatedAt = state, Clean(result, 400), s.now()
 		d.Version++
@@ -279,16 +281,16 @@ func (s *Store) Cancel(id, by string) error {
 	return s.mutate(func() (func() error, []Event, error) {
 		d, ok := s.decs[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("没有决定 %s", id)
+			return nil, nil, i18n.E("err.deckstore.storeanswer.1", id)
 		}
 		if d.CreatedBy != by {
-			return nil, nil, fmt.Errorf("只有创建者能撤回决定 %s", id)
+			return nil, nil, i18n.E("err.deckstore.storecancel.1", id)
 		}
 		if s.expireLocked(d) {
-			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, fmt.Errorf("决定 %s 已过期", id)
+			return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, i18n.E("err.deckstore.storebeginexecute.1", id)
 		}
 		if d.State != StateOpen {
-			return nil, nil, fmt.Errorf("决定 %s 已是 %s，不能撤回", id, d.State)
+			return nil, nil, i18n.E("err.deckstore.storecancel.2", id, d.State)
 		}
 		d.State, d.UpdatedAt = StateCancelled, s.now()
 		d.Version++
