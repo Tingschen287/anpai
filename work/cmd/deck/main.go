@@ -113,7 +113,7 @@ func panel(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("panel", flag.ExitOnError)
 	project := fs.String("project", "", "只看这个项目")
 	fs.Parse(args[1:])
-	c := deckclient.New(deckd.SocketPath(dirs))
+	c := deckclient.NewUI(deckd.SocketPath(dirs))
 	if args[0] == "quota" {
 		// 额度面板要在每个来源前贴 logo（sixel），用与侧栏同一套整屏帧画法（n056）
 		if err := deckui.RunQuota(c, func() string { return logo.CurrentMode(dirs.State) }); err != nil {
@@ -145,7 +145,7 @@ func ui(dirs deckstore.Dirs, which string, args []string) {
 	fs := flag.NewFlagSet(which, flag.ExitOnError)
 	layoutSock, _ := socketFlags(fs)
 	fs.Parse(args)
-	api := deckui.DeckAPI{C: deckclient.New(deckd.SocketPath(dirs))}
+	api := deckui.DeckAPI{C: deckclient.NewUI(deckd.SocketPath(dirs))}
 	var err error
 	if which == "sidebar" {
 		err = deckui.RunSidebar(api, *layoutSock, func() string { return logo.CurrentMode(dirs.State) })
@@ -170,7 +170,7 @@ func settings(dirs deckstore.Dirs, args []string) {
 		fmt.Println("设置没有问题：" + dirs.Config)
 		return
 	}
-	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: deckclient.New(deckd.SocketPath(dirs))}); err != nil {
+	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: deckclient.NewUI(deckd.SocketPath(dirs))}); err != nil {
 		fail("%v", err)
 	}
 }

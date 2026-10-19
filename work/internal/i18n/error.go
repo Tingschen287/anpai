@@ -9,10 +9,44 @@ import (
 	"strings"
 )
 
-// RedactMark 是落盘用的打码标记，5 个私用区字符，和中文「[已打码]」一样长。
-// 这样先替换再按字符截断，和以前直接写入中文记号的截断位置相同。
-// 渲染时换成当前语言的 err.deckstore.clean.1。Error() 永远换成中文。
+// RedactMark 是打码用的中性标记：5 个 Unicode 私用区字符，外部文本里不会自然出现，也不属于任何语言。
+// 它和中文「[已打码]」一样长，所以先打码再按字符截断，截断位置和以前直接写入中文记号时相同。
+//
+// 文字清洗（deckstore.Clean）打码时只写这个标记。存下来的文字、线路上的文字都带着它，
+// 在显示出口按语言换成记号：
+//   - 给 owner 看的出口：Present，当前语言（中文「[已打码]」、英文「[redacted]」）。
+//   - 给模型读的、落盘记账的、日志与 Error()：PresentZH，永远是中文「[已打码]」，和改码之前逐字一样。
+//
+// 外部原文里字面写着的「[已打码]」不是标记，原样保留。
+// 清洗时输入里本来就有的私用区字符先用 Neutralize 去掉，外部文字伪造不出标记。
 const RedactMark = "\uE000\uE001\uE002\uE003\uE004"
+
+// MarkHeader 是请求头：界面（deckclient.NewUI）带上它，表示自己会把中性标记翻成当前语言，
+// deckd 才在线路上留着标记。没有这个头的客户端（deck agent 命令、模型、旧工具）拿到的永远是中文「[已打码]」。
+const (
+	MarkHeader  = "X-Deck-Marks"
+	MarkNeutral = "neutral"
+)
+
+// Neutralize 把文字里本来就有的标记字符换成 U+FFFD。外部文字因此伪造不出中性标记。
+// 只处理标记用到的 5 个字符，别的私用区字符不动。
+func Neutralize(s string) string {
+	if !strings.ContainsAny(s, RedactMark) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= '\uE000' && r <= '\uE004' {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
+}
+
+// HasMark 说明文字里有没有中性标记（含被截断的残缺标记）。
+func HasMark(s string) bool { return strings.ContainsAny(s, RedactMark) }
+
+// PresentZH 把中性标记换成中文「[已打码]」，不看当前语言。给模型、记账、日志、Error() 用。
+func PresentZH(s string) string { return revealRedactZH(s) }
 
 // redactKey 是打码记号的文字键。写在这里，避免 Error() 里出现非常量键。
 const redactKey = Key("err.deckstore.clean.1")
@@ -29,30 +63,39 @@ func revealRedactZH(s string) string {
 	return swapMark(s, phrase)
 }
 
-// swapMark 把标记换成 phrase。参数先打码、后按字符截断，标记可能只剩前几个字符（接着可能是「…」）。
-// 截断只发生在末尾，所以只认末尾的残缺标记，换成 phrase 的前几个字符：
+// swapMark 把标记换成 phrase。清洗先打码、后按字符截断，标记可能只剩前几个字符（截断处接着是「…」）。
+// 残缺的标记是完整标记的前 k 个字符（1 到 4 个），换成 phrase 的前 k 个字符：
 // 中文就是「[已」，和以前直接写入中文记号再截断的结果逐字一样。
+// 完整标记先换掉，剩下的才按残缺处理，所以不看位置，字符串拼接之后也一样。
+// 换完以后仍剩下的标记字符（不成形的，只能是外部伪造）换成 U+FFFD，不让私用区字符漏出去。
 func swapMark(s, phrase string) string {
 	if !strings.ContainsAny(s, RedactMark) {
 		return s
 	}
 	s = strings.ReplaceAll(s, RedactMark, phrase)
-	body, tail := s, ""
-	if strings.HasSuffix(body, "…") {
-		body, tail = strings.TrimSuffix(body, "…"), "…"
+	if !strings.ContainsAny(s, RedactMark) {
+		return s
 	}
 	mark, ph := []rune(RedactMark), []rune(phrase)
-	b := []rune(body)
-	for k := len(mark) - 1; k >= 1; k-- {
-		if len(b) >= k && string(b[len(b)-k:]) == string(mark[:k]) {
-			cut := k
-			if cut > len(ph) {
-				cut = len(ph)
-			}
-			return string(b[:len(b)-k]) + string(ph[:cut]) + tail
+	in, out := []rune(s), make([]rune, 0, len(s))
+	for i := 0; i < len(in); {
+		if in[i] != mark[0] {
+			out = append(out, in[i])
+			i++
+			continue
 		}
+		k := 1
+		for k < len(mark) && i+k < len(in) && in[i+k] == mark[k] {
+			k++
+		}
+		cut := k
+		if cut > len(ph) {
+			cut = len(ph)
+		}
+		out = append(out, ph[:cut]...)
+		i += k
 	}
-	return s
+	return Neutralize(string(out))
 }
 
 // Nest 是嵌进参数里的另一条带码错误。
@@ -63,6 +106,9 @@ type Nest struct {
 	Error string `json:"error,omitempty"`
 }
 
+// String 是中文原文。fmt 把嵌套码放进 Error() 时用它，中文原文因此不变。
+func (n Nest) String() string { return n.Error }
+
 // List 是一组按语言拼接的参数。String 用中文分隔符，放进 Error() 后中文原文不变。
 // 线路上它是对象。界面按当前语言的分隔符再拼（中文「、」或「；」，英文 ", " 或 "; "）。
 type List struct {
@@ -70,7 +116,7 @@ type List struct {
 	Items []any `json:"items"`
 }
 
-// ListOf 按分隔符键拼一组参数。sep 用 sep.list 或 sep.semi。
+// ListOf 按分隔符键拼一组参数。sep 用 sep.list、sep.semi 或 sep.nl。
 func ListOf(sep Key, items ...any) List {
 	return List{Sep: sep, Items: append([]any(nil), items...)}
 }
@@ -116,6 +162,9 @@ type Error struct {
 
 // E 造一条带码错误。参数里的 error 可以再带码，Wire 会嵌进去。
 func E(key Key, args ...any) *Error {
+	if h := ArgHook; h != nil {
+		h(key, args)
+	}
 	return &Error{Key: key, Args: args}
 }
 
@@ -136,8 +185,17 @@ func (e *Error) Error() string {
 }
 
 // AsCoded 取出错误自己带的码。没有码就返回 nil。
+// 外层没有码就沿 %w 往下找，和 Wire 的解包行为一致。
 // 界面参数要嵌套码时用它，不要先调 Error() 把中文压成字符串。
-func AsCoded(err error) *Error { return codedOf(err) }
+func AsCoded(err error) *Error {
+	for err != nil {
+		if e := codedOf(err); e != nil {
+			return e
+		}
+		err = errors.Unwrap(err)
+	}
+	return nil
+}
 
 // Unwrap 只解开格式串里的一个 %w，和 fmt.Errorf 一样。
 // 多个 %w 时 fmt 只提供 Unwrap() []error，errors.Unwrap 得到 nil。这种情况靠 Is 和 As。
@@ -226,6 +284,8 @@ func wireArg(a any) any {
 		return v
 	case *Error:
 		return nestOf(v)
+	case Nest:
+		return Nest{Code: v.Code, Args: WireArgs(v.Args), Error: v.Error}
 	case List:
 		items := make([]any, len(v.Items))
 		for i, it := range v.Items {
@@ -260,8 +320,16 @@ func wireArg(a any) any {
 		return v
 	}
 	if err, ok := a.(error); ok {
-		if e := codedOf(err); e != nil && len(e.Key) > 0 {
+		if e := AsCoded(err); e != nil && len(e.Key) > 0 {
 			return nestOf(e)
+		}
+		// errors.Join 的结果：Error() 是各条用换行连起来。拆成列表，每一条各自带码，英文界面才没有中文标点残留。
+		if kids := joinedErrors(err); kids != nil {
+			items := make([]any, len(kids))
+			for i, k := range kids {
+				items[i] = wireArg(k)
+			}
+			return ListOf("sep.nl", items...)
 		}
 		return err.Error()
 	}
@@ -285,6 +353,17 @@ func wireArg(a any) any {
 		return rv.Float()
 	}
 	return fmt.Sprint(a)
+}
+
+// joinedErrors 取 errors.Join 结果里的各条。别的多重包装（fmt.Errorf 带多个 %w）的 Error() 里有拼接文字，不当列表。
+func joinedErrors(err error) []error {
+	if reflect.TypeOf(err).String() != "*errors.joinError" {
+		return nil
+	}
+	if u, ok := err.(interface{ Unwrap() []error }); ok {
+		return u.Unwrap()
+	}
+	return nil
 }
 
 func nestOf(e *Error) Nest {
@@ -324,7 +403,7 @@ func NestFromMap(m map[string]any) (Nest, bool) {
 	return Nest{Code: code, Args: args, Error: fallback}, true
 }
 
-// ListFromMap 认出按语言拼接的列表。sep 只认 sep.list 和 sep.semi。
+// ListFromMap 认出按语言拼接的列表。sep 只认 sep.list、sep.semi 和 sep.nl。
 func ListFromMap(m map[string]any) (List, bool) {
 	if m == nil {
 		return List{}, false
@@ -345,6 +424,8 @@ func ListFromMap(m map[string]any) (List, bool) {
 		sepKey = "sep.list"
 	case "sep.semi":
 		sepKey = "sep.semi"
+	case "sep.nl":
+		sepKey = "sep.nl"
 	default:
 		return List{}, false
 	}

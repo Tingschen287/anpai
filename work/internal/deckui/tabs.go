@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 )
 
@@ -86,7 +87,7 @@ func (t *Tabs) Render(w int) Frame {
 		x, ok := t.find(id)
 		title, tool := sanitize(id), ""
 		if ok {
-			title, tool = sanitize(x.Title), x.Tool
+			title, tool = sanitize(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title)), x.Tool
 		}
 		mark := ""
 		if ok && t.Data.IsTaken(x) {

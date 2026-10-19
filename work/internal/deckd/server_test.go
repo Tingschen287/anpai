@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 type fixture struct {
@@ -31,6 +32,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	wirecheck.Track(t) // 运行时保险按测试名归属响应和通知
 	root := t.TempDir()
 	dirs := deckstore.Dirs{Config: filepath.Join(root, "cfg"), State: filepath.Join(root, "state")}
 	st, err := deckstore.Open(dirs)

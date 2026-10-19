@@ -10,6 +10,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 func TestN060DeliveryDetailIsNestedCode(t *testing.T) {
@@ -30,6 +31,7 @@ func TestN060DeliveryDetailIsNestedCode(t *testing.T) {
 		t.Fatalf("英文应翻译本地详情：%q", en)
 	}
 
+	wirecheck.External("目录信任确认") // 夹具里上游自己说的话，恰好和本项目一条码表文字相同
 	raw := sendResult("s1", []byte(`{"delivery":"typed","error":"目录信任确认"}`), errors.New("upstream"), false)
 	if !strings.Contains(raw.Error(), "目录信任确认") {
 		t.Fatalf("外部原文应原样留下：%q", raw.Error())

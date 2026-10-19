@@ -216,8 +216,10 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 		}
 		valid := false
 		for _, o := range d.Options {
-			if o == option {
+			// 选项里存的是带中性打码标记的文字。没带 i18n.MarkHeader 的客户端看到的是中文记号，两种写法都认，按存的写法记。
+			if o == option || i18n.PresentZH(o) == option {
 				valid = true
+				option = o
 			}
 		}
 		if !valid {
@@ -285,7 +287,8 @@ func (s *Store) FinishExecute(id, state, result string) error {
 		if d.State != StateExecuting {
 			return nil, nil, i18n.E("err.deckstore.storefinishexecute.2", id, d.State)
 		}
-		d.State, d.Result, d.UpdatedAt = state, Clean(result, 400), s.now()
+		// 决定的结果是记账用的中文，不给界面显示：标记在这里换成中文记号，和改码之前逐字一样。
+		d.State, d.Result, d.UpdatedAt = state, i18n.PresentZH(Tidy(result, 400)), s.now()
 		d.Version++
 		return s.saveDecisions, []Event{{Kind: "decision", Project: d.Project, ID: d.ID}}, nil
 	})

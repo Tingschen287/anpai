@@ -244,7 +244,7 @@ func (s *Server) markAwaiting(x deckstore.Session, key, id string, note *i18n.Er
 	}
 	s.store.SetAwaitingOwner(key, text)
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, text)
-	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, note), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), note), "deckd")
 	if !open {
 		if x.Role == "main" && s.view != nil {
 			s.view.OpenMainInput(id)
@@ -285,7 +285,7 @@ func (s *Server) finishUncertain(x deckstore.Session, key string) {
 		s.store.FinishStart(key)
 	}
 	s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), coded), "deckd")
 }
 
 // waitForComposer 是启动期的后台等待：等启动确认消失、认出这个 CLI 的空输入框、画面稳定，再调 ready（返回 true 表示结束）。
@@ -314,7 +314,7 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 				why := coded.Error()
 				s.store.FinishStart(key)
 				s.store.SetSessionStatus(key, deckstore.StatusStopped, why)
-				s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
+				s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), coded), "deckd")
 				return
 			}
 		}
@@ -329,7 +329,7 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 			}
 			why := coded.Error()
 			s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), coded), "deckd")
 			told, poll = true, 10*tm.poll
 		}
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
@@ -398,16 +398,16 @@ func (s *Server) sendFirstBrief(ctx context.Context, x deckstore.Session, key, i
 	switch {
 	case err == nil:
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, "")
-		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serversendfirstbrief.1", x.Title), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serversendfirstbrief.1", x.TitleArg()), "deckd")
 	case agentdeck.IsDeliveryUnconfirmed(err):
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, i18n.E("err.deckd.serversendfirstbrief.2").Error())
-		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.TitleArg()), "deckd")
 	default:
 		coded := i18n.E("err.deckd.serversendfirstbrief.3", deckstore.Arg(err, 200))
 		why := coded.Error()
 		s.store.FinishStart(key)
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, why)
-		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), coded), "deckd")
 	}
 	return true
 }
@@ -451,7 +451,7 @@ func (s *Server) ResumeAwaiting() {
 			why := coded.Error()
 			s.store.SetAwaitingOwner(x.Key, why)
 			s.store.SetSessionStatus(x.Key, deckstore.StatusRunning, why)
-			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, coded), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.TitleArg(), coded), "deckd")
 			continue
 		}
 		permit, err := s.agents.leases.Manual(x.AgentDeckID)

@@ -29,23 +29,30 @@ var (
 	}
 )
 
-// Clean 返回可以安全显示的文本：去控制序列、打码、限长（按字符数，超出加「…」）。
-// 打码记号是中文「[已打码]」，和 d36dd20 逐字一样：这条文本落盘后、给模型读、中文界面显示，都不用再翻译。
-// 要作为 i18n 参数落盘的文字不走这里，走 ArgText / CleanArgs，它们存语言无关的标记。
-func Clean(s string, max int) string {
-	return clean(s, max, i18n.E("err.deckstore.clean.1").Error())
-}
+// Clean 清洗外部来的文字：去控制序列、打码、限长（按字符数，超出加「…」）。
+// 打码只写中性标记 i18n.RedactMark，不写任何语言的记号；输入里本来就有的标记字符先被 Neutralize 去掉，伪造不出来。
+// 清洗过的文字落盘、上线路、进参数都带着标记，显示出口再翻译：
+//   - 给 owner 看：Display（或 i18n.Present），按当前语言。
+//   - 给模型读、落盘记账、日志、Error()：i18n.PresentZH，中文「[已打码]」，和改码之前逐字一样。
+//
+// 外部原文里字面写着的「[已打码]」不是标记，原样保留。
+func Clean(s string, max int) string { return clean(i18n.Neutralize(s), max) }
 
-// ArgText 是 Clean 的参数版：打码处存语言无关的 i18n.RedactMark，渲染时再换成当前语言的记号。
-// 凡是把文字放进 i18n.E 的参数，都用它，不用 Clean。
-// 已经带中文「[已打码]」的字符串（先跑过 Clean 的）也一并换成标记，英文才不会留下中文。
-func ArgText(s string, max int) string {
-	return clean(strings.ReplaceAll(s, zhRedact(), i18n.RedactMark), max, i18n.RedactMark)
-}
+// ArgText 是放进 i18n.E 参数的文字的清洗：规则和 Clean 一样，打码存中性标记，外部原文里字面的「[已打码]」不被改写。
+// 参数常常是已经清洗过的文字（Arg 的结果、存下来的汇报），所以和 Tidy 一样不去掉里面的标记，免得二次清洗把标记抹掉。
+// 还没清洗过的外部文字走 Clean 或 Arg。
+func ArgText(s string, max int) string { return Tidy(s, max) }
 
-func zhRedact() string { return i18n.E("err.deckstore.clean.1").Error() }
+// Tidy 是对已经清洗过的文字再清洗一遍：规则和 Clean 一样，但不去掉里面的标记。
+// 显示出口、再次限长时用它；还没清洗过的外部文字用 Clean。
+func Tidy(s string, max int) string { return clean(s, max) }
 
-func clean(s string, max int, mark string) string {
+// Display 是给 owner 看的出口：Tidy 之后把标记换成当前语言的记号。
+// 界面（deckui、panels、layout、cmd/deck）显示文字前都走它，不直接调 Clean。
+func Display(s string, max int) string { return i18n.Present(Tidy(s, max)) }
+
+func clean(s string, max int) string {
+	mark := i18n.RedactMark
 	s = strings.ToValidUTF8(s, "�")
 	s = oscRe.ReplaceAllString(s, "")
 	s = strRe.ReplaceAllString(s, "")
@@ -69,7 +76,7 @@ func clean(s string, max int, mark string) string {
 }
 
 // RedactLabel 是当前语言的打码记号：中文「[已打码]」，英文「[redacted]」。
-// 参数里落盘的是 i18n.RedactMark，显示时 i18n.Present 换成它。
+// 存下来的文字里是 i18n.RedactMark，显示时 i18n.Present 换成它。
 func RedactLabel() string { return i18n.T("err.deckstore.clean.1") }
 
 // Clip 只按字符数截断，超出加「…」。不再去控制字符、不再打码。
@@ -97,9 +104,9 @@ func CleanArgs(args []any, max int) []any {
 func cleanArg(a any, max int) any {
 	switch v := a.(type) {
 	case string:
-		return ArgText(v, max)
+		return Tidy(v, max)
 	case i18n.Nest:
-		v.Error = Clean(v.Error, max)
+		v.Error = Tidy(v.Error, max)
 		v.Args = CleanArgs(v.Args, max)
 		return v
 	case i18n.List:
@@ -135,10 +142,11 @@ func Arg(err error, max int) any {
 	if err == nil {
 		return ""
 	}
-	shown := Clean(err.Error(), max)
+	// Error() 永远是中文：清洗出来的标记换成中文记号，外壳的 Error() 才和改码之前逐字一样。
+	shown := i18n.PresentZH(Clean(err.Error(), max))
 	e := i18n.AsCoded(err)
 	if e == nil {
-		return ArgText(err.Error(), max)
+		return Clean(err.Error(), max) // 没有码的是外部原文：第一次清洗，顺带去掉伪造的标记
 	}
 	wire := scrubCoded(e, max)
 	if wire.Error() == shown {
@@ -199,7 +207,7 @@ func scrubOne(a any, max int) (any, bool) {
 		return n, n != v
 	case i18n.Nest:
 		n := v
-		n.Error = Clean(v.Error, max)
+		n.Error = Tidy(v.Error, max)
 		n.Args = CleanArgs(v.Args, max)
 		return n, !reflect.DeepEqual(n, v)
 	case i18n.List:
@@ -210,7 +218,7 @@ func scrubOne(a any, max int) (any, bool) {
 		if e := i18n.AsCoded(v); e != nil {
 			return scrubOne(e, max)
 		}
-		c := ArgText(v.Error(), max)
+		c := Clean(v.Error(), max)
 		return c, true
 	default:
 		return a, false

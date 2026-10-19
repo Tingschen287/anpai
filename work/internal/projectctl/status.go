@@ -2,12 +2,13 @@ package projectctl
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Projection 是 PROJECT-STATUS.md 里能读出来的东西。
@@ -50,7 +51,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 		return Projection{
 			GeneratedAt: Unknown[time.Time]("读不到状态投影 PROJECT-STATUS.md"),
 			Health:      Unknown[string]("读不到状态投影 PROJECT-STATUS.md"),
-		}, fmt.Errorf("读不到 %s：%w", path, err)
+		}, i18n.E("err.projectctl.status.read", path, err)
 	}
 	defer f.Close()
 
@@ -169,7 +170,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return p, fmt.Errorf("读 %s 时出错：%w", path, err)
+		return p, i18n.E("err.projectctl.status.scan", path, err)
 	}
 	return p, nil
 }

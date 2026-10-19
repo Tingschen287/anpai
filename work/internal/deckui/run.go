@@ -92,13 +92,13 @@ func startMainText(project string, r StartMainResult, err error) (text string, o
 		if r.NoteCode != "" {
 			note = deckclient.Text(r.NoteCode, r.NoteArgs, r.Note)
 		}
-		return oneLine(deckstore.Clean(T("main.start.note", project, note), 160)), true
+		return oneLine(deckstore.Display(T("main.start.note", project, note), 160)), true
 	}
 	return T("main.start.ok", project), true
 }
 
 // errText 把错误清洗成一行可显示的文字。中文仍是原文。英文按错误码翻译。
-func errText(err error) string { return oneLine(deckstore.Clean(deckclient.Show(err), 120)) }
+func errText(err error) string { return oneLine(deckstore.Display(deckclient.Show(err), 120)) }
 
 type driver struct {
 	old    *term.State

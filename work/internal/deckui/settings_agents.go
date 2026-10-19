@@ -115,7 +115,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		}
 		if msg.err != nil {
 			if asking {
-				in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
+				in.note = T("input.listfail", oneLine(deckstore.Display(errLong(msg.err), textCap)))
 			}
 			return nil
 		}
@@ -452,12 +452,12 @@ func (m *Settings) msgFoot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr, msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
+		out = append(out, " "+oneLine(deckstore.Display(m.msg, msgCap)))
 	}
 	return m.wrapFoot(out)
 }
@@ -590,7 +590,7 @@ func (m *Settings) inputView() string {
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + caretMark + "\n")
 	if in.note != "" {
-		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, msgCap))))
+		b.WriteString(m.note(oneLine(deckstore.Display(in.note, msgCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {

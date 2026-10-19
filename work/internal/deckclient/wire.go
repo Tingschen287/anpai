@@ -13,7 +13,10 @@ import (
 // Show 是界面上显示的一句错误。
 // 中文用 err.Error() 的原文。英文在码对得上时用译文。
 // HTTP 错误的「deckd 状态码：」前缀在英文里一并翻译。
-func Show(err error) string {
+// 文字里的中性打码标记按当前语言换成记号。
+func Show(err error) string { return i18n.Present(show(err)) }
+
+func show(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -23,7 +26,8 @@ func Show(err error) string {
 		if de.Code != "" {
 			msg = Text(de.Code, de.Args, de.Message)
 		}
-		if i18n.Lang() == i18n.EN && de.Code != "" {
+		// 没有码的 HTTP 错误（上游原文）在英文里也翻前缀：「deckd 502: …」，不留中文冒号
+		if i18n.Lang() == i18n.EN {
 			return i18n.T("err.deckclient.status", de.Status, msg)
 		}
 		return de.Error()
@@ -39,10 +43,11 @@ func Show(err error) string {
 // 对不上就返回 fallback（原来的 error 文字），不显示键名，并记一次缺键。
 // 中文界面也走这次校验，但显示仍用 fallback，保证和改码之前逐字一样。
 // 这是全模块唯一一处把非常量字符串转成 i18n.Key 的地方。
+// 返回前把文字里的中性打码标记（兜底文字里可能有）换成当前语言的记号。
 func Text(code string, args []any, fallback string) string {
 	rendered, ok := renderCoded(code, args, 0)
 	if !ok || i18n.Lang() != i18n.EN {
-		return fallback
+		return i18n.Present(fallback)
 	}
 	return rendered
 }
@@ -147,7 +152,7 @@ func renderNest(n i18n.Nest, depth int) any {
 		return s
 	}
 	if n.Error != "" {
-		return n.Error
+		return i18n.Present(n.Error)
 	}
 	return n.Code
 }

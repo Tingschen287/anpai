@@ -10,6 +10,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 // n051 自查：Graph 通道与普通通道共用准入；会话起来并核过之后才开一轮，开不成就停掉刚起的会话。
@@ -81,6 +82,7 @@ func TestGraphChannelStartsAfterLaunchAndBindsAttempt(t *testing.T) {
 func TestGraphChannelSharesAdmission(t *testing.T) {
 	w, g := graphWorld(t)
 	// bypass 硬拒绝
+	wirecheck.External("上游会加 --dangerously-skip-permissions") // 夹具里上游配置核对给的原文
 	w.cfgBypass = map[string]error{"claude": errors.New("上游会加 --dangerously-skip-permissions")}
 	if code, _ := w.do("main", "POST", "/v1/agents", spawnGraphJSON("balanced", "a", "t", "g3", "/tmp/alpha", "n099_x", "claude", "claude-sonnet-5-5")); code != 400 {
 		t.Fatalf("Graph 通道同样硬拒绝绕过：%d", code)

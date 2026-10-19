@@ -835,10 +835,10 @@ var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 
 // sanitizeFull 是设置界面显示 owner 的数据（名字、模型 id、目录、路径、清单）用的清理：与侧栏的 sanitize 一样去控制字符、打码，
 // 但不按 80 个字截短，长的交给出口折行显示全（n059 自查 4：模型 id 可到 128 字、目录与清单更长，按 80 截就看不全）。
-func sanitizeFull(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
+func sanitizeFull(s string) string { return oneLine(deckstore.Display(strings.TrimSpace(s), 1024)) }
 
 // errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。
-func errLong(err error) string { return oneLine(deckstore.Clean(deckclient.Show(err), textCap)) }
+func errLong(err error) string { return oneLine(deckstore.Display(deckclient.Show(err), textCap)) }
 
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
 func (m *Settings) wrap(s string, lead int) []string {
@@ -1135,12 +1135,12 @@ func (m *Settings) foot() []string {
 	case m.saving || (m.dirty && m.saveErr == ""):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
 	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr, msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.saved")+reset)
 	}
 	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
+		out = append(out, " "+oneLine(deckstore.Display(m.msg, msgCap)))
 	}
 	if m.height <= 0 || m.height >= 13 {
 		if h := m.rowHelp(); h != "" {

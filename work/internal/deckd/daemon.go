@@ -116,7 +116,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 				return viewstate.Target{}, false
 			}
 			return viewstate.Target{Session: x.AgentDeckID, Tmux: x.TmuxSession, Role: x.Role, BriefConfirmed: x.BriefConfirmed,
-				AwaitingOwner: x.AwaitingOwner != "", Title: x.Title}, true
+				AwaitingOwner: x.AwaitingOwner != "", Title: x.Title, TitleCode: x.TitleCode, TitleArgs: []any(x.TitleArgs)}, true
 		}
 		notify := func(n *i18n.Error) error {
 			if n == nil {
@@ -213,16 +213,20 @@ type Progress struct {
 	Unknown       int            `json:"unknown"`
 	Budgets       []BudgetView   `json:"budgets"`
 	Problems      []string       `json:"problems,omitempty"`
-	TakenAt       time.Time      `json:"taken_at"`
+	// ProblemsCoded 和 Problems 一一对应：能翻译的是嵌套码，Problems 仍是中文原文。没有码的那一条 Code 为空。
+	ProblemsCoded []i18n.Nest `json:"problems_coded,omitempty"`
+	TakenAt       time.Time   `json:"taken_at"`
 }
 
 // BudgetView 是一行预算；读不到的维度 Used/Limit 为 nil，并给出原因。
 type BudgetView struct {
-	Label  string   `json:"label"`
-	Used   *float64 `json:"used"`
-	Limit  *float64 `json:"limit"`
-	Unit   string   `json:"unit"`
-	Reason string   `json:"reason,omitempty"`
+	Label string   `json:"label"`
+	Used  *float64 `json:"used"`
+	Limit *float64 `json:"limit"`
+	Unit  string   `json:"unit"`
+	// UnitKey 是单位的语言无关写法（round、call、hour），界面按语言翻译；Unit 仍是中文原文。
+	UnitKey string `json:"unit_key,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // graphProgress 用 projectctl 的快速快照读进度，只走只读命令。
@@ -231,6 +235,10 @@ func graphProgress(script string) ProgressFunc {
 		snap := projectctl.NewReader(p.GraphRoot, script).FastSnapshot(ctx)
 		counts, unknown := snap.Counts()
 		out := Progress{Project: p.ID, Graph: true, Counts: map[string]int{}, Unknown: unknown, Problems: snap.Problems, TakenAt: snap.TakenAt}
+		for _, e := range snap.ProblemErrs {
+			n, _ := i18n.WireArgs([]any{e})[0].(i18n.Nest)
+			out.ProblemsCoded = append(out.ProblemsCoded, n)
+		}
 		for st, n := range counts {
 			out.Counts[string(st)] = n
 		}
@@ -241,7 +249,7 @@ func graphProgress(script string) ProgressFunc {
 			out.Health = v
 		}
 		for _, b := range snap.Budgets {
-			bv := BudgetView{Label: b.Label, Unit: b.Unit}
+			bv := BudgetView{Label: b.Label, Unit: b.Unit, UnitKey: b.UnitKey}
 			if v, ok := b.Used.Get(); ok {
 				bv.Used = &v
 			} else {

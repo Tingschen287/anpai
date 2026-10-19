@@ -121,8 +121,9 @@ func TestN060StopReasonKeepsCodeWhenTruncated(t *testing.T) {
 	}
 	i18n.SetLang(i18n.EN)
 	en := deckclient.Text(c, args, n.Error())
-	if strings.Contains(en, "…") && hasHan(strings.NewReplacer("标题", "", "子 agent", "").Replace(en)) {
-		t.Fatalf("英文里不应有截断后的中文：%q", en)
+	// 不以「有省略号」为前提：把固定的用户数据（标题、名字）剔除后，英文里一个中文字符都不该有。
+	if hasHan(strings.NewReplacer("标题", "", "子 agent", "").Replace(en)) {
+		t.Fatalf("英文里不应有中文：%q", en)
 	}
 	// 外部原文（字符串）仍是字符串，标记换成语言无关的记号。
 	i18n.SetLang(i18n.ZH)

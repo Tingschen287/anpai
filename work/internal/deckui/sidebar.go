@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
@@ -350,7 +351,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 				bg = "\x1b[48;5;236m"
 			}
 			lg := s.logoLines(x.Tool)
-			title := sanitize(x.Title)
+			title := sanitize(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title))
 			if x.Role == "main" {
 				title = "\x1b[38;5;220m★\x1b[0m" + bg + " " + title
 			}
@@ -446,6 +447,6 @@ func wrapLines(text string, w int, color string) []string {
 
 // sanitize 去掉会话标题里的控制字符与疑似密钥（标题来自模型，可能夹带转义序列），
 // 并压成一行：Clean 为多行报告保留换行与制表符，单行字段里它们会挪动行列、错开点击区域。
-func sanitize(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 80)) }
+func sanitize(s string) string { return oneLine(deckstore.Display(strings.TrimSpace(s), 80)) }
 
 func oneLine(s string) string { return strings.NewReplacer("\n", " ", "\t", " ").Replace(s) }

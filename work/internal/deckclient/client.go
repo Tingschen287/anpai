@@ -18,6 +18,8 @@ import (
 type Client struct {
 	hc *http.Client
 	tr http.RoundTripper
+	// neutral 为真：请求带 i18n.MarkHeader，deckd 在线路上留着中性打码标记，界面按当前语言翻译。
+	neutral bool
 	// Socket 是 deckd 的 unix socket 路径（deck center 的栅栏据此找到同目录的单实例锁）。
 	Socket string
 }
@@ -30,6 +32,14 @@ func New(socket string) *Client {
 	return &Client{hc: &http.Client{Transport: tr, Timeout: DefaultTimeout}, tr: tr, Socket: socket}
 }
 
+// NewUI 建给界面用的客户端。界面会把线路上的中性打码标记按当前语言翻成「[已打码]」或「[redacted]」，
+// 所以请求带上 i18n.MarkHeader。deck agent 命令、模型、其他工具用 New：deckd 给它们的永远是中文「[已打码]」。
+func NewUI(socket string) *Client {
+	c := New(socket)
+	c.neutral = true
+	return c
+}
+
 // DefaultTimeout 是一般请求等 deckd 答复的上限。
 const DefaultTimeout = 30 * time.Second
 
@@ -38,7 +48,7 @@ const LongTimeout = 5 * time.Minute
 
 // WithTimeout 返回一个等答复上限为 d 的副本（同一个 socket 与连接池）。
 func (c *Client) WithTimeout(d time.Duration) *Client {
-	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket}
+	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket, neutral: c.neutral}
 }
 
 // Error 是 deckd 返回的错误。
@@ -68,6 +78,9 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.neutral {
+		req.Header.Set(i18n.MarkHeader, i18n.MarkNeutral)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {

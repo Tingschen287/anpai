@@ -47,16 +47,16 @@ type Node struct {
 	OwnerRole  string
 	DependsOn  []string
 	// 这个节点对评审的要求，派评审时照着它来。
-	ReviewRequired      bool
-	ReviewerRole        string
-	ReviewRouteClass    string
-	ReviewIndependent   bool
+	ReviewRequired    bool
+	ReviewerRole      string
+	ReviewRouteClass  string
+	ReviewIndependent bool
 
 	State Value[State]
 
 	// 下面几项只有投影里才有。
-	Attempt        Value[int]
-	Actor          Value[string]
+	Attempt Value[int]
+	Actor   Value[string]
 	// 本次 attempt 的开工时间，以及到取数为止走了多久。
 	StartedAt      Value[time.Time]
 	Elapsed        Value[time.Duration]
@@ -75,6 +75,8 @@ type BudgetLine struct {
 	Limit Value[float64]
 	// 单位，例如「次」「小时」。
 	Unit string
+	// UnitKey 是单位的语言无关写法（round、call、hour，没有单位为空），界面按语言翻译；Unit 仍是中文原文。
+	UnitKey string
 }
 
 // ChainStatus 是账本自身的体检结果，来自 verify-chain。
@@ -116,11 +118,19 @@ type Snapshot struct {
 	Nodes   []Node
 	Budgets []BudgetLine
 
-	Chain     ChainStatus
-	Fresh     Freshness
-	TakenAt   time.Time
+	Chain   ChainStatus
+	Fresh   Freshness
+	TakenAt time.Time
 	// 取数过程中出的问题，逐条显示，不吞。
 	Problems []string
+	// ProblemErrs 和 Problems 一一对应：带码的错误，界面按码翻译；Problems 仍是中文原文。
+	ProblemErrs []error
+}
+
+// problem 记一条取数问题：文字给旧界面，错误给带码的界面。
+func (s *Snapshot) problem(err error) {
+	s.Problems = append(s.Problems, err.Error())
+	s.ProblemErrs = append(s.ProblemErrs, err)
 }
 
 // Counts 按状态统计节点数。状态未知的节点单独计入 unknown 桶。

@@ -69,7 +69,7 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !b.Done {
-		n, err := s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.3", x.Title, b.Text), x.Key)
+		n, err := s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.3", x.TitleArg(), b.Text), x.Key)
 		if err != nil {
 			fail(w, http.StatusServiceUnavailable, "%v", err)
 			return
@@ -91,7 +91,7 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if !added && rep.Text != deckstore.Clean(b.Text, 2000) {
 		// 同一次完成的补充说明：不再转告主 agent，记进通知栏，不悄悄丢
-		s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.4", x.Title, deckstore.ArgText(b.Text, 300)), x.Key)
+		s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.4", x.TitleArg(), deckstore.ArgText(b.Text, 300)), x.Key)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queued": true, "report": rep, "duplicate": !added})
 }
@@ -189,7 +189,7 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 				CompletionID: deckstore.HintID(st.quietGen[x.Key], from),
 				Text: fmt.Sprintf("推断：子 agent「%s」停下了 %d 秒（agent-deck 状态从 running 变为 %s），没有运行 deck agent report --done。可能已做完，也可能在等输入或权限确认。"+
 					"这只是提醒、不算完成：它之后真正的完成仍会转告。请用 deck agent output %s 查看。",
-					x.Title, int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})
+					i18n.PresentZH(x.Title), int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})
 		}
 	}
 }
@@ -255,7 +255,8 @@ func (s *Server) reportText(rep deckstore.Report) string {
 	} else if rep.Source == deckstore.ReportGraph {
 		label = "账本提醒"
 	}
-	return fmt.Sprintf("［安排 Anpai 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
+	// 汇报是清洗过再存的，里面的中性打码标记换成中文记号：给模型读的文字和改码之前逐字一样。
+	return fmt.Sprintf("［安排 Anpai 转告·%s］子 agent「%s」（%s）：\n%s", label, i18n.PresentZH(sub.Title), sub.Key, i18n.PresentZH(rep.Text))
 }
 
 // maxWait 是 deck agent wait 一次最多等多久。
@@ -463,7 +464,7 @@ func (s *Server) expireClaims(now time.Time) {
 	}
 	for _, rep := range reps {
 		sub, _ := s.store.Session(rep.Sub)
-		s.store.NotifyCoded(rep.Project, "report", i18n.E("err.deckd.serverexpireclaims.1", sub.Title, deckstore.ArgText(rep.Text, 160)), "deckd")
+		s.store.NotifyCoded(rep.Project, "report", i18n.E("err.deckd.serverexpireclaims.1", sub.TitleArg(), deckstore.ArgText(rep.Text, 160)), "deckd")
 	}
 }
 
@@ -504,7 +505,7 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 		default:
 			// 送达未确认或失败：不自动重发，标出来交给 owner
 			s.store.MarkReport(rep.ID, deckstore.ReportUnconfirmed)
-			s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverone.1", sub.Title, deckstore.Arg(err, 200)), "deckd")
+			s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverone.1", sub.TitleArg(), deckstore.Arg(err, 200)), "deckd")
 			return nil
 		}
 	}

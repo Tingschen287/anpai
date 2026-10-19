@@ -121,7 +121,7 @@ func windowLabel(key string) string {
 	case "day":
 		return i18n.T("quota.day")
 	}
-	return strings.Join(strings.Fields(deckstore.Clean(key, 12)), " ")
+	return strings.Join(strings.Fields(deckstore.Display(key, 12)), " ")
 }
 
 // QuotaLines 画额度面板（n056 按 owner 2026-10-14 的要求）：每个来源前有它的 logo；每个窗口带重置时间；
@@ -171,7 +171,7 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 	}
 	for _, q := range shown {
 		// Label 来自看板 JSON（Antigravity 的池名）：显示前清洗、压成一行（同 n050 评审 B7；n056 自查）
-		name := strings.Join(strings.Fields(deckstore.Clean(q.Label, 40)), " ")
+		name := strings.Join(strings.Fields(deckstore.Display(q.Label, 40)), " ")
 		if name == "" {
 			name = toolName[q.Tool]
 		}
@@ -259,6 +259,19 @@ var activityStatusKey = map[string]i18n.Key{
 	deckstore.StatusFailed: "act.status.failed", deckstore.StatusStopped: "act.status.stopped",
 }
 
+// progressUnitKey 把预算单位的语言无关写法对到文字键。
+var progressUnitKey = map[string]i18n.Key{
+	"round": "progress.unit.round", "call": "progress.unit.call", "hour": "progress.unit.hour",
+}
+
+// unitText 是预算行上的单位：有语言无关写法的按语言翻译，没有的（token 没有单位）用原文。
+func unitText(bl deckd.BudgetView) string {
+	if k, ok := progressUnitKey[bl.UnitKey]; ok {
+		return i18n.T(k)
+	}
+	return bl.Unit
+}
+
 // progressCountKey 把进度计数的状态对到文字键。
 var progressCountKey = map[string]i18n.Key{
 	"accepted": "progress.accepted", "running": "progress.running", "submitted": "progress.submitted",
@@ -268,8 +281,8 @@ var progressCountKey = map[string]i18n.Key{
 
 // TextKeys 返回本包里经 map 传给 i18n.T 的键。调用处不是字符串字面量，扫描器看不见。
 func TextKeys() []string {
-	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey))
-	for _, m := range []map[string]i18n.Key{kindKey, optionKey, activityStatusKey, progressCountKey} {
+	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey)+len(progressUnitKey))
+	for _, m := range []map[string]i18n.Key{kindKey, optionKey, activityStatusKey, progressCountKey, progressUnitKey} {
 		for _, k := range m {
 			out = append(out, string(k))
 		}
@@ -318,7 +331,7 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 
 func decisionText(d deckstore.Decision) string {
 	if d.SummaryCode == "" {
-		return deckstore.Clean(d.Summary, 800)
+		return deckstore.Display(d.Summary, 800)
 	}
 	return deckstore.Clip(deckclient.Text(d.SummaryCode, []any(d.SummaryArgs), d.Summary), 800)
 }
@@ -335,7 +348,8 @@ func label(opt string) string {
 	if _, ok := optionKey[opt]; ok {
 		return i18n.T(optionKey[opt])
 	}
-	return opt
+	// 选项文字是清洗过再存的，里面可能有中性打码标记
+	return i18n.Present(opt)
 }
 
 // RenderProgress 画项目进度面板。
@@ -360,12 +374,17 @@ func RenderProgress(p deckd.Progress) string {
 	for _, bl := range p.Budgets {
 		switch {
 		case bl.Used == nil && bl.Limit != nil:
-			b.WriteString(i18n.T("progress.budget.unknown", bl.Label, *bl.Limit, bl.Unit))
+			b.WriteString(i18n.T("progress.budget.unknown", bl.Label, *bl.Limit, unitText(bl)))
 		case bl.Used != nil && bl.Limit != nil:
-			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, bl.Unit))
+			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, unitText(bl)))
 		}
 	}
-	for _, pr := range p.Problems {
+	for i, pr := range p.Problems {
+		// 能翻译的按码翻译；没有码的（旧 deckd、外部原文）当原文
+		if i < len(p.ProblemsCoded) && p.ProblemsCoded[i].Code != "" {
+			n := p.ProblemsCoded[i]
+			pr = deckclient.Text(n.Code, n.Args, pr)
+		}
 		b.WriteString(warn.Render("! "+pr) + "\n")
 	}
 	return b.String()
@@ -386,7 +405,7 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 		if n.Project != "" {
 			line += dim.Render(n.Project + " · ")
 		}
-		text := n.Text
+		text := i18n.Present(n.Text) // 无码通知的正文是清洗过再存的，里面可能有中性打码标记
 		if n.Code != "" {
 			text = deckclient.Text(n.Code, []any(n.Args), n.Text)
 		}
@@ -419,7 +438,7 @@ func RenderActivity(ss []deckstore.Session, now time.Time) string {
 		if name == "" {
 			name = x.Agent
 		}
-		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, deckstore.Clean(x.Title, 80), name, st))
+		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, deckstore.Display(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title), 80), name, st))
 	}
 	return b.String()
 }

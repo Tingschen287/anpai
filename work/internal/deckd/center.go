@@ -184,6 +184,21 @@ func (c *TmuxCenter) Switch(tmuxSession string) error {
 	return nil
 }
 
+// whyList 把还原中收集到的各条错误拼成一组参数，各条之间换行，Error() 和 errors.Join 逐字一样。
+// 每一条各自带码，英文界面不会留下中文标点。没有错误时返回 nil，和 errors.Join 一样。
+func whyList(errs ...error) any {
+	var parts []any
+	for _, e := range errs {
+		if e != nil {
+			parts = append(parts, e)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return i18n.ListOf("sep.nl", parts...)
+}
+
 // replaced：命令执行后读回发现落到了新 client 上（新旧 client 共用中间窗格的 tty，「找到 client」与「执行命令」
 // 之间新 client 恰好连上）。把新 client 还原到起点（deck-idle、只读），返回 ErrStaleClient（n049 评审 3 B1-A 的第二道）。
 // 新 client 自己的重连通知要等这次操作放锁后才执行，还原不会与它交错。
@@ -200,7 +215,7 @@ func (c *TmuxCenter) replaced(ctx context.Context, what any, old, now agentdeck.
 	if err == nil && st.PID == now.PID && st.Session == viewstate.Idle && st.ReadOnly {
 		return i18n.E("err.deckd.tmuxcenterreplaced.1", viewstate.ErrStaleClient, what, old.PID, now.PID)
 	}
-	why := errors.Join(append(errs, err)...)
+	why := whyList(append(errs, err)...)
 	var state any = i18n.E("err.deckd.tmuxcenterreplaced.4")
 	if err == nil {
 		state = i18n.E("err.deckd.tmuxcenterreplaced.2", st.PID, st.Session, st.ReadOnly)

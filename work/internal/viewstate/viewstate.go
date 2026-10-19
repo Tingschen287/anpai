@@ -108,6 +108,9 @@ type Target struct {
 	// AwaitingOwner：主 agent 的 CLI 停在启动确认上（目录信任等），等 owner 在中间处理（n055）。这时也对 owner 放开输入
 	AwaitingOwner bool
 	Title         string
+	// TitleCode、TitleArgs：标题是本项目拼的（主 agent）时的码，通知里按码翻译
+	TitleCode string
+	TitleArgs []any
 }
 
 // ownerInput：主 agent 显示在中间时 owner 能不能打字——第一条 brief 已送达，或 CLI 停在启动确认上等 owner 处理。
@@ -723,6 +726,9 @@ func (m *Machine) handbackLocked(session string, why *i18n.Error) error {
 		return &ErrHandback{Session: session, Cause: cause}
 	}
 	var hb lease.Handback
+	// shown 是画面末几行，带中性打码标记，只进通知参数（英文才能把标记翻成 [redacted]）。
+	// hb.LastLines 是写进写入权记账的中文，标记已换成中文记号，和改码之前逐字一样。
+	var shown []string
 	switch {
 	case m.focus == session:
 		if !known || t.Tmux == "" {
@@ -735,11 +741,13 @@ func (m *Machine) handbackLocked(session string, why *i18n.Error) error {
 		for i := range lines {
 			lines[i] = deckstore.Clean(lines[i], 200)
 		}
-		hb.LastLines = lines
-		tk.summary = &lease.Handback{LastLines: append([]string(nil), lines...)}
+		shown = lines
+		hb.LastLines = zhLines(shown)
+		tk.summary = &lease.Handback{LastLines: append([]string(nil), shown...)}
 		m.taken[session] = tk
 	case tk.summary != nil:
-		hb.LastLines = append([]string(nil), tk.summary.LastLines...)
+		shown = append([]string(nil), tk.summary.LastLines...)
+		hb.LastLines = zhLines(shown)
 		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.summaryprev").Error())
 	case tk.restored:
 		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.summaryrestored").Error())
@@ -749,12 +757,12 @@ func (m *Machine) handbackLocked(session string, why *i18n.Error) error {
 	now := m.now()
 	hb.AttachedAt, hb.ReturnedAt, hb.DurationSeconds, hb.Via = tk.since, now, int64(now.Sub(tk.since).Seconds()), "deck"
 	hb.Notes = append([]string{i18n.E("err.viewstate.leftway", why).Error()}, hb.Notes...)
-	if len(hb.LastLines) > 0 {
-		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.lastline", hb.LastLines[len(hb.LastLines)-1]).Error())
+	if len(shown) > 0 {
+		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.lastline", shown[len(shown)-1]).Error())
 	}
 	text := i18n.E("err.viewstate.left", title(t), why, hb.DurationSeconds)
-	if len(hb.LastLines) > 0 {
-		text = i18n.E("err.viewstate.leftline", title(t), why, hb.DurationSeconds, hb.LastLines[len(hb.LastLines)-1])
+	if len(shown) > 0 {
+		text = i18n.E("err.viewstate.leftline", title(t), why, hb.DurationSeconds, shown[len(shown)-1])
 	}
 	if err := m.notify(text); err != nil {
 		return &ErrHandback{Session: session, Cause: i18n.E("err.viewstate.handbacknote", err)}
@@ -764,6 +772,15 @@ func (m *Machine) handbackLocked(session string, why *i18n.Error) error {
 	}
 	delete(m.taken, session)
 	return nil
+}
+
+// zhLines 把画面行里的中性打码标记换成中文记号：写进记账的文字不带标记。
+func zhLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = i18n.PresentZH(l)
+	}
+	return out
 }
 
 // DeliverToMain 给主 agent 送一条汇报（n051 调）。deliver 真正发送（agent-deck send --defer-if-busy）。
@@ -847,8 +864,12 @@ func isHandback(err error) bool {
 	return errors.As(err, &he)
 }
 
-func title(t Target) string {
+// title 是通知里提到这个会话的参数：有码的标题给嵌套码，英文通知才翻得了。
+func title(t Target) any {
 	if t.Title != "" {
+		if t.TitleCode != "" {
+			return i18n.Nest{Code: t.TitleCode, Args: t.TitleArgs, Error: t.Title}
+		}
 		return t.Title
 	}
 	return t.Session

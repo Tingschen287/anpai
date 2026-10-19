@@ -70,7 +70,7 @@ func (l *CenterLoop) Run() {
 		if quick >= l.MaxQuick {
 			reason := i18n.T("layout.err.center", quick, l.QuickExit)
 			if err != nil {
-				reason += i18n.T("layout.err.center.last") + err.Error()
+				reason += i18n.T("layout.err.center.last") + i18n.Present(err.Error())
 			}
 			if !l.Pause(reason) {
 				return

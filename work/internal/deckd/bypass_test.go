@@ -6,12 +6,14 @@ import (
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 // n051 真模型端到端实测：agent-deck v1.15 默认给 Claude 加 --dangerously-skip-permissions，deck 自己的参数检查看不到。
 
 func TestUpstreamConfigBypassRejectedBeforeLaunch(t *testing.T) {
 	w := newAgentWorld(t)
+	wirecheck.External("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions") // 夹具里上游配置核对给的原文
 	w.cfgBypass = map[string]error{"claude": errors.New("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions")}
 	before := w.store.Slots("alpha")
 	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))

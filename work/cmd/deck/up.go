@@ -207,7 +207,7 @@ func center(dirs deckstore.Dirs, args []string) {
 	_, agentSock := socketFlags(fs)
 	fs.Parse(args)
 	self, _ := os.Executable()
-	client := deckclient.New(deckd.SocketPath(dirs))
+	client := deckclient.NewUI(deckd.SocketPath(dirs))
 	in := bufio.NewReader(os.Stdin)
 	loop := &layout.CenterLoop{
 		Attach: func() (int, func() error, error) {
@@ -284,7 +284,7 @@ func fence(c *deckclient.Client, logPath string, show func(string)) {
 		if i == 0 {
 			centerLog(logPath, "重连前等 deckd 确认没有进行中的操作，还没确认：%s（不起新 client，每秒再试）", why)
 		}
-		show("等 deckd 确认没有进行中的操作再重连中间窗格…（" + deckstore.Clean(why, 160) + "）")
+		show("等 deckd 确认没有进行中的操作再重连中间窗格…（" + deckstore.Display(why, 160) + "）")
 		time.Sleep(fenceRetry)
 	}
 }

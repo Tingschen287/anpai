@@ -300,5 +300,5 @@ func (m *Settings) formFoot() []string {
 	if m.form.err == "" {
 		return nil
 	}
-	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Clean(m.form.err, msgCap)) + "\x1b[0m"}
+	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Display(m.form.err, msgCap)) + "\x1b[0m"}
 }

@@ -288,19 +288,31 @@ type GraphLink struct {
 	Attempt int    `json:"attempt"`
 }
 
+// TitleArg 把标题收成参数：有码的是嵌套码，英文通知里翻成英文；没有码的是外部原文字符串。
+func (x Session) TitleArg() any {
+	if x.TitleCode == "" {
+		return x.Title
+	}
+	return i18n.Nest{Code: x.TitleCode, Args: []any(x.TitleArgs), Error: x.Title}
+}
+
 // Session 是注册表里的一条。
 type Session struct {
-	Key            string     `json:"key"` // 启动请求 id；launch 成功后不变，用它关联 agent-deck 会话
-	AgentDeckID    string     `json:"agentdeck_id,omitempty"`
-	TmuxSession    string     `json:"tmux_session,omitempty"`
-	Project        string     `json:"project"`
-	Role           string     `json:"role"` // main 或 sub
-	Parent         string     `json:"parent,omitempty"`
-	Agent          string     `json:"agent"`
-	Tool           string     `json:"tool"`
-	Model          string     `json:"model"`
-	Tier           Tier       `json:"tier"`
-	Title          string     `json:"title"`
+	Key         string `json:"key"` // 启动请求 id；launch 成功后不变，用它关联 agent-deck 会话
+	AgentDeckID string `json:"agentdeck_id,omitempty"`
+	TmuxSession string `json:"tmux_session,omitempty"`
+	Project     string `json:"project"`
+	Role        string `json:"role"` // main 或 sub
+	Parent      string `json:"parent,omitempty"`
+	Agent       string `json:"agent"`
+	Tool        string `json:"tool"`
+	Model       string `json:"model"`
+	Tier        Tier   `json:"tier"`
+	Title       string `json:"title"`
+	// TitleCode 和 TitleArgs 是标题的码，只有标题是本项目自己拼的才有（主 agent 的「主 agent · 项目名」）。
+	// Title 仍是中文原文，界面用码翻译；owner 或主 agent 自己写的标题没有码，当外部原文原样显示。
+	TitleCode      string     `json:"title_code,omitempty"`
+	TitleArgs      i18n.Args  `json:"title_args,omitempty"`
 	CreatedBy      string     `json:"created_by"` // owner 或发起会话的 key
 	CreatedAt      time.Time  `json:"created_at"`
 	Status         string     `json:"status"`
@@ -522,6 +534,7 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 		x.Status = StatusLaunching
 		x.CreatedAt = s.now()
 		x.Title = Clean(x.Title, 80)
+		x.TitleArgs = i18n.Args(CleanArgs(x.TitleArgs, 80))
 		s.sessions[x.Key] = &x
 		res.Key = x.Key
 		evs := []Event{{Kind: "session", Project: x.Project, ID: x.Key}}
@@ -560,7 +573,7 @@ func (s *Store) LaunchFailed(key string, uncertain bool, why string) error {
 		} else {
 			x.Status = StatusFailed
 		}
-		x.Note = Clean(why, 300)
+		x.Note = i18n.PresentZH(Tidy(why, 300)) // 记账用的中文，不给界面显示
 		return nil
 	})
 }
@@ -568,7 +581,7 @@ func (s *Store) LaunchFailed(key string, uncertain bool, why string) error {
 // SetSessionStatus 改状态（完成、停止等）。
 func (s *Store) SetSessionStatus(key, status, note string) error {
 	return s.setSession(key, func(x *Session) error {
-		x.Status, x.Note = status, Clean(note, 300)
+		x.Status, x.Note = status, i18n.PresentZH(Tidy(note, 300)) // 记账用的中文，不给界面显示
 		return nil
 	})
 }
@@ -644,7 +657,7 @@ func (x Session) StartPending() bool { return x.Starting || x.AwaitingOwner != "
 
 // SetAwaitingOwner 记下（why 不空）或清掉（why 为空）「CLI 停在启动确认上、等 owner 处理」（n055）。
 func (s *Store) SetAwaitingOwner(key, why string) error {
-	return s.setSession(key, func(x *Session) error { x.AwaitingOwner = Clean(why, 300); return nil })
+	return s.setSession(key, func(x *Session) error { x.AwaitingOwner = i18n.PresentZH(Tidy(why, 300)); return nil })
 }
 
 func (s *Store) setSession(key string, f func(*Session) error) error {
@@ -763,12 +776,15 @@ func (s *Store) Notify(project, kind, text, source string) (Notification, error)
 	var n Notification
 	err := s.mutate(func() (func() error, []Event, error) {
 		s.noteSeq++
-		n = Notification{Seq: s.noteSeq, At: s.now(), Project: project, Kind: kind, Text: Clean(text, 600), Source: Clean(source, 120)}
+		n = Notification{Seq: s.noteSeq, At: s.now(), Project: project, Kind: kind, Text: Tidy(text, 600), Source: Tidy(source, 120)}
 		s.notes = append(s.notes, n)
 		if len(s.notes) > keepNotes {
 			s.notes = s.notes[len(s.notes)-keepNotes:]
 		}
 		line, _ := json.Marshal(n)
+		if h := i18n.WireHook; h != nil {
+			h("notification", line)
+		}
 		return func() error { return appendLine(s.path("notifications.jsonl"), line) }, []Event{{Kind: "notification", Project: project}}, nil
 	})
 	return n, err
@@ -786,13 +802,16 @@ func (s *Store) NotifyCoded(project, kind string, err *i18n.Error, source string
 		s.noteSeq++
 		n = Notification{
 			Seq: s.noteSeq, At: s.now(), Project: project, Kind: kind,
-			Text: Clean(text, 600), Source: Clean(source, 120), Code: code, Args: i18n.Args(CleanArgs(args, 600)),
+			Text: Tidy(text, 600), Source: Tidy(source, 120), Code: code, Args: i18n.Args(CleanArgs(args, 600)),
 		}
 		s.notes = append(s.notes, n)
 		if len(s.notes) > keepNotes {
 			s.notes = s.notes[len(s.notes)-keepNotes:]
 		}
 		line, _ := json.Marshal(n)
+		if h := i18n.WireHook; h != nil {
+			h("notification", line)
+		}
 		return func() error { return appendLine(s.path("notifications.jsonl"), line) }, []Event{{Kind: "notification", Project: project}}, nil
 	})
 	return n, merr

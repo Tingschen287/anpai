@@ -1,11 +1,12 @@
 package projectctl
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Graph 是 work-graph.yaml 里 Work Deck 用得到的那部分。
@@ -44,10 +45,10 @@ type GraphNode struct {
 // 派评审时必须照着它来：要什么档位、评审者能不能是执行者本人。
 // 这些是 Graph 说了算的事，不是派工方随口定的。
 type ReviewPolicy struct {
-	Required             bool   `yaml:"required"`
-	ReviewerRole         string `yaml:"reviewer_role"`
-	RouteClass           string `yaml:"route_class"`
-	IndependentFromExec  bool   `yaml:"independent_from_executor"`
+	Required            bool   `yaml:"required"`
+	ReviewerRole        string `yaml:"reviewer_role"`
+	RouteClass          string `yaml:"route_class"`
+	IndependentFromExec bool   `yaml:"independent_from_executor"`
 }
 
 // LoadGraph 读项目的 work-graph.yaml。
@@ -55,14 +56,14 @@ func LoadGraph(projectRoot string) (Graph, error) {
 	path := filepath.Join(projectRoot, "work-graph.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Graph{}, fmt.Errorf("读不到 %s：%w", path, err)
+		return Graph{}, i18n.E("err.projectctl.graph.read", path, err)
 	}
 	var g Graph
 	if err := yaml.Unmarshal(data, &g); err != nil {
-		return Graph{}, fmt.Errorf("解析 %s 失败：%w", path, err)
+		return Graph{}, i18n.E("err.projectctl.graph.parse", path, err)
 	}
 	if len(g.Nodes) == 0 {
-		return Graph{}, fmt.Errorf("%s 里没有任何节点", path)
+		return Graph{}, i18n.E("err.projectctl.graph.empty", path)
 	}
 	return g, nil
 }

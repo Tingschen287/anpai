@@ -28,10 +28,15 @@ import (
 //   - x.Error()：x 是中文来源；
 //   - 切片、数组字面量：任何元素是中文来源。
 //
+// 辅助函数里经局部变量中转（out := s; return out）也能追到：形参对到调用处的实参时带着调用处自己的环境，
+// 局部变量的赋值也在被调函数的环境里求值，所以多层辅助函数、局部变量中转都不会丢。
+//
 // i18n.E 的返回值不算中文来源：它走码表，中文只在 Error() 里现取，不在源码里。
 //
 // 「落点」（sink）指：
 //   - i18n.E / i18n.Errorf / i18n.ListOf 的参数（第一个键之后的所有参数）；
+//   - 直接造 i18n.Error：组合字面量 i18n.Error{Key: …, Args: …}（含 &），以及对 Key / Args 字段的赋值
+//     （e.Args = …、e.Args[i] = …、e.Key = …）；
 //   - 名叫 note、reason、why、detail、hint 的结构体字段（组合字面量或赋值）；
 //   - 键是这几个词的 map 字面量或下标赋值；
 //   - 本模块函数里名叫这几个词的形参，调用处传进去的实参。
@@ -59,7 +64,8 @@ var argChineseAllow = map[string]string{
 type argExpr struct {
 	e    ast.Expr
 	info *types.Info
-	idx  int // 多返回值赋值时是第几个，单值为 -1
+	idx  int    // 多返回值赋值时是第几个，单值为 -1
+	env  argEnv // 求值 e 时的环境：形参对到调用处实参时，实参要在调用处自己的环境里求值
 }
 
 type argFunc struct {
@@ -179,9 +185,9 @@ func (t *taint) tainted(e ast.Expr, info *types.Info, idx int, env argEnv) bool 
 			return false
 		}
 		if a, ok := env[obj]; ok {
-			return t.tainted(a.e, a.info, a.idx, nil)
+			return t.tainted(a.e, a.info, a.idx, a.env)
 		}
-		return t.varTainted(obj)
+		return t.varTainted(obj, env)
 	case *ast.BinaryExpr:
 		return t.tainted(x.X, info, -1, env) || t.tainted(x.Y, info, -1, env)
 	case *ast.UnaryExpr:
@@ -206,7 +212,9 @@ func (t *taint) tainted(e ast.Expr, info *types.Info, idx int, env argEnv) bool 
 	return false
 }
 
-func (t *taint) varTainted(obj types.Object) bool {
+// varTainted：变量的任何一处赋值是中文来源就算。赋值在被调函数里时要用被调函数的环境求值，
+// 否则 out := s; return out 这样的局部中转会把形参丢掉（Codex 复审 3 必须改 3）。
+func (t *taint) varTainted(obj types.Object, env argEnv) bool {
 	key := fmt.Sprintf("v%p", obj)
 	if t.seen[key] {
 		return false
@@ -214,7 +222,7 @@ func (t *taint) varTainted(obj types.Object) bool {
 	t.seen[key] = true
 	defer delete(t.seen, key)
 	for _, a := range t.w.assigns[obj] {
-		if t.tainted(a.e, a.info, a.idx, nil) {
+		if t.tainted(a.e, a.info, a.idx, env) {
 			return true
 		}
 	}
@@ -294,7 +302,7 @@ func (t *taint) returnsTainted(fn *argFunc, call *ast.CallExpr, info *types.Info
 		for _, field := range fn.decl.Type.Params.List {
 			for _, name := range field.Names {
 				if i < len(call.Args) {
-					callee[fn.info.Defs[name]] = argExpr{e: call.Args[i], info: info, idx: -1}
+					callee[fn.info.Defs[name]] = argExpr{e: call.Args[i], info: info, idx: -1, env: env}
 				}
 				i++
 			}
@@ -322,7 +330,7 @@ func (t *taint) returnsTainted(fn *argFunc, call *ast.CallExpr, info *types.Info
 				i := 0
 				for _, field := range res.List {
 					for _, name := range field.Names {
-						if (idx < 0 || idx == i) && t.varTainted(fn.info.Defs[name]) {
+						if (idx < 0 || idx == i) && t.varTainted(fn.info.Defs[name], callee) {
 							found = true
 						}
 						i++
@@ -344,6 +352,45 @@ func (t *taint) returnsTainted(fn *argFunc, call *ast.CallExpr, info *types.Info
 		return true
 	})
 	return found
+}
+
+// isI18nError 判断类型是不是 i18n.Error（含指针）。
+func isI18nError(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if p, ok := t.Underlying().(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	n, ok := t.(*types.Named)
+	return ok && n.Obj().Name() == "Error" && objPkgPath(n.Obj()) == i18nImport
+}
+
+// checkArgsValue 检查 Args 字段的值：切片字面量逐个元素查，其余（变量、append(…) 等）整体查，append 的实参逐个查。
+func checkArgsValue(check func(ast.Expr, string), v ast.Expr, what string) {
+	switch x := ast.Unparen(v).(type) {
+	case *ast.CompositeLit:
+		for _, el := range x.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				check(kv.Value, what)
+				continue
+			}
+			check(el, what)
+		}
+		return
+	case *ast.CallExpr:
+		if id, ok := ast.Unparen(x.Fun).(*ast.Ident); ok && id.Name == "append" {
+			for i, a := range x.Args {
+				if i == 0 {
+					checkArgsValue(check, a, what)
+					continue
+				}
+				check(a, what)
+			}
+			return
+		}
+	}
+	check(v, what)
 }
 
 type argHit struct {
@@ -387,6 +434,28 @@ func scanArgs(pkgs []checkedPkg, fset *token.FileSet, errText bool) []argHit {
 					}
 				}
 				switch v := n.(type) {
+				case *ast.CompositeLit:
+					// 直接造 i18n.Error{Key: …, Args: []any{…}}：参数和键都不能是本地中文
+					if !isI18nError(info.TypeOf(v)) {
+						return
+					}
+					for _, el := range v.Elts {
+						kv, ok := el.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						id, ok := kv.Key.(*ast.Ident)
+						if !ok {
+							continue
+						}
+						switch id.Name {
+						case "Args":
+							checkArgsValue(check, kv.Value, "i18n.Error 的 Args 字段")
+						case "Key":
+							check(kv.Value, "i18n.Error 的 Key 字段")
+						}
+					}
+					return
 				case *ast.CallExpr:
 					obj := calleeObj(info, v)
 					if objPkgPath(obj) == i18nImport && (obj.Name() == "E" || obj.Name() == "Errorf" || obj.Name() == "ListOf") {
@@ -432,6 +501,27 @@ func scanArgs(pkgs []checkedPkg, fset *token.FileSet, errText bool) []argHit {
 						}
 					}
 				case *ast.AssignStmt:
+					// 对 i18n.Error 的 Key / Args 字段赋值：e.Args = …、e.Args[i] = …、e.Key = …（两种来源都查）
+					if (v.Tok == token.ASSIGN || v.Tok == token.ADD_ASSIGN) && len(v.Lhs) == len(v.Rhs) {
+						for i, l := range v.Lhs {
+							lhs := ast.Unparen(l)
+							if ix, ok := lhs.(*ast.IndexExpr); ok {
+								lhs = ast.Unparen(ix.X)
+								if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Args" && isI18nError(info.TypeOf(sel.X)) {
+									check(v.Rhs[i], "i18n.Error 的 Args 元素赋值")
+								}
+								continue
+							}
+							if sel, ok := lhs.(*ast.SelectorExpr); ok && isI18nError(info.TypeOf(sel.X)) {
+								switch sel.Sel.Name {
+								case "Args":
+									checkArgsValue(check, v.Rhs[i], "i18n.Error 的 Args 字段赋值")
+								case "Key":
+									check(v.Rhs[i], "i18n.Error 的 Key 字段赋值")
+								}
+							}
+						}
+					}
 					if errText {
 						return
 					}
@@ -514,6 +604,16 @@ func TestN060ArgScanFindsPlantedChinese(t *testing.T) {
 		{"NoteField", "type plantedBox struct{ Note string }\n\nfunc planted() { _ = plantedBox{Note: plantedCN} }"},
 		{"NoteMap", "func planted() { _ = map[string]any{\"note\": plantedCN} }"},
 		{"NoteParam", "func plantedTake(note string) {}\n\nfunc planted() { plantedTake(plantedCN) }"},
+		// 返工 3 新增的两种形状
+		{"ErrorLiteralArgs", "func planted() { _ = &i18n.Error{Key: \"err.deckd.serverrunspawn.47\", Args: []any{plantedCN}} }"},
+		{"ErrorLiteralKey", "func planted() { _ = i18n.Error{Key: i18n.Key(plantedCN)} }"},
+		{"ErrorArgsAssign", "func planted() { e := i18n.E(\"err.deckd.serverrunspawn.47\", \"x\"); e.Args = []any{plantedCN} }"},
+		{"ErrorArgsAppend", "func planted() { e := i18n.E(\"err.deckd.serverrunspawn.47\"); e.Args = append(e.Args, plantedCN) }"},
+		{"ErrorArgsIndex", "func planted() { e := i18n.E(\"err.deckd.serverrunspawn.47\", \"x\"); e.Args[0] = plantedCN }"},
+		{"ErrorKeyAssign", "func planted() { e := i18n.E(\"err.deckd.serverrunspawn.47\"); e.Key = i18n.Key(plantedCN) }"},
+		{"LocalViaHelper", "func plantedEcho(s string) string { out := s; return out }\n\nfunc planted() { _ = i18n.E(\"err.deckd.serverrunspawn.47\", plantedEcho(\"本地中文\")) }"},
+		{"LocalViaHelperChain", "func plantedEcho(s string) string { out := s; return out }\n\nfunc plantedEcho2(s string) string { mid := plantedEcho(s); return mid }\n\nfunc planted() { _ = i18n.E(\"err.deckd.serverrunspawn.47\", plantedEcho2(plantedCN)) }"},
+		{"LocalViaHelperMulti", "func plantedPair(s string) (string, int) { out := s; return out, 1 }\n\nfunc planted() { v, _ := plantedPair(plantedCN); _ = i18n.E(\"err.deckd.serverrunspawn.47\", v) }"},
 	}
 	for _, tc := range cases {
 		tc := tc

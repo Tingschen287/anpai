@@ -20,22 +20,32 @@ func hasHan(s string) bool {
 	return false
 }
 
-// 中文显示和 d36dd20 逐字一样：Clean 仍直接给出「[已打码]」，不是落盘标记。
+// 返工 3：Clean 打码只写中性标记，不跟任何语言走；中文显示（PresentZH / Present）和 d36dd20 逐字一样。
 func TestN060CleanZHMarkIsUnchanged(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	in := "前 sk-FAKETOKEN99 后 password=hunter22 末"
 	want := "前 [已打码] 后 [已打码] 末"
-	if got := Clean(in, 0); got != want {
-		t.Fatalf("Clean 的中文打码变了：%q", got)
+	got := Clean(in, 0)
+	if strings.Contains(got, "[已打码]") || strings.Contains(got, "sk-FAKE") || strings.Count(got, i18n.RedactMark) != 2 {
+		t.Fatalf("Clean 应只写中性标记：%q", got)
 	}
-	// 英文界面下 Clean 也不变：它是中文兜底文字，不跟界面语言走。
+	if z := i18n.PresentZH(got); z != want {
+		t.Fatalf("中文记号变了：%q", z)
+	}
+	if z := i18n.Present(got); z != want {
+		t.Fatalf("中文界面显示变了：%q", z)
+	}
+	// 标记不跟界面语言走：英文界面下 Clean 的结果同样，只有显示出口换成 [redacted]。
 	i18n.SetLang(i18n.EN)
-	if got := Clean(in, 0); got != want {
-		t.Fatalf("英文界面下 Clean 不应变：%q", got)
+	if again := Clean(in, 0); again != got {
+		t.Fatalf("英文界面下 Clean 不应变：%q", again)
 	}
-	if strings.Contains(Clean(in, 0), i18n.RedactMark) {
-		t.Fatal("Clean 不应带落盘标记")
+	if en := i18n.Present(got); en != "前 [redacted] 后 [redacted] 末" {
+		t.Fatalf("英文显示：%q", en)
+	}
+	if z := i18n.PresentZH(got); z != want {
+		t.Fatalf("PresentZH 不看界面语言：%q", z)
 	}
 	if RedactLabel() != "[redacted]" {
 		t.Fatalf("英文记号：%q", RedactLabel())
@@ -46,7 +56,7 @@ func TestN060CleanZHMarkIsUnchanged(t *testing.T) {
 	}
 }
 
-// 参数版存语言无关的标记，渲染时中英各换各的；和正文按同样的字数截断。
+// 参数版和正文一样存中性标记，渲染时中英各换各的；截断位置和以前直接写中文记号时一样。
 func TestN060ArgTextStoresNeutralMark(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
@@ -55,21 +65,27 @@ func TestN060ArgTextStoresNeutralMark(t *testing.T) {
 	if strings.Contains(got, "[已打码]") || strings.Contains(got, "sk-FAKE") || !strings.Contains(got, i18n.RedactMark) {
 		t.Fatalf("参数应存标记：%q", got)
 	}
-	if i18n.Present(got) != Clean(in, 0) {
-		t.Fatalf("中文显示应与 Clean 逐字一样：%q / %q", i18n.Present(got), Clean(in, 0))
+	if i18n.Present(got) != "令牌 [已打码] 到此" {
+		t.Fatalf("中文显示：%q", i18n.Present(got))
 	}
 	i18n.SetLang(i18n.EN)
 	if en := i18n.Present(got); hasHan(strings.NewReplacer("令牌", "", "到此", "").Replace(en)) || !strings.Contains(en, "[redacted]") {
 		t.Fatalf("英文显示：%q", en)
 	}
-	// 先跑过 Clean 的字符串（带中文记号）进参数时也换成标记。
-	if again := ArgText(Clean(in, 0), 0); again != got {
-		t.Fatalf("已带中文记号的字符串应换成标记：%q", again)
+	// 外部原文里字面的「[已打码]」不是标记，ArgText 不改写它（Codex 复审 3 必须改 1 的反例）。
+	lit := "upstream literal [已打码] end"
+	if ArgText(lit, 0) != lit {
+		t.Fatalf("字面的 [已打码] 被改写：%q", ArgText(lit, 0))
 	}
-	// 截断位置与 Clean 一样（标记和中文记号一样长）。中文显示逐字相同，包括只剩「[已」的残缺记号。
+	// 先跑过 Clean 的字符串再进参数，标记原样保留，不被二次清洗抹掉。
+	if again := ArgText(Clean(in, 0), 0); again != got {
+		t.Fatalf("已清洗的字符串应原样保留标记：%q", again)
+	}
+	// 截断位置与 d36dd20 一样：旧做法是先写「[已打码]」再按字符截断。中文显示逐字相同，包括只剩「[已」的残缺记号。
 	i18n.SetLang(i18n.ZH)
+	old := "令牌 [已打码] 到此"
 	for _, max := range []int{3, 5, 6, 7, 9, 12} {
-		a, c := ArgText(in, max), Clean(in, max)
+		a, c := ArgText(in, max), Clip(old, max)
 		if utf8.RuneCountInString(a) != utf8.RuneCountInString(c) || i18n.Present(a) != c {
 			t.Fatalf("max=%d 截断不一致：%q / %q", max, i18n.Present(a), c)
 		}
@@ -134,13 +150,13 @@ func NotifyArgsRoundTrip(t *testing.T, key string, args ...any) string {
 	return deckclient.Text(ns[0].Code, []any(ns[0].Args), ns[0].Text)
 }
 
-// 通知里本地先 Clean、再放进参数的字符串（带中文记号），落盘后也不让英文留下中文记号。
+// 通知里本地先 Clean、再放进参数的字符串（带中性标记），落盘后也不让英文留下中文记号。
 func TestN060NotifyArgFromCleanHasNoChineseMark(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	pre := Clean("see sk-FAKETOKEN99 here", 160)
-	if !strings.Contains(pre, "[已打码]") {
-		t.Fatalf("前提：Clean 带中文记号：%q", pre)
+	if !strings.Contains(pre, i18n.RedactMark) {
+		t.Fatalf("前提：Clean 带中性标记：%q", pre)
 	}
 	en := NotifyArgsRoundTrip(t, "err.deckd.serverrunspawn.47", pre)
 	if hasHan(en) || !strings.Contains(en, "[redacted]") || strings.Contains(en, "sk-FAKE") {

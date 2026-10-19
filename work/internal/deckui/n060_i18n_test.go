@@ -100,6 +100,9 @@ func dynamicTextKeys() []string {
 	}
 	out = append(out, panels.TextKeys()...)
 	out = append(out, layout.TextKeys()...)
+	// sep.nl 是 i18n.ListOf 的换行分隔符（deckd.whyList、errors.Join 的线路写法）。ListOf 的第一个参数不在 T / E 的扫描里，
+	// 键由 ListOf 在 deckd 里按字面量传入，存在性由 TestN060ListSepKeys 查（返工 3）。
+	out = append(out, "sep.nl")
 	return out
 }
 
@@ -317,7 +320,7 @@ func checkFormatArgs(t *testing.T) {
 // prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
 // viewstate 在这份名单里，这样哨兵的字面量调用才算「有人用」。
 func prodDirs() []string {
-	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock")
+	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock", "projectctl")
 }
 
 // ownerScanDirs 是「函数里不能再留中文字面量」的包。

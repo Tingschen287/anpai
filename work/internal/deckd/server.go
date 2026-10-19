@@ -109,7 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/reports/wait", s.getReportsWait)
 	mux.HandleFunc("POST /v1/reports/ack", s.postReportsAck)
 	mux.HandleFunc("POST /v1/reports/deliver-now", s.postReportsDeliverNow)
-	return mux
+	return markFilter{next: mux}
 }
 
 // ---------------- 通用 ----------------

@@ -296,7 +296,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			if y.Role == "main" && (y.Status == deckstore.StatusLaunching || y.Status == deckstore.StatusRunning || y.Status == deckstore.StatusUncertain) {
 				if s.mainGone(ctx, y) {
 					s.store.SetSessionStatus(y.Key, deckstore.StatusStopped, i18n.E("err.deckd.serverrunspawn.29", y.TmuxSession).Error())
-					s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.5", y.Title), "deckd")
+					s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.5", y.TitleArg()), "deckd")
 					continue
 				}
 				writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.6", x.Project, y.Key, y.Status))
@@ -309,9 +309,9 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	quotaGate := x.Role == "sub" && x.Tier == deckstore.Frontier && s.quotaUnsure(ctx, x.Tool)
 	if quotaGate && exception == "" {
 		// 同一个批准随后也会被预留当作超额例外用掉：包络也超了就在同一条决定里写明，owner 一次看清两个原因
-		summary := i18n.E("err.deckd.serverrunspawn.7", plan.agent.Name, x.Tier, x.Model, x.Title)
+		summary := i18n.E("err.deckd.serverrunspawn.7", plan.agent.Name, x.Tier, x.Model, x.TitleArg())
 		if u := s.store.Slots(x.Project); u.Subagents >= p.Envelope.MaxSubagents || u.Frontier >= p.Envelope.MaxFrontier {
-			summary = i18n.E("err.deckd.serverrunspawn.8", u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.Title)
+			summary = i18n.E("err.deckd.serverrunspawn.8", u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.TitleArg())
 		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
 			SummaryErr: summary,
@@ -339,7 +339,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			whyOver = over.Why
 		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			SummaryErr: i18n.E("err.deckd.serverrunspawn.11", whyOver, plan.agent.Name, x.Tier, x.Model, x.Title),
+			SummaryErr: i18n.E("err.deckd.serverrunspawn.11", whyOver, plan.agent.Name, x.Tier, x.Model, x.TitleArg()),
 			Scope:      deckstore.SpawnScope(x, p),
 			Recommend:  deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
@@ -374,7 +374,8 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		return
 	}
 	// 启动
-	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: x.Title, Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true,
+	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: i18n.PresentZH(x.Title), // 给上游命令行的标题：中性标记换成中文记号
+		Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true,
 		Extra: plan.agent.ExtraArgs} // owner 声明的额外参数随启动传上去（n055）；启动后照旧按白名单核对实际命令行
 	out, lerr := s.agents.upstream.Launch(ctx, lr)
 	id, uncertain, why := launchOutcome(out, lerr)
@@ -480,7 +481,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		if x.Role == "main" && agentdeck.IsDeliveryUnconfirmed(derr) {
 			s.store.ConfirmBrief(key)
 			noteErr = i18n.E("err.deckd.serverrunspawn.48", deckstore.Arg(derr, 160))
-			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.TitleArg()), "deckd")
 		} else {
 			s.store.FinishStart(key)
 		}
@@ -510,7 +511,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if x.Role == "main" {
 		what = i18n.E("err.deckd.serverrunspawn.49")
 	}
-	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.27", who, what, x.Title, plan.agent.Name, x.Model), creatorOf(c))
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.27", who, what, x.TitleArg(), plan.agent.Name, x.Model), creatorOf(c))
 	got, _ := s.store.Session(key)
 	body := map[string]any{"session": got, "brief_delivered": delivered, "note": note}
 	if noteErr != nil {
@@ -582,15 +583,15 @@ func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.S
 			stopErr = s.agents.upstream.StopSession(ctx, permit, id)
 		}
 	}
-	note := deckstore.Clean(textOf(why), 300)
+	note := i18n.PresentZH(deckstore.Clean(textOf(why), 300)) // 记到会话上的中文，不带中性标记
 	if stopErr != nil {
 		note += i18n.E("err.deckd.serverstoplaunched.4", deckstore.Arg(stopErr, 200)).Error()
 		s.store.LaunchFailed(key, true, note)
-		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.1", x.Title, what, deckstore.Arg(stopErr, 120), id), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.1", x.TitleArg(), what, deckstore.Arg(stopErr, 120), id), "deckd")
 		return
 	}
 	s.store.LaunchFailed(key, keep, note)
-	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.2", x.Title, what, nestOrText(why, 200)), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.2", x.TitleArg(), what, nestOrText(why, 200)), "deckd")
 }
 
 // textOf 取错误的中文原文。普通字符串原样返回。
@@ -663,7 +664,7 @@ func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
 - 只做这一件事；需要 owner 决定的事（花额度、改电脑设置、推送代码、和别人意见不一、偏离 owner 的决定）先停下，在汇报里写明，由主 agent 上报。
 - 不要使用跳过权限确认的参数。
 - 做完（或做不下去）时运行：deck agent report --done --text "<结论、改了什么、证据在哪、还有什么没做>"
-`), p.Name, x.Title, task)
+`), p.Name, i18n.PresentZH(x.Title), task) // 给模型读：标题里的中性标记换成中文记号
 }
 
 // MainBrief 是送给主 agent 的第一条消息：项目、工具用法与规矩（§5）。
@@ -741,9 +742,11 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		reqID = fmt.Sprintf("main-%s-%d", p.ID, time.Now().UnixNano())
 	}
 	brief := MainBrief(p)
-	title := i18n.E("err.deckd.serverpostmain.4", p.Name).Error()
+	titleErr := i18n.E("err.deckd.serverpostmain.4", p.Name)
+	title := titleErr.Error()
+	titleCode, titleArgs, _ := i18n.Wire(titleErr) // 标题是本项目拼的，英文界面按码翻译
 	x := deckstore.Session{Project: p.ID, Role: "main", Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model, Tier: res.Tier,
-		Title: title, CreatedBy: "owner", RequestID: reqID, Dir: p.Path, TaskSHA256: TaskSHA256(brief),
+		Title: title, TitleCode: titleCode, TitleArgs: i18n.Args(titleArgs), CreatedBy: "owner", RequestID: reqID, Dir: p.Path, TaskSHA256: TaskSHA256(brief),
 		ArgsSHA256: SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, title, p.Path, "")}
 	s.runSpawn(w, detached(r), c, spawnPlan{project: p, agent: a, x: x, brief: brief}, "", "")
 }
