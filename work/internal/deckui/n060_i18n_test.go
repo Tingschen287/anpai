@@ -70,10 +70,13 @@ func dynamicTextKeys() []string {
 
 // dynamicCallAllow 是放行清单。粒度是「文件 · 函数 · 参数表达式原文」。
 // 原文用 go/printer 打印。改一个字符就对不上，测试失败，要人工复核后再改清单。
+// 入口按 i18n 包里 T、Tf 两个函数对象认，不看导入名，也不看是选择器还是点导入后的裸名字。
+// 这两个函数的标识符必须处在直接调用的函数位置。拿去当值用就报位置。
+// 按对象找到的直接调用（含字面量键）少于此清单的条数，就当成入口坏了，不能静默通过。
 // 清单不是放行依据。依据是 go/types 的符号绑定，坏绑定写进清单也过不了：
 //   - 表[下标]、表[下标].字段：被下标的标识符必须绑定到包级变量（Parent 是包作用域），
 //     并且就是本包 TextKeys 枚举到的那张表。按对象比对，不按名字。字段也按对象比对。
-//   - "tier." + string(参数)：string 必须是 Universe 里的预声明类型，参数的类型必须是 deckstore.Tier。
+//   - "tier." + string(参数)：string 必须是 Universe 里的预声明类型。参数类型先 Unalias，再认 deckstore.Tier。
 //     前缀另由 checkTierConcat 锁成 tier.。
 //
 // 函数调用、局部变量、参数、闭包参数、接收者、字段、未登记拼接、被遮蔽的名字，一律拒绝。
@@ -141,6 +144,8 @@ func walkCovered(t *testing.T, fn func(path string, f *ast.File, fset *token.Fil
 	}
 }
 
+// isTextCall 只给字面量扫描用（中文、占位符、落单键、档位前缀）。它按名字认。
+// 动态取键的入口不走这里，见 bindingProblems。
 func isTextCall(n *ast.CallExpr) (name, key string, argc int, literal bool) {
 	switch fun := n.Fun.(type) {
 	case *ast.Ident:
@@ -370,6 +375,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 	cases := []struct {
 		name string
 		file string
+		pass bool
 		edit func(t *testing.T, src string) string
 		want []string
 	}{
@@ -457,6 +463,43 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
 		},
+		{
+			name: "ImportAlias",
+			edit: func(t *testing.T, src string) string {
+				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
+					"tr \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = tr.T(\"side.status.\" + \"typo\")")
+			},
+			want: []string{"未登记的字符串拼接", "render.go"},
+		},
+		{
+			name: "DotImport",
+			edit: func(t *testing.T, src string) string {
+				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
+					". \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = T(\"side.status.\" + \"typo\")")
+			},
+			want: []string{"未登记的字符串拼接", "render.go"},
+		},
+		{
+			name: "FuncValue",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
+					"f := i18n.T\n\t\t_ = f(\"side.status.\" + \"typo\")\n\t\tst := i18n.T(activityStatusKey[x.Status])")
+			},
+			want: []string{"不在直接调用", "render.go"},
+		},
+		{
+			name: "AliasTier",
+			file: "settings.go",
+			pass: true,
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, `func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }`,
+					"type Tier2 = deckstore.Tier\n\nfunc tierName(t Tier2) string { return T(\"tier.\" + string(t)) }")
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -473,6 +516,12 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 				t.Fatal(err)
 			}
 			blob := strings.Join(probs, "\n")
+			if tc.pass {
+				if len(probs) != 0 {
+					t.Fatalf("应通过，实际：\n%s", blob)
+				}
+				return
+			}
 			for _, w := range tc.want {
 				if !strings.Contains(blob, w) {
 					t.Fatalf("应报错含 %q，实际：\n%s", w, blob)
@@ -547,11 +596,15 @@ func dynamicCallProblems(src map[string]string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+		text, err := i18nTextFuncs(imp)
+		if err != nil {
+			return err
+		}
 		checked, err := checkCovered(fset, imp, files)
 		if err != nil {
 			return err
 		}
-		probs = bindingProblems(fset, checked)
+		probs = bindingProblems(fset, checked, text)
 		return nil
 	})
 	return probs, err
@@ -666,6 +719,27 @@ func pkgImportPath(dir string) string {
 	return moduleImport + "/" + filepath.ToSlash(rel)
 }
 
+// i18nTextFuncs 取出 i18n.T 与 i18n.Tf 的函数对象。比对用对象，不用名字。
+// 当前 i18n 没有 Tf。名字仍会查；以后加上，入口自动把它算进去。
+func i18nTextFuncs(imp types.Importer) (map[types.Object]bool, error) {
+	pkg, err := imp.Import(i18nImport)
+	if err != nil {
+		return nil, fmt.Errorf("导入 i18n：%w", err)
+	}
+	out := map[types.Object]bool{}
+	for _, name := range []string{"T", "Tf"} {
+		fn, ok := pkg.Scope().Lookup(name).(*types.Func)
+		if !ok {
+			if name == "T" {
+				return nil, errors.New("i18n.T 不是函数")
+			}
+			continue
+		}
+		out[fn] = true
+	}
+	return out, nil
+}
+
 func withTypeImp(fn func(*token.FileSet, types.Importer) error) error {
 	typeImpMu.Lock()
 	defer typeImpMu.Unlock()
@@ -731,13 +805,37 @@ func checkCovered(fset *token.FileSet, imp types.Importer, files []parsedFile) (
 	return out, nil
 }
 
-func bindingProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
+func bindingProblems(fset *token.FileSet, pkgs []checkedPkg, text map[types.Object]bool) []string {
 	var probs []string
 	got := map[string]bool{}
 	seen := map[token.Pos]bool{}
+	directCount := 0
 	for _, cp := range pkgs {
-		w := bindWorld{info: cp.info, pkg: cp.pkg, enums: cp.enums}
+		w := bindWorld{info: cp.info, pkg: cp.pkg, enums: cp.enums, text: text}
+		direct, inFunc := directCalls(cp.files)
+		for id, obj := range cp.info.Uses {
+			if !text[obj] {
+				continue
+			}
+			site, ok := direct[id]
+			if !ok {
+				probs = append(probs, fmt.Sprintf("%s：文字函数 %s 不在直接调用的位置", fset.Position(id.Pos()), id.Name))
+				continue
+			}
+			directCount++
+			if !dynamicKeyCall(site.call) {
+				continue
+			}
+			seen[site.call.Pos()] = true
+			fn := inFunc[site.call]
+			if fn == "" {
+				probs = append(probs, fmt.Sprintf("%s：动态取键不在函数里", fset.Position(site.call.Pos())))
+				continue
+			}
+			recordDynamic(fset, &w, got, &probs, site.file, fn, site.call)
+		}
 		for _, pf := range cp.files {
+			base := filepath.Base(pf.path)
 			for _, d := range pf.file.Decls {
 				fd, ok := d.(*ast.FuncDecl)
 				if !ok || fd.Body == nil {
@@ -748,26 +846,15 @@ func bindingProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 					if !ok {
 						return true
 					}
+					if id := callFunIdent(call); id != nil && text[objOf(cp.info, id)] {
+						return true
+					}
 					name, _, _, literal := isTextCall(call)
 					if name == "" || literal {
 						return true
 					}
 					seen[call.Pos()] = true
-					expr, err := printExpr(fset, call.Args[0])
-					if err != nil {
-						probs = append(probs, err.Error())
-						return true
-					}
-					pos := fset.Position(call.Pos())
-					if okCall, why := w.realTextCall(call); !okCall {
-						probs = append(probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
-						return true
-					}
-					if okShape, why := w.classify(call.Args[0]); !okShape {
-						probs = append(probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
-						return true
-					}
-					got[filepath.Base(pf.path)+" · "+fd.Name.Name+" · "+expr] = true
+					recordDynamic(fset, &w, got, &probs, base, fd.Name.Name, call)
 					return true
 				})
 			}
@@ -783,6 +870,9 @@ func bindingProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 				return true
 			})
 		}
+	}
+	if directCount < len(dynamicCallAllow) {
+		probs = append(probs, fmt.Sprintf("按对象找到的直接调用有 %d 个，少于返工 3 统计的 %d 个", directCount, len(dynamicCallAllow)))
 	}
 	want := map[string]bool{}
 	for _, s := range dynamicCallAllow {
@@ -802,6 +892,90 @@ func bindingProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 	return probs
 }
 
+// callSite 是一处调用，以及它所在的文件（不含目录）。
+type callSite struct {
+	call *ast.CallExpr
+	file string
+}
+
+// directCalls 记下直接调用的函数位置：Fun 本身，或 Fun 这个选择器的 Sel。
+// inFunc 的值是包住这处调用的函数名。不在函数里则为空。
+// defer 与 go 的语句包着的仍是 CallExpr，算直接调用，不算取值。
+func directCalls(files []parsedFile) (map[*ast.Ident]callSite, map[*ast.CallExpr]string) {
+	direct := map[*ast.Ident]callSite{}
+	inFunc := map[*ast.CallExpr]string{}
+	for _, pf := range files {
+		base := filepath.Base(pf.path)
+		for _, d := range pf.file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					inFunc[call] = fd.Name.Name
+				}
+				return true
+			})
+		}
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			site := callSite{call: call, file: base}
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				direct[fun] = site
+			case *ast.SelectorExpr:
+				direct[fun.Sel] = site
+			}
+			return true
+		})
+	}
+	return direct, inFunc
+}
+
+func callFunIdent(call *ast.CallExpr) *ast.Ident {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun
+	case *ast.SelectorExpr:
+		return fun.Sel
+	default:
+		return nil
+	}
+}
+
+// dynamicKeyCall 是要交给参数检查的直接调用：有参数、不是展开、首参不是字符串字面量。
+func dynamicKeyCall(call *ast.CallExpr) bool {
+	if call == nil || len(call.Args) == 0 || call.Ellipsis.IsValid() {
+		return false
+	}
+	if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		return false
+	}
+	return true
+}
+
+func recordDynamic(fset *token.FileSet, w *bindWorld, got map[string]bool, probs *[]string, fileBase, fn string, call *ast.CallExpr) {
+	expr, err := printExpr(fset, call.Args[0])
+	if err != nil {
+		*probs = append(*probs, err.Error())
+		return
+	}
+	pos := fset.Position(call.Pos())
+	if okCall, why := w.realTextCall(call); !okCall {
+		*probs = append(*probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
+		return
+	}
+	if okShape, why := w.classify(call.Args[0]); !okShape {
+		*probs = append(*probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
+		return
+	}
+	got[fileBase+" · "+fn+" · "+expr] = true
+}
+
 // enumInfo 描述一张被 TextKeys 枚举到的包级表。比对用对象，不用名字。
 // valueIsKey：下标的结果就是文字键。fields：结构体元素上，TextKeys 实际读过的字段。
 type enumInfo struct {
@@ -814,6 +988,7 @@ type bindWorld struct {
 	info  *types.Info
 	pkg   *types.Package
 	enums map[*types.Var]enumInfo
+	text  map[types.Object]bool
 }
 
 func enumsIn(info *types.Info, pkg *types.Package, files []*ast.File) map[*types.Var]enumInfo {
@@ -948,6 +1123,9 @@ func objOf(info *types.Info, id *ast.Ident) types.Object {
 }
 
 func (w *bindWorld) realTextCall(call *ast.CallExpr) (bool, string) {
+	if id := callFunIdent(call); id != nil && w.text[objOf(w.info, id)] {
+		return true, ""
+	}
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
 		fn, ok := objOf(w.info, fun).(*types.Func)
@@ -1033,7 +1211,7 @@ func (w *bindWorld) tierConcat(arg ast.Expr) (bool, string) {
 }
 
 func isDeckstoreTier(t types.Type) bool {
-	named, ok := t.(*types.Named)
+	named, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		return false
 	}
