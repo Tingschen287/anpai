@@ -140,12 +140,16 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 	// 上游失败时退出码可能仍是 0，真正的结论在 success 字段上，
 	// 原因在 error/code 里。把它的原话带出来，不要只说一句「失败了」。
 	if !res.Success {
-		detail := res.Error
-		if res.Code != "" {
-			detail = res.Code + ": " + detail
-		}
-		if detail == "" {
-			detail = i18n.E("err.agentdeck.clientlaunch.4").Error()
+		// 上游没给原因时，用嵌套码。不要先把中文压成字符串，否则英文句里会留下中文。
+		// 上游自己的原文仍是普通字符串，不当成码。
+		var detail any
+		switch {
+		case res.Error == "" && res.Code == "":
+			detail = i18n.E("err.agentdeck.clientlaunch.4")
+		case res.Code != "":
+			detail = res.Code + ": " + res.Error
+		default:
+			detail = res.Error
 		}
 		return res, i18n.E("err.agentdeck.clientlaunch.2", detail)
 	}

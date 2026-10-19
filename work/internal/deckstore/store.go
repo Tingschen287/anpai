@@ -429,12 +429,18 @@ type ErrOverEnvelope struct {
 	Use     SlotUse
 	Env     Envelope
 	Reason  string
+	// Why 是原因的码。Reason 仍是中文原文，给旧的 Error() 用。
+	Why *i18n.Error `json:"-"`
 }
 
 func (e *ErrOverEnvelope) Error() string { return e.I18n().Error() }
 
 func (e *ErrOverEnvelope) I18n() *i18n.Error {
-	return i18n.E("err.deckstore.erroverenvelope", e.Project, e.Env.ID, e.Env.Version, e.Reason, e.Use.Subagents, e.Env.MaxSubagents, e.Use.Frontier, e.Env.MaxFrontier)
+	why := any(e.Reason)
+	if e.Why != nil {
+		why = e.Why
+	}
+	return i18n.E("err.deckstore.erroverenvelope", e.Project, e.Env.ID, e.Env.Version, why, e.Use.Subagents, e.Env.MaxSubagents, e.Use.Frontier, e.Env.MaxFrontier)
 }
 
 // Reservation 是一次启动前的名额预留。
@@ -485,16 +491,16 @@ func (s *Store) Reserve(x Session, exceptionDecision string) (Reservation, error
 		if x.Role == "sub" {
 			use := s.slotsLocked(x.Project)
 			env := p.Envelope
-			var why string
+			var why *i18n.Error
 			switch {
 			case use.Subagents+1 > env.MaxSubagents:
-				why = i18n.E("err.deckstore.storereserve.5").Error()
+				why = i18n.E("err.deckstore.storereserve.5")
 			case x.Tier == Frontier && use.Frontier+1 > env.MaxFrontier:
-				why = i18n.E("err.deckstore.storereserve.6").Error()
+				why = i18n.E("err.deckstore.storereserve.6")
 			}
-			if why != "" {
+			if why != nil {
 				if exceptionDecision == "" {
-					return nil, nil, &ErrOverEnvelope{Project: x.Project, Use: use, Env: env, Reason: why}
+					return nil, nil, &ErrOverEnvelope{Project: x.Project, Use: use, Env: env, Reason: why.Error(), Why: why}
 				}
 				d, ok := s.decs[exceptionDecision]
 				if !ok || d.Kind != KindCost || d.Project != x.Project || d.State != StateExecuting {
@@ -745,8 +751,9 @@ type Notification struct {
 	Text    string    `json:"text"`
 	Source  string    `json:"source,omitempty"`
 	// Code 和 Args 给界面翻译。旧的 jsonl 没有这两项，读出来是空，界面就显示 Text。
-	Code string `json:"code,omitempty"`
-	Args []any  `json:"args,omitempty"`
+	// Args 用 i18n.Args：读回时数字保持 json.Number，%d 才不会变成 float64。
+	Code string    `json:"code,omitempty"`
+	Args i18n.Args `json:"args,omitempty"`
 }
 
 const keepNotes = 2000
@@ -779,7 +786,7 @@ func (s *Store) NotifyCoded(project, kind string, err *i18n.Error, source string
 		s.noteSeq++
 		n = Notification{
 			Seq: s.noteSeq, At: s.now(), Project: project, Kind: kind,
-			Text: Clean(text, 600), Source: Clean(source, 120), Code: code, Args: args,
+			Text: Clean(text, 600), Source: Clean(source, 120), Code: code, Args: i18n.Args(CleanArgs(args, 600)),
 		}
 		s.notes = append(s.notes, n)
 		if len(s.notes) > keepNotes {

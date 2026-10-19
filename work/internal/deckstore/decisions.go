@@ -53,23 +53,25 @@ const (
 
 // Decision 是一个待 owner 决定的事项。
 type Decision struct {
-	ID         string            `json:"id"`
-	Project    string            `json:"project"`
-	Kind       string            `json:"kind"`
-	Summary    string            `json:"summary"`
-	Options    []string          `json:"options"`
-	Recommend  string            `json:"recommend,omitempty"`
-	Scope      map[string]string `json:"scope,omitempty"`
-	ScopeHash  string            `json:"scope_hash,omitempty"`
-	Version    int               `json:"version"`
-	State      string            `json:"state"`
-	Answer     string            `json:"answer,omitempty"`
-	AnsweredBy string            `json:"answered_by,omitempty"`
-	CreatedBy  string            `json:"created_by"`
-	CreatedAt  time.Time         `json:"created_at"`
-	ExpiresAt  time.Time         `json:"expires_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
-	Result     string            `json:"result,omitempty"`
+	ID          string            `json:"id"`
+	Project     string            `json:"project"`
+	Kind        string            `json:"kind"`
+	Summary     string            `json:"summary"`
+	SummaryCode string            `json:"summary_code,omitempty"`
+	SummaryArgs i18n.Args         `json:"summary_args,omitempty"`
+	Options     []string          `json:"options"`
+	Recommend   string            `json:"recommend,omitempty"`
+	Scope       map[string]string `json:"scope,omitempty"`
+	ScopeHash   string            `json:"scope_hash,omitempty"`
+	Version     int               `json:"version"`
+	State       string            `json:"state"`
+	Answer      string            `json:"answer,omitempty"`
+	AnsweredBy  string            `json:"answered_by,omitempty"`
+	CreatedBy   string            `json:"created_by"`
+	CreatedAt   time.Time         `json:"created_at"`
+	ExpiresAt   time.Time         `json:"expires_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	Result      string            `json:"result,omitempty"`
 }
 
 // DefaultDecisionTTL 是决定的默认有效期。
@@ -77,14 +79,15 @@ const DefaultDecisionTTL = 24 * time.Hour
 
 // NewDecision 是创建决定的输入；id、version、状态、时间由 Store 定，不信调用方。
 type NewDecision struct {
-	Project   string
-	Kind      string
-	Summary   string
-	Options   []string // 额外的具体选项；approve/reject/stop 由 Store 按类别补上
-	Recommend string
-	Scope     map[string]string
-	CreatedBy string
-	TTL       time.Duration
+	Project    string
+	Kind       string
+	Summary    string
+	SummaryErr *i18n.Error // 有码时落盘码和参数。Summary 空则用它的中文原文
+	Options    []string    // 额外的具体选项；approve/reject/stop 由 Store 按类别补上
+	Recommend  string
+	Scope      map[string]string
+	CreatedBy  string
+	TTL        time.Duration
 }
 
 // CreateDecision 新建一个 open 的决定。
@@ -97,7 +100,15 @@ func (s *Store) CreateDecision(in NewDecision) (Decision, error) {
 		if _, ok := s.settings.Project(in.Project); !ok && in.Project != "" {
 			return nil, nil, i18n.E("err.deckstore.storecreatedecision.2", in.Project)
 		}
-		if in.Summary == "" || in.CreatedBy == "" {
+		summary := in.Summary
+		var sumCode string
+		var sumArgs []any
+		if in.SummaryErr != nil {
+			summary = in.SummaryErr.Error()
+			sumCode, sumArgs, _ = i18n.Wire(in.SummaryErr)
+			sumArgs = CleanArgs(sumArgs, 800)
+		}
+		if summary == "" || in.CreatedBy == "" {
 			return nil, nil, i18n.E("err.deckstore.storecreatedecision.3")
 		}
 		opts := []string{}
@@ -130,7 +141,8 @@ func (s *Store) CreateDecision(in NewDecision) (Decision, error) {
 		for k, v := range in.Scope {
 			scope[k] = v
 		}
-		d := &Decision{ID: newID("dec"), Project: in.Project, Kind: in.Kind, Summary: Clean(in.Summary, 800),
+		d := &Decision{ID: newID("dec"), Project: in.Project, Kind: in.Kind, Summary: Clean(summary, 800),
+			SummaryCode: sumCode, SummaryArgs: i18n.Args(sumArgs),
 			Options: opts, Recommend: Clean(in.Recommend, 80), Scope: scope, ScopeHash: ScopeHash(scope),
 			Version: 1, State: StateOpen, CreatedBy: in.CreatedBy, CreatedAt: now, ExpiresAt: now.Add(ttl), UpdatedAt: now}
 		s.decs[d.ID] = d
@@ -163,6 +175,9 @@ func checkScope(scope map[string]string) error {
 func (d *Decision) clone() Decision {
 	c := *d
 	c.Options = append([]string(nil), d.Options...)
+	if d.SummaryArgs != nil {
+		c.SummaryArgs = append(i18n.Args(nil), d.SummaryArgs...)
+	}
 	if d.Scope != nil {
 		c.Scope = make(map[string]string, len(d.Scope))
 		for k, v := range d.Scope {

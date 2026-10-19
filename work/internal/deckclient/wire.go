@@ -3,6 +3,9 @@ package deckclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"strings"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
@@ -93,26 +96,65 @@ func expandArgs(args []any, depth int) []any {
 func expandArg(a any, depth int) any {
 	switch v := a.(type) {
 	case json.Number:
-		if i, err := v.Int64(); err == nil {
+		return numberForVerb(v)
+	case float64:
+		// 旧解码可能把整数变成 float64。只有恰好落在 int64 里的才还原，2.5 仍是小数。
+		if i, ok := exactInt64(v); ok {
 			return i
 		}
-		if f, err := v.Float64(); err == nil {
-			return f
-		}
-		return v.String()
+		return v
 	case string:
-		code, nested, fallback, ok := i18n.ValidNest(v)
-		if !ok {
-			return v
+		// 普通字符串不是嵌套码。外部原文即使长得像码，也原样显示。
+		return v
+	case i18n.Nest:
+		return renderNest(v, depth)
+	case i18n.List:
+		return joinList(v, depth)
+	case map[string]any:
+		if l, ok := i18n.ListFromMap(v); ok {
+			return joinList(l, depth)
 		}
-		if s, ok := renderCoded(code, nested, depth+1); ok {
-			return s
-		}
-		if fallback != "" {
-			return fallback
+		if n, ok := i18n.NestFromMap(v); ok {
+			return renderNest(n, depth)
 		}
 		return v
 	default:
 		return a
 	}
+}
+
+func numberForVerb(v json.Number) any {
+	if i, err := v.Int64(); err == nil {
+		return i
+	}
+	if f, err := v.Float64(); err == nil {
+		return f
+	}
+	return v.String()
+}
+
+func exactInt64(f float64) (int64, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f > math.MaxInt64 || f < math.MinInt64 {
+		return 0, false
+	}
+	i := int64(f)
+	return i, float64(i) == f
+}
+
+func renderNest(n i18n.Nest, depth int) any {
+	if s, ok := renderCoded(n.Code, n.Args, depth+1); ok {
+		return s
+	}
+	if n.Error != "" {
+		return n.Error
+	}
+	return n.Code
+}
+
+func joinList(l i18n.List, depth int) string {
+	parts := make([]string, len(l.Items))
+	for i, it := range l.Items {
+		parts[i] = fmt.Sprint(expandArg(it, depth))
+	}
+	return strings.Join(parts, i18n.T(l.Sep))
 }

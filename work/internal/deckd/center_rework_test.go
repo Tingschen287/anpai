@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
@@ -24,7 +25,7 @@ func TestResetAfterRebuildCapturesTheDepartedSession(t *testing.T) {
 	l.Grant("sub", "deck 派出")
 	targets := map[string]viewstate.Target{"sub": {Session: "sub", Tmux: "agentdeck_sub", Role: "sub", Title: "子"}}
 	m := viewstate.New(w.center, l, func(id string) (viewstate.Target, bool) { x, ok := targets[id]; return x, ok },
-		func(string) error { return nil }, nil)
+		func(*i18n.Error) error { return nil }, nil)
 	if err := m.Open("sub"); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestHandbackOfVanishedSessionStaysPending(t *testing.T) {
 		"gone": {Session: "gone", Tmux: "agentdeck_gone", Role: "sub", Title: "没了"},
 	}
 	m := viewstate.New(w.center, l, func(id string) (viewstate.Target, bool) { x, ok := targets[id]; return x, ok },
-		func(string) error { return nil }, nil)
+		func(*i18n.Error) error { return nil }, nil)
 	// 当成已经显示并接管（agent-deck 上并没有 agentdeck_gone）：直接构造不了，就用 sub 打开再改目标的 tmux 名
 	if err := m.Open("sub"); err != nil {
 		t.Fatal(err)
@@ -130,7 +131,7 @@ func TestRealCenterRefusesResetFromAnotherClient(t *testing.T) {
 	l.Grant("sub", "deck 派出")
 	targets := map[string]viewstate.Target{"sub": {Session: "sub", Tmux: "agentdeck_sub", Role: "sub", Title: "子"}}
 	m := viewstate.New(w.center, l, func(id string) (viewstate.Target, bool) { x, ok := targets[id]; return x, ok },
-		func(string) error { return nil }, nil)
+		func(*i18n.Error) error { return nil }, nil)
 	if err := m.Open("sub"); err != nil {
 		t.Fatal(err)
 	}

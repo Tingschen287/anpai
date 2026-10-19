@@ -275,7 +275,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		}
 		if !s.store.TrustValid(x.Project, x.Tool, p.Path, x.Dir, path, version) {
 			d, err := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCodexTrust,
-				Summary: i18n.E("err.deckd.serverrunspawn.2", plan.agent.Name, x.Dir).Error(),
+				SummaryErr: i18n.E("err.deckd.serverrunspawn.2", plan.agent.Name, x.Dir),
 				Scope: map[string]string{"action": "codex_trust", "project": x.Project, "tool": x.Tool, "project_dir": p.Path, "dir": x.Dir,
 					"tool_path": path, "tool_version": version, "request_id": x.RequestID},
 				Recommend: deckstore.OptApprove, CreatedBy: creatorOf(c)})
@@ -309,13 +309,13 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	quotaGate := x.Role == "sub" && x.Tier == deckstore.Frontier && s.quotaUnsure(ctx, x.Tool)
 	if quotaGate && exception == "" {
 		// 同一个批准随后也会被预留当作超额例外用掉：包络也超了就在同一条决定里写明，owner 一次看清两个原因
-		summary := i18n.E("err.deckd.serverrunspawn.7", plan.agent.Name, x.Tier, x.Model, x.Title).Error()
+		summary := i18n.E("err.deckd.serverrunspawn.7", plan.agent.Name, x.Tier, x.Model, x.Title)
 		if u := s.store.Slots(x.Project); u.Subagents >= p.Envelope.MaxSubagents || u.Frontier >= p.Envelope.MaxFrontier {
-			summary = i18n.E("err.deckd.serverrunspawn.8", u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.Title).Error()
+			summary = i18n.E("err.deckd.serverrunspawn.8", u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.Title)
 		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			Summary: summary,
-			Scope:   deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
+			SummaryErr: summary,
+			Scope:      deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
 			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.9", derr))
 			return
@@ -334,10 +334,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	res, err := s.store.Reserve(x, exception)
 	var over *deckstore.ErrOverEnvelope
 	if errors.As(err, &over) {
+		whyOver := any(over.Reason)
+		if over.Why != nil {
+			whyOver = over.Why
+		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			Summary:   i18n.E("err.deckd.serverrunspawn.11", over.Reason, plan.agent.Name, x.Tier, x.Model, x.Title).Error(),
-			Scope:     deckstore.SpawnScope(x, p),
-			Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
+			SummaryErr: i18n.E("err.deckd.serverrunspawn.11", whyOver, plan.agent.Name, x.Tier, x.Model, x.Title),
+			Scope:      deckstore.SpawnScope(x, p),
+			Recommend:  deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
 			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.12", err, derr))
 			return
@@ -375,16 +379,18 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	out, lerr := s.agents.upstream.Launch(ctx, lr)
 	id, uncertain, why := launchOutcome(out, lerr)
 	if id == "" {
-		s.store.LaunchFailed(key, uncertain, why)
+		s.store.LaunchFailed(key, uncertain, textOf(why))
 		code := http.StatusBadGateway
-		writeJSON(w, code, map[string]any{"error": i18n.E("err.deckd.serverrunspawn.35", why).Error(), "session": key, "uncertain": uncertain})
+		failErr := i18n.E("err.deckd.serverrunspawn.35", why)
+		wcode, wargs, _ := i18n.Wire(failErr)
+		writeJSON(w, code, map[string]any{"error": failErr.Error(), "code": wcode, "args": wargs, "session": key, "uncertain": uncertain})
 		return
 	}
 	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
 	// 那样起的不是 owner 选的 agent，停掉、不送任务
 	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
-		why := i18n.E("err.deckd.serverrunspawn.15", x.Tool, out.Tool, x.Tool).Error()
-		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", why).Error(), false, i18n.E("err.deckd.serverrunspawn.37").Error())
+		why := i18n.E("err.deckd.serverrunspawn.15", x.Tool, out.Tool, x.Tool)
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", why), false, i18n.E("err.deckd.serverrunspawn.37"))
 		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverrunspawn.16", id, why))
 		return
 	}
@@ -399,7 +405,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
 	if err := s.processesNoBypass(ctx, tmux, plan.agent); err != nil {
-		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", err).Error(), false, i18n.E("err.deckd.serverrunspawn.39").Error())
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", err), false, i18n.E("err.deckd.serverrunspawn.39"))
 		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverrunspawn.18", id, err))
 		return
 	}
@@ -410,17 +416,17 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		if err != nil {
 			var notStarted *projectctl.ErrStartNotStarted
 			unknown := !errors.As(err, &notStarted)
-			what := i18n.E("err.deckd.serverrunspawn.40", graphNode).Error()
+			what := i18n.E("err.deckd.serverrunspawn.40", graphNode)
 			if unknown {
-				what = i18n.E("err.deckd.serverrunspawn.41", graphNode).Error()
+				what = i18n.E("err.deckd.serverrunspawn.41", graphNode)
 			}
-			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.projectctl", err).Error(), unknown, what)
+			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.projectctl", err), unknown, what)
 			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.19", graphNode, err))
 			return
 		}
 		if err := s.store.SetGraphAttempt(key, graphNode, attempt); err != nil {
-			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.20", graphNode, attempt, err).Error(), true,
-				i18n.E("err.deckd.serverrunspawn.21", graphNode, attempt).Error())
+			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.20", graphNode, attempt, err), true,
+				i18n.E("err.deckd.serverrunspawn.21", graphNode, attempt))
 			writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.22", err))
 			return
 		}
@@ -428,7 +434,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	// 先记「启动期」再让会话对外可见：登记成 running 之后、看完画面之前，推送与发话都不能往它打字（n055 评审 1 B2）
 	if err := s.store.MarkStarting(key); err != nil {
 		// 记不下启动期就不能保证这期间没有别的写入：停掉刚起的会话、不送任务（attempt 2 自查）
-		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.42", err).Error(), false, i18n.E("err.deckd.serverrunspawn.43").Error())
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.42", err), false, i18n.E("err.deckd.serverrunspawn.43"))
 		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.23", id, err))
 		return
 	}
@@ -455,25 +461,25 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		}
 	}
 	delivered := false
-	note := ""
-	dialog := ""
+	var noteErr *i18n.Error
+	var dialog *i18n.Error
 	if err == nil {
 		// 先看画面：CLI 停在启动确认（目录信任等）上、或认不出输入框，就不送，在后台等（n055）
 		dialog = s.settleScreen(ctx, id, x.Tool)
 	}
 	if err != nil {
-		note = i18n.E("err.deckd.serverrunspawn.47", err).Error()
+		noteErr = i18n.E("err.deckd.serverrunspawn.47", err)
 		s.store.FinishStart(key)
-	} else if dialog != "" {
+	} else if dialog != nil {
 		got, _ := s.store.Session(key)
-		note = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
+		noteErr = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
 	} else if derr := s.sendFirstMessage(ctx, key, permit, id, plan.brief); derr != nil {
-		note = "brief " + deckstore.Clean(derr.Error(), 200)
+		noteErr = i18n.E("err.deckd.serverrunspawn.brief", deckstore.Clean(derr.Error(), 200))
 		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
 		// 主 agent 照常放开输入；记下并请 owner 看一眼（没提交的话，brief 留在输入框里看得见）
 		if x.Role == "main" && agentdeck.IsDeliveryUnconfirmed(derr) {
 			s.store.ConfirmBrief(key)
-			note = i18n.E("err.deckd.serverrunspawn.48", deckstore.Clean(derr.Error(), 160)).Error()
+			noteErr = i18n.E("err.deckd.serverrunspawn.48", deckstore.Clean(derr.Error(), 160))
 			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.Title), "deckd")
 		} else {
 			s.store.FinishStart(key)
@@ -486,23 +492,34 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			s.store.FinishStart(key)
 		}
 	}
+	note := ""
+	if noteErr != nil {
+		note = noteErr.Error()
+	}
 	if note != "" {
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
 	}
 	if x.Role == "main" && s.view != nil {
 		s.view.OpenMainInput(id) // 主 agent 若已显示在中间：按最新状态放开输入（原先要等下一次切换）
 	}
-	who := "owner"
+	var who any = "owner"
 	if c.Role == RoleMain {
-		who = i18n.E("err.deckd.serverrunspawn.49").Error()
+		who = i18n.E("err.deckd.serverrunspawn.49")
 	}
-	what := i18n.E("err.deckd.serverrunspawn.50").Error()
+	var what any = i18n.E("err.deckd.serverrunspawn.50")
 	if x.Role == "main" {
-		what = i18n.E("err.deckd.serverrunspawn.49").Error()
+		what = i18n.E("err.deckd.serverrunspawn.49")
 	}
 	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.27", who, what, x.Title, plan.agent.Name, x.Model), creatorOf(c))
 	got, _ := s.store.Session(key)
-	writeJSON(w, http.StatusCreated, map[string]any{"session": got, "brief_delivered": delivered, "note": note})
+	body := map[string]any{"session": got, "brief_delivered": delivered, "note": note}
+	if noteErr != nil {
+		if c, a, ok := i18n.Wire(noteErr); ok {
+			body["note_code"] = c
+			body["note_args"] = a
+		}
+	}
+	writeJSON(w, http.StatusCreated, body)
 }
 
 // quotaUnsure：这个工具的额度是否未知或已用尽（取不到看板也算未知）。
@@ -557,7 +574,7 @@ func (s *Server) processesNoBypass(ctx context.Context, tmux string, a deckstore
 
 // stopLaunched 停掉刚起、但不能交任务的会话（带绕过参数、Graph 开不成一轮等）：先把写入权登记给工作台，用自动许可停。
 // 停成了且 keep 为假，释放名额；没停成或 keep 为真（例如账本结果不明），标结果不明、继续占名额，交给 owner 处理。都通知 owner。
-func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.Session, why string, keep bool, what string) {
+func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.Session, why any, keep bool, what any) {
 	stopErr := s.agents.leases.Grant(id, i18n.E("err.deckd.serverstoplaunched.3").Error())
 	if stopErr == nil {
 		var permit lease.Permit
@@ -565,7 +582,7 @@ func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.S
 			stopErr = s.agents.upstream.StopSession(ctx, permit, id)
 		}
 	}
-	note := deckstore.Clean(why, 300)
+	note := deckstore.Clean(textOf(why), 300)
 	if stopErr != nil {
 		note += i18n.E("err.deckd.serverstoplaunched.4", deckstore.Clean(stopErr.Error(), 200)).Error()
 		s.store.LaunchFailed(key, true, note)
@@ -573,26 +590,52 @@ func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.S
 		return
 	}
 	s.store.LaunchFailed(key, keep, note)
-	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.2", x.Title, what, deckstore.Clean(why, 200)), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.2", x.Title, what, nestOrText(why, 200)), "deckd")
+}
+
+// textOf 取错误的中文原文。普通字符串原样返回。
+func textOf(v any) string {
+	if v == nil {
+		return ""
+	}
+	if e, ok := v.(interface{ Error() string }); ok {
+		return e.Error()
+	}
+	return fmt.Sprint(v)
+}
+
+// nestOrText：没被截断时保留码，截断后只留清洗过的原文，中文通知才和以前一样长。
+func nestOrText(v any, max int) any {
+	full := textOf(v)
+	cleaned := deckstore.Clean(full, max)
+	if cleaned != full {
+		return cleaned
+	}
+	if v == nil {
+		return ""
+	}
+	return v
 }
 
 // launchOutcome 判断启动结果：拿到会话号就算起来了；上游明确报错（有错误码或错误文字）是失败，释放名额；
 // 其余（超时、回执读不懂）是结果不明，继续占着名额，交给 owner 核对。
-func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain bool, why string) {
+func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain bool, why any) {
 	id = out.SessionID
 	if id == "" {
 		id = out.ID
 	}
 	if err == nil {
 		if id == "" {
-			return "", true, i18n.MustTextZH("err.deckd.launchoutcome.nosession")
+			return "", true, i18n.E("err.deckd.launchoutcome.nosession")
 		}
 		return id, false, ""
 	}
+	// 上游 stderr 是外部原文，保持字符串，不套码。
+	cleaned := deckstore.Clean(err.Error(), 300)
 	if out.Error != "" || out.Code != "" {
-		return "", false, deckstore.Clean(err.Error(), 300)
+		return "", false, cleaned
 	}
-	return "", true, deckstore.Clean(err.Error(), 300)
+	return "", true, cleaned
 }
 
 // DeckCommand 是 brief 里写给 agent 的 deck 命令（daemon 换成 deckd 自己的可执行文件绝对路径）。
@@ -784,7 +827,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 	// 只给停下来的子 agent 发新的话（owner 在 attempt 3 设计复审选 A'）：它还在做上一件时追加的话，与上一件的完成分不清先后，
 	// 「哪条报告属于哪件任务」就会错（attempt 3 自查 S1）。这里先按缓存的状态挡一下；真正的判断由上游在打字前一刻做（SendIfIdle）
 	if s.activity.of(x.TmuxSession) == "running" {
-		fail(w, http.StatusConflict, "%s", busySubText)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.busysubtext"))
 		return
 	}
 	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() && cur.BriefSending {
@@ -830,7 +873,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.9", deckstore.Clean(rerr.Error(), 160)), "deckd")
 		}
 		if errors.Is(err, agentdeck.ErrTargetBusy) {
-			fail(w, http.StatusConflict, "%s", busySubText)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.busysubtext"))
 			return
 		}
 		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverpostagentsend.7", err))

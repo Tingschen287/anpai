@@ -127,7 +127,7 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 	}
 	if st.PID != cl.PID {
 		// 翻转落到了共用 tty 的新 client 上（它还被切到了旧 client 的会话）：还原它
-		return c.replaced(ctx, i18n.E("err.deckd.tmuxcentersetreadonly.3").Error(), cl, st)
+		return c.replaced(ctx, i18n.E("err.deckd.tmuxcentersetreadonly.3"), cl, st)
 	}
 	if st.ReadOnly != ro {
 		return i18n.E("err.deckd.tmuxcentersetreadonly.1", ro, st.ReadOnly)
@@ -179,7 +179,7 @@ func (c *TmuxCenter) Switch(tmuxSession string) error {
 		return i18n.E("err.deckd.tmuxcenterswitch.1", viewstate.ErrStaleClient, err)
 	}
 	if st.PID != cl.PID {
-		return c.replaced(ctx, i18n.E("err.deckd.tmuxcenterswitch.2").Error(), cl, st)
+		return c.replaced(ctx, i18n.E("err.deckd.tmuxcenterswitch.2"), cl, st)
 	}
 	return nil
 }
@@ -187,7 +187,7 @@ func (c *TmuxCenter) Switch(tmuxSession string) error {
 // replaced：命令执行后读回发现落到了新 client 上（新旧 client 共用中间窗格的 tty，「找到 client」与「执行命令」
 // 之间新 client 恰好连上）。把新 client 还原到起点（deck-idle、只读），返回 ErrStaleClient（n049 评审 3 B1-A 的第二道）。
 // 新 client 自己的重连通知要等这次操作放锁后才执行，还原不会与它交错。
-func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentdeck.TmuxClient) error {
+func (c *TmuxCenter) replaced(ctx context.Context, what any, old, now agentdeck.TmuxClient) error {
 	var errs []error
 	if now.Session != viewstate.Idle {
 		errs = append(errs, agentdeck.SwitchClient(ctx, c.AgentSocket, now.TTY, viewstate.Idle))
@@ -201,9 +201,9 @@ func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentde
 		return i18n.E("err.deckd.tmuxcenterreplaced.1", viewstate.ErrStaleClient, what, old.PID, now.PID)
 	}
 	why := errors.Join(append(errs, err)...)
-	state := i18n.E("err.deckd.tmuxcenterreplaced.4").Error()
+	var state any = i18n.E("err.deckd.tmuxcenterreplaced.4")
 	if err == nil {
-		state = i18n.E("err.deckd.tmuxcenterreplaced.2", st.PID, st.Session, st.ReadOnly).Error()
+		state = i18n.E("err.deckd.tmuxcenterreplaced.2", st.PID, st.Session, st.ReadOnly)
 	}
 	return i18n.E("err.deckd.tmuxcenterreplaced.3", viewstate.ErrStaleClient, viewstate.ErrRestoreUnconfirmed, what, old.PID, now.PID, state, why)
 }

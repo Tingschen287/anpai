@@ -143,6 +143,19 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, body)
 }
 
+// errFields 在手写 JSON 里带上码。error 仍是中文原文。
+func errFields(err error, extra map[string]any) map[string]any {
+	body := map[string]any{"error": err.Error()}
+	if c, args, ok := i18n.Wire(err); ok {
+		body["code"] = c
+		body["args"] = args
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	return body
+}
+
 func fail(w http.ResponseWriter, code int, format string, a ...any) {
 	if len(a) == 1 {
 		if err, ok := a[0].(error); ok && (format == "%v" || format == "%s" || format == "%w") {
@@ -662,7 +675,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &he) {
 			// 操作本身已完成（例如已切走），但交还失败：会话保持接管、自动派送暂停
 			s.bus.publish(deckstore.Event{Kind: "view"})
-			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State(), "handback_failed": he.Session})
+			writeJSON(w, http.StatusConflict, errFields(err, map[string]any{"state": s.view.State(), "handback_failed": he.Session}))
 			return
 		}
 		if s.stopped() != nil {
@@ -672,7 +685,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, viewstate.ErrStaleClient) || errors.As(err, new(*viewstate.ErrPartial)) {
 			// 中途停下：状态可能已部分提交（见 ErrPartial），面板要按最新状态重画
 			s.bus.publish(deckstore.Event{Kind: "view"})
-			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State()})
+			writeJSON(w, http.StatusConflict, errFields(err, map[string]any{"state": s.view.State()}))
 			return
 		}
 		fail(w, http.StatusConflict, "%v", err)

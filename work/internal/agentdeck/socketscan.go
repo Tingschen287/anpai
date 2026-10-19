@@ -85,8 +85,8 @@ const (
 type probe struct {
 	socket  string
 	verdict probeVerdict
-	gotID   string // 只在 probeIdentityMismatch 时有意义
-	why     string // 只在 probeUnavailable 时有意义
+	gotID   string      // 只在 probeIdentityMismatch 时有意义
+	why     *i18n.Error // 只在 probeUnavailable 时有意义。Error() 仍是原来的中文
 }
 
 // classifyHasSession 把 `has-session` 的失败分门别类。
@@ -97,10 +97,10 @@ type probe struct {
 func classifyHasSession(socket string, ctxErr error, err error, stderr string) probe {
 	if ctxErr != nil {
 		return probe{socket: socket, verdict: probeUnavailable,
-			why: i18n.E("err.agentdeck.classifyhassession.1", ctxErr).Error()}
+			why: i18n.E("err.agentdeck.classifyhassession.1", ctxErr)}
 	}
 	if errors.Is(err, exec.ErrNotFound) {
-		return probe{socket: socket, verdict: probeUnavailable, why: i18n.E("err.agentdeck.classifyhassession.4").Error()}
+		return probe{socket: socket, verdict: probeUnavailable, why: i18n.E("err.agentdeck.classifyhassession.4")}
 	}
 	msg := strings.ToLower(stderr)
 	switch {
@@ -116,10 +116,10 @@ func classifyHasSession(socket string, ctxErr error, err error, stderr string) p
 		// tmux 以非零码退出却什么都没说。它对「没有这个会话」一向是会说话的，
 		// 所以这里不替它断言，只如实记下。
 		return probe{socket: socket, verdict: probeUnavailable,
-			why: i18n.E("err.agentdeck.classifyhassession.2", exitErr.ExitCode()).Error()}
+			why: i18n.E("err.agentdeck.classifyhassession.2", exitErr.ExitCode())}
 	}
 	return probe{socket: socket, verdict: probeUnavailable,
-		why: i18n.E("err.agentdeck.classifyhassession.3", err).Error()}
+		why: i18n.E("err.agentdeck.classifyhassession.3", err)}
 }
 
 // instanceIDOf 读一个 tmux 会话里的 AGENTDECK_INSTANCE_ID。
@@ -267,11 +267,11 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 // 顺序是有讲究的：越具体、越该阻止人做错事的，越先说。
 func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown, unavailable []probe) error {
 	if len(mismatched) > 0 {
-		var parts []string
+		var parts []any
 		for _, p := range mismatched {
-			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.1", p.socket, p.gotID).Error())
+			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.1", p.socket, p.gotID))
 		}
-		return i18n.E("err.agentdeck.nomatcherror.2", tmuxSession, wantInstanceID, strings.Join(parts, i18n.MustTextZH("sep.semi")))
+		return i18n.E("err.agentdeck.nomatcherror.2", tmuxSession, wantInstanceID, i18n.ListOf("sep.semi", parts...))
 	}
 	if len(unknown) > 0 {
 		var sockets []string
@@ -281,13 +281,13 @@ func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown, unava
 		return i18n.E("err.agentdeck.nomatcherror.3", tmuxSession, sockets, wantInstanceID)
 	}
 	if len(unavailable) > 0 {
-		var parts []string
+		var parts []any
 		for _, p := range unavailable {
-			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.part", p.socket, p.why).Error())
+			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.part", p.socket, p.why))
 		}
 		// 注意措辞：**没查出来**，不是「不在」。
 		// 说成「会话已结束」会让人去查一个根本没发生的问题。
-		return i18n.E("err.agentdeck.nomatcherror.4", len(unavailable), tmuxSession, strings.Join(parts, i18n.MustTextZH("sep.semi")))
+		return i18n.E("err.agentdeck.nomatcherror.4", len(unavailable), tmuxSession, i18n.ListOf("sep.semi", parts...))
 	}
 	if wantInstanceID != "" {
 		return i18n.E("err.agentdeck.nomatcherror.5", tmuxSession, wantInstanceID)

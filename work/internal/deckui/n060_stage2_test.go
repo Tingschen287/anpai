@@ -34,7 +34,7 @@ func TestEmptyKeyOnRenderRecordsMiss(t *testing.T) {
 // ownerChineseAllow 是第 2、3、4 类中文的例外。键是「文件 · 函数」，值是理由。
 // 按函数登记，不按整个文件放过。登记了但函数里已经没有中文，测试失败。
 var ownerChineseAllow = map[string]string{
-	"agents.go · (pkg)":                    "busySubText 发给主 agent，给模型读，合同不改",
+	"agents.go · (pkg)":                    "busySubText 仍留给模型读；owner 的冲突响应另带 err.deckd.busysubtext",
 	"agents.go · subBrief":                 "brief，合同不改",
 	"agents.go · MainBrief":                "brief，合同不改",
 	"reports.go · Server.reportText":       "给模型读的报告正文，合同不改",
@@ -50,9 +50,10 @@ var ownerChineseAllow = map[string]string{
 
 // TestOwnerFacingChineseIsCoded：deckd、deckstore、agentdeck、deckclient 里，
 // 没登记的函数不能再留中文字面量。登记的函数必须还留着中文，并且写了理由。
+// viewstate 不在这里扫：哨兵的 Error() 正文必须留在源码里，和码表逐字相同。
 func TestOwnerFacingChineseIsCoded(t *testing.T) {
 	hits := map[string][]string{}
-	walkProd(t, func(path string, f *ast.File, _ *token.FileSet) {
+	walkDirs(t, ownerScanDirs(), func(path string, f *ast.File, _ *token.FileSet) {
 		base := filepath.Base(path)
 		walkStack(f, func(n ast.Node, stack []ast.Node) {
 			lit, ok := n.(*ast.BasicLit)

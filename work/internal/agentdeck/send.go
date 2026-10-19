@@ -121,11 +121,12 @@ func sendResult(sessionID string, out []byte, err error, deferIfBusy bool) error
 		if jsonErr == nil && rep.Submitted != nil && *rep.Submitted {
 			return nil
 		}
-		detail := i18n.E("err.agentdeck.sendresult.2").Error()
+		base := i18n.E("err.agentdeck.sendresult.2")
+		coded := base
 		if jsonErr == nil && rep.Delivery != "" {
-			detail += i18n.E("err.agentdeck.sendresult.delivery", rep.Delivery).Error()
+			coded = i18n.E("err.agentdeck.sendresult.withdelivery", base, i18n.E("err.agentdeck.sendresult.delivery", rep.Delivery))
 		}
-		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: detail}
+		return &ErrDeliveryUnconfirmed{SessionID: sessionID, Detail: coded.Error(), coded: coded}
 	}
 	// --defer-if-busy 等到时限对方还忙：上游在打字之前就退出了，什么都没送
 	if deferIfBusy && jsonErr == nil && strings.Contains(rep.Error, deferBusyMarker) {
@@ -153,15 +154,21 @@ type ErrDeliveryUnconfirmed struct {
 	SessionID string
 	Detail    string
 	Reached   bool
+	// coded 是本地拼出来的详情。外部原文（delivery=typed 的 rep.Error）不放这里。
+	coded *i18n.Error
 }
 
 func (e *ErrDeliveryUnconfirmed) Error() string { return e.I18n().Error() }
 
 func (e *ErrDeliveryUnconfirmed) I18n() *i18n.Error {
-	if e.Reached {
-		return i18n.E("err.agentdeck.errdelivery.reached", e.SessionID, e.Detail)
+	detail := any(e.Detail)
+	if e.coded != nil {
+		detail = e.coded
 	}
-	return i18n.E("err.agentdeck.errdelivery.missed", e.SessionID, e.Detail)
+	if e.Reached {
+		return i18n.E("err.agentdeck.errdelivery.reached", e.SessionID, detail)
+	}
+	return i18n.E("err.agentdeck.errdelivery.missed", e.SessionID, detail)
 }
 
 // IsDeliveryUnconfirmed 判断一个错误是不是「送达未确认」。

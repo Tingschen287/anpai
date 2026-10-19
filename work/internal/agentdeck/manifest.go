@@ -841,7 +841,11 @@ func checkSensitiveAssignments(f string) error {
 		}
 		value, ok := assignValue(low[m[1]:])
 		if !ok || !slices.Contains(allowed, value) {
-			return i18n.E("err.agentdeck.checksensitiveassignments.3", key, value, strings.Join(allowed, i18n.MustTextZH("sep.list")))
+			items := make([]any, len(allowed))
+			for i, name := range allowed {
+				items[i] = name
+			}
+			return i18n.E("err.agentdeck.checksensitiveassignments.3", key, value, i18n.ListOf("sep.list", items...))
 		}
 	}
 	return nil

@@ -297,7 +297,7 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 			k = d.Kind
 		}
 		b.WriteString(mark + warn.Render("["+k+"]") + " " + dim.Render(d.Project) + "\n")
-		b.WriteString("  " + deckstore.Clean(d.Summary, 800) + "\n")
+		b.WriteString("  " + decisionText(d) + "\n")
 		if d.Recommend != "" {
 			b.WriteString(dim.Render(i18n.T("decide.recommend")+label(d.Recommend)) + "\n")
 		}
@@ -314,6 +314,13 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 		b.WriteString(note + "\n")
 	}
 	return b.String()
+}
+
+func decisionText(d deckstore.Decision) string {
+	if d.SummaryCode == "" {
+		return deckstore.Clean(d.Summary, 800)
+	}
+	return deckstore.Clip(deckclient.Text(d.SummaryCode, []any(d.SummaryArgs), d.Summary), 800)
 }
 
 func kindLabel(k string) string {
@@ -381,8 +388,9 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 		}
 		text := n.Text
 		if n.Code != "" {
-			text = deckclient.Text(n.Code, n.Args, n.Text)
+			text = deckclient.Text(n.Code, []any(n.Args), n.Text)
 		}
+		text = deckstore.Clip(text, 600)
 		if n.Kind == "decision" {
 			text = warn.Render(text)
 		}

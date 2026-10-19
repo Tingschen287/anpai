@@ -10,6 +10,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
@@ -127,7 +128,7 @@ func TestReportQueuedWhileOwnerTyping(t *testing.T) {
 		}
 		return viewstate.Target{Session: x.AgentDeckID, Tmux: x.TmuxSession, Role: x.Role, BriefConfirmed: true, Title: x.Title}, true
 	}
-	m := viewstate.New(c, w.leases, lookup, func(string) error { return nil }, nil)
+	m := viewstate.New(c, w.leases, lookup, func(*i18n.Error) error { return nil }, nil)
 	if err := m.Open(w.main.AgentDeckID); err != nil {
 		t.Fatal(err)
 	}

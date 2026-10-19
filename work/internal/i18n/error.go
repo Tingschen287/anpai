@@ -7,12 +7,55 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
-// nestMark 标在参数字符串开头，表示这里嵌着另一条带码错误。
-// 线路上它只是普通字符串。界面看到这个前缀就拆开，按当前语言再翻译内层。
-const nestMark = "\x1e"
+// Nest 是嵌进参数里的另一条带码错误。
+// 线路上它是对象，不是字符串。外部原文即使长得像旧的码标记，也不会被当成内层码。
+type Nest struct {
+	Code  string `json:"code"`
+	Args  []any  `json:"args,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// List 是一组按语言拼接的参数。String 用中文分隔符，放进 Error() 后中文原文不变。
+// 线路上它是对象。界面按当前语言的分隔符再拼（中文「、」或「；」，英文 ", " 或 "; "）。
+type List struct {
+	Sep   Key   `json:"sep"`
+	Items []any `json:"items"`
+}
+
+// ListOf 按分隔符键拼一组参数。sep 用 sep.list 或 sep.semi。
+func ListOf(sep Key, items ...any) List {
+	return List{Sep: sep, Items: append([]any(nil), items...)}
+}
+
+// String 用中文分隔符。fmt 在 Error() 里会调它。
+func (l List) String() string {
+	parts := make([]string, len(l.Items))
+	for i, it := range l.Items {
+		parts[i] = fmt.Sprint(it)
+	}
+	return strings.Join(parts, MustTextZH(l.Sep))
+}
+
+// Args 是线路上的参数列表。解码时用 json.Number，整数不经过 float64。
+type Args []any
+
+// UnmarshalJSON 用 json.Number 解数字，避免整数变成 float64 后 %d 打印失败，也避免超过 2^53 丢精度。
+func (a *Args) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*a = nil
+		return nil
+	}
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.UseNumber()
+	var raw []any
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	*a = raw
+	return nil
+}
 
 // verbPat 与 i18n 测试里的占位符正则一致。%% 先剥掉，不算占位符。
 var verbPat = regexp.MustCompile(`%[-+# 0]*[0-9]*(\.[0-9]+)?[a-zA-Z]`)
@@ -101,7 +144,7 @@ func codedOf(err error) *Error {
 }
 
 // Wire 取最外层的码和线路参数。外层没有码就往下拆。
-// 参数只有字符串和数字。带码的内层错误收成一条字符串，复杂值先格式化成字符串。
+// 参数是字符串、数字、嵌套码对象或列表对象。普通字符串原样放行，不在里面认码。
 func Wire(err error) (code string, args []any, ok bool) {
 	for err != nil {
 		if e := codedOf(err); e != nil && len(e.Key) > 0 {
@@ -132,7 +175,13 @@ func wireArg(a any) any {
 	case string:
 		return v
 	case *Error:
-		return nestString(v)
+		return nestOf(v)
+	case List:
+		items := make([]any, len(v.Items))
+		for i, it := range v.Items {
+			items[i] = wireArg(it)
+		}
+		return List{Sep: v.Sep, Items: items}
 	case json.Number:
 		return numberArg(v)
 	case int:
@@ -162,7 +211,7 @@ func wireArg(a any) any {
 	}
 	if err, ok := a.(error); ok {
 		if e := codedOf(err); e != nil && len(e.Key) > 0 {
-			return nestString(e)
+			return nestOf(e)
 		}
 		return err.Error()
 	}
@@ -188,19 +237,72 @@ func wireArg(a any) any {
 	return fmt.Sprint(a)
 }
 
-func nestString(e *Error) string {
+func nestOf(e *Error) Nest {
 	if e == nil {
-		return ""
+		return Nest{}
 	}
-	body, err := json.Marshal(struct {
-		Code  string `json:"code"`
-		Args  []any  `json:"args"`
-		Error string `json:"error"`
-	}{Code: string(e.Key), Args: WireArgs(e.Args), Error: e.Error()})
-	if err != nil {
-		return e.Error()
+	return Nest{Code: string(e.Key), Args: WireArgs(e.Args), Error: e.Error()}
+}
+
+// NestFromMap 认出线路上的嵌套码。只认 code、args、error 三个字段。
+// 带 sep 的是列表，不是嵌套码。普通字符串不会进这里。
+func NestFromMap(m map[string]any) (Nest, bool) {
+	if m == nil {
+		return Nest{}, false
 	}
-	return nestMark + string(body)
+	if _, ok := m["sep"]; ok {
+		return Nest{}, false
+	}
+	for k := range m {
+		if k != "code" && k != "args" && k != "error" {
+			return Nest{}, false
+		}
+	}
+	code, ok := m["code"].(string)
+	if !ok || code == "" {
+		return Nest{}, false
+	}
+	var args []any
+	if raw, exists := m["args"]; exists && raw != nil {
+		arr, ok := raw.([]any)
+		if !ok {
+			return Nest{}, false
+		}
+		args = coerceNums(arr)
+	}
+	fallback, _ := m["error"].(string)
+	return Nest{Code: code, Args: args, Error: fallback}, true
+}
+
+// ListFromMap 认出按语言拼接的列表。sep 只认 sep.list 和 sep.semi。
+func ListFromMap(m map[string]any) (List, bool) {
+	if m == nil {
+		return List{}, false
+	}
+	for k := range m {
+		if k != "sep" && k != "items" {
+			return List{}, false
+		}
+	}
+	sep, ok := m["sep"].(string)
+	if !ok {
+		return List{}, false
+	}
+	// 用字面量赋给 Key。非常量转换过不了 i18n 自己的检查。
+	var sepKey Key
+	switch sep {
+	case "sep.list":
+		sepKey = "sep.list"
+	case "sep.semi":
+		sepKey = "sep.semi"
+	default:
+		return List{}, false
+	}
+	raw, ok := m["items"].([]any)
+	if !ok {
+		return List{}, false
+	}
+	return List{Sep: sepKey, Items: coerceNums(raw)}, true
 }
 
 func numberArg(n json.Number) any {
@@ -290,31 +392,6 @@ func widenW(format string) string {
 
 func isVerbByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-// NestMark 是嵌套参数的前缀。界面用它认出内层的码。
-func NestMark() string { return nestMark }
-
-// ValidNest 拆开嵌套参数。不是嵌套时 ok 为 false。
-func ValidNest(s string) (code string, args []any, fallback string, ok bool) {
-	if !strings.HasPrefix(s, nestMark) {
-		return "", nil, "", false
-	}
-	raw := s[len(nestMark):]
-	if !utf8.ValidString(raw) {
-		return "", nil, "", false
-	}
-	var body struct {
-		Code  string          `json:"code"`
-		Args  []any           `json:"args"`
-		Error string          `json:"error"`
-	}
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&body); err != nil {
-		return "", nil, "", false
-	}
-	return body.Code, coerceNums(body.Args), body.Error, true
 }
 
 func coerceNums(args []any) []any {

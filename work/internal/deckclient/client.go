@@ -97,7 +97,10 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		return &Error{Status: resp.StatusCode, Message: e.Error, Code: e.Code, Args: e.Args}
 	}
 	if out != nil {
-		return json.Unmarshal(data, out)
+		// 数字留成 json.Number。成功响应里的 args 再按 %d 打印时仍是整数，也不会丢过 2^53 的精度。
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		return dec.Decode(out)
 	}
 	return nil
 }

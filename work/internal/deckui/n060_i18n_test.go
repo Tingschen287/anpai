@@ -110,8 +110,10 @@ func dynamicTextKeys() []string {
 //     并且就是本包 TextKeys 枚举到的那张表。按对象比对，不按名字。字段也按对象比对。
 //   - "tier." + string(参数)：string 必须是 Universe 里的预声明类型。参数类型先 Unalias，再认 deckstore.Tier。
 //     前缀另由 checkTierConcat 锁成 tier.。
-//   - 线路码：操作数是当前函数自己的参数。函数体里对真正的 i18n.Keys 做 range，
-//     用预声明 string 把 range 变量转成字符串后和这个参数比较。转换必须直接写在这个函数里。
+//   - 线路码：操作数是当前函数自己的参数。函数体里对真正的 i18n.Keys 做 range。
+//     比较必须写在 if 的条件里（可以是 && / ||），而且这个 if 在转换之前。
+//     if 的函数体要真的用上比较结果（赋值、return 或 break）。
+//     函数里不能再给这个参数赋值。转换必须直接写在这个函数里。
 //     形状不齐就按原来的规则拒绝，不因为名字像就放行。
 //
 // 表的值本身已经是 Key 时不再套转换，所以那些下标不在这张清单里。
@@ -230,11 +232,6 @@ func checkNoStrayChinese(t *testing.T) {
 					t.Errorf("%s 里有中文字面量 %q：放进 internal/i18n", fset.Position(lit.Pos()), v)
 				}
 			}
-			if strings.Contains(v, ".") {
-				if _, ok := i18n.TextZH(i18n.Key(v)); ok {
-					used[v] = true
-				}
-			}
 			return true
 		})
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -251,21 +248,9 @@ func checkNoStrayChinese(t *testing.T) {
 	})
 	// 第 2 段的错误码用在 deckd、deckstore、agentdeck、deckclient。这里只记「有人用」，不禁中文。
 	// 给 owner 看的中文另由 TestOwnerFacingChineseIsCoded 按函数卡。
+	// 键算用过，只认 i18n.E / T / Tf / Format / Errorf / MustTextZH / TextZH 的字面量参数，
+	// 以及 dynamicTextKeys。单独的字符串字面量不算。
 	walkProd(t, func(_ string, f *ast.File, _ *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			v, err := strconv.Unquote(lit.Value)
-			if err != nil || !strings.Contains(v, ".") {
-				return true
-			}
-			if _, ok := i18n.TextZH(i18n.Key(v)); ok {
-				used[v] = true
-			}
-			return true
-		})
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -330,14 +315,25 @@ func checkFormatArgs(t *testing.T) {
 }
 
 // prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
+// viewstate 在这份名单里，这样哨兵的字面量调用才算「有人用」。
 func prodDirs() []string {
+	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate")
+}
+
+// ownerScanDirs 是「函数里不能再留中文字面量」的包。不含 viewstate：
+// 哨兵 Error() 的中文正文必须留在源码里，和码表逐字相同。
+func ownerScanDirs() []string {
+	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient")
+}
+
+func pkgDirs(names ...string) []string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		panic("caller")
 	}
 	root := filepath.Dir(filepath.Dir(file))
 	var out []string
-	for _, name := range []string{"deckd", "deckstore", "agentdeck", "deckclient"} {
+	for _, name := range names {
 		out = append(out, filepath.Join(root, name))
 	}
 	return out
@@ -345,8 +341,13 @@ func prodDirs() []string {
 
 func walkProd(t *testing.T, fn func(path string, f *ast.File, fset *token.FileSet)) {
 	t.Helper()
+	walkDirs(t, prodDirs(), fn)
+}
+
+func walkDirs(t *testing.T, dirs []string, fn func(path string, f *ast.File, fset *token.FileSet)) {
+	t.Helper()
 	fset := token.NewFileSet()
-	for _, dir := range prodDirs() {
+	for _, dir := range dirs {
 		ms, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
@@ -463,6 +464,15 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		orig[base] = string(b)
 		pathOf[base] = p
 	}
+	// wire.go 在 deckclient，不在 coveredDirs。单独读入，供反例改内存副本。
+	wirePath := filepath.Join(moduleRoot(), "internal", "deckclient", "wire.go")
+	wireBytes, err := os.ReadFile(wirePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig["wire.go"] = string(wireBytes)
+	pathOf["wire.go"] = wirePath
+	watch := append(append([]string{}, bases...), "wire.go")
 	sanitizePath := filepath.Join(moduleRoot(), "internal", "deckstore", "sanitize.go")
 	sanBytes, err := os.ReadFile(sanitizePath)
 	if err != nil {
@@ -470,7 +480,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 	}
 	sanitizeOrig := string(sanBytes)
 	t.Cleanup(func() {
-		for _, base := range bases {
+		for _, base := range watch {
 			got, err := os.ReadFile(pathOf[base])
 			if err != nil {
 				t.Errorf("重读 %s：%v", base, err)
@@ -737,6 +747,32 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 				return beforeReturn(t, src, "\ttype keyNest struct{ K i18n.Key }\n\tb := keyNest{K: pageText[0]}\n\t_ = (*struct{ K i18n.Key })(&b)\n")
 			},
 			want: []string{"非常量转换成含有 Key 的类型", "i18n.Key", "idle.go"},
+		},
+		{
+			name: "WireCompareDiscarded",
+			file: "wire.go",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "\t\tif string(k) == code {\n\t\t\tknown = true\n\t\t\tbreak\n\t\t}", "\t\t_ = string(k) == code")
+			},
+			want: []string{"键参数是局部变量或参数 code", "wire.go"},
+		},
+		{
+			name: "WireCompareAfterConvert",
+			file: "wire.go",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src,
+					"\tknown := false\n\tfor _, k := range i18n.Keys() {\n\t\tif string(k) == code {\n\t\t\tknown = true\n\t\t\tbreak\n\t\t}\n\t}\n\tkey := i18n.Key(code)",
+					"\tknown := false\n\tkey := i18n.Key(code)\n\tfor _, k := range i18n.Keys() {\n\t\tif string(k) == code {\n\t\t\tknown = true\n\t\t\tbreak\n\t\t}\n\t}")
+			},
+			want: []string{"键参数是局部变量或参数 code", "wire.go"},
+		},
+		{
+			name: "WireCodeReassigned",
+			file: "wire.go",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "\tknown := false\n\tfor _, k := range i18n.Keys() {", "\tknown := false\n\tcode = \"forged\"\n\tfor _, k := range i18n.Keys() {")
+			},
+			want: []string{"键参数是局部变量或参数 code", "wire.go"},
 		},
 		{
 			name:    "RuntimeNet",
@@ -1744,6 +1780,10 @@ func wireCodeShape(info *types.Info, op ast.Expr, stack []ast.Node) bool {
 	if !param {
 		return false
 	}
+	// 参数被重新赋值后，前面的比较不再能证明转换用的是原值。
+	if codeAssigned(info, fn.Body, codeObj) {
+		return false
+	}
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if found || n == nil {
@@ -1771,17 +1811,88 @@ func wireCodeShape(info *types.Info, op ast.Expr, stack []ast.Node) bool {
 			if _, isLit := m.(*ast.FuncLit); isLit {
 				return false
 			}
-			bin, ok := m.(*ast.BinaryExpr)
-			if !ok || bin.Op != token.EQL {
+			ifs, ok := m.(*ast.IfStmt)
+			if !ok {
 				return true
 			}
-			if wireStringEq(info, bin, valObj, codeObj) {
+			// 比较必须发生在转换之前。写在转换后面的 if 不算。
+			if !ifs.Pos().IsValid() || !op.Pos().IsValid() || ifs.Pos() >= op.Pos() {
+				return true
+			}
+			if !condHasWireEq(info, ifs.Cond, valObj, codeObj) {
+				return true
+			}
+			if !ifBodyUses(ifs.Body) {
+				return true
+			}
+			found = true
+			return false
+		})
+		return !found
+	})
+	return found
+}
+
+// condHasWireEq 认 if 条件里的 string(k) == code。条件可以是 && 或 ||。
+func condHasWireEq(info *types.Info, e ast.Expr, valObj, codeObj types.Object) bool {
+	bin, ok := unparen(e).(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+	switch bin.Op {
+	case token.EQL:
+		return wireStringEq(info, bin, valObj, codeObj)
+	case token.LAND, token.LOR:
+		return condHasWireEq(info, bin.X, valObj, codeObj) || condHasWireEq(info, bin.Y, valObj, codeObj)
+	default:
+		return false
+	}
+}
+
+// ifBodyUses 要求 if 的函数体真的用上比较结果：赋值、return 或 break/continue。
+func ifBodyUses(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	used := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if used || n == nil {
+			return false
+		}
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		switch n.(type) {
+		case *ast.AssignStmt, *ast.ReturnStmt, *ast.BranchStmt:
+			used = true
+			return false
+		}
+		return true
+	})
+	return used
+}
+
+// codeAssigned 看函数体里有没有给这个参数赋值。
+func codeAssigned(info *types.Info, body ast.Node, codeObj types.Object) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			if identSame(info, lhs, codeObj) {
 				found = true
 				return false
 			}
-			return true
-		})
-		return !found
+		}
+		return true
 	})
 	return found
 }

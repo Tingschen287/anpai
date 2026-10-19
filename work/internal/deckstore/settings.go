@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -387,7 +386,11 @@ type ErrAllExhausted struct {
 func (e *ErrAllExhausted) Error() string { return e.I18n().Error() }
 
 func (e *ErrAllExhausted) I18n() *i18n.Error {
-	return i18n.E("err.deckstore.errallexhausted", e.Project, e.Tier, strings.Join(e.Skipped, i18n.MustTextZH("sep.list")))
+	items := make([]any, len(e.Skipped))
+	for i, name := range e.Skipped {
+		items[i] = name
+	}
+	return i18n.E("err.deckstore.errallexhausted", e.Project, e.Tier, i18n.ListOf("sep.list", items...))
 }
 
 // CheckMainAgents：设了主 agent 的项目，主 agent 那一档清单里得有它自己的模型（n057）。

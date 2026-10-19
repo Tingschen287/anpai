@@ -23,17 +23,20 @@ import (
 //     owner 在 CLI 里自己选；确认消失、画面稳定后 deck 再送第一条 brief，只送一次。
 
 // startupMarkers 是 CLI 启动确认的特征文字（Claude Code 2.x 二进制里的原文；Codex 的目录信任上游通常已预先接受）。
-var startupMarkers = []struct{ needle, what string }{
-	{"quick safety check", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"is this a project you created or one you trust", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"is this a directory you created or one you trust", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"yes, i trust this folder", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"do you trust the files in this folder", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"yes, i trust these settings", i18n.MustTextZH("err.deckd.startup.settings")},
-	{"do you trust the contents of this directory", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"allow codex to work in this folder", i18n.MustTextZH("err.deckd.startup.trust")},
-	{"do you want to use this api key", i18n.MustTextZH("err.deckd.startup.apikey")},
-	{"enter to confirm", i18n.MustTextZH("err.deckd.startup.choice")},
+var startupMarkers = []struct {
+	needle string
+	key    i18n.Key
+}{
+	{"quick safety check", "err.deckd.startup.trust"},
+	{"is this a project you created or one you trust", "err.deckd.startup.trust"},
+	{"is this a directory you created or one you trust", "err.deckd.startup.trust"},
+	{"yes, i trust this folder", "err.deckd.startup.trust"},
+	{"do you trust the files in this folder", "err.deckd.startup.trust"},
+	{"yes, i trust these settings", "err.deckd.startup.settings"},
+	{"do you trust the contents of this directory", "err.deckd.startup.trust"},
+	{"allow codex to work in this folder", "err.deckd.startup.trust"},
+	{"do you want to use this api key", "err.deckd.startup.apikey"},
+	{"enter to confirm", "err.deckd.startup.choice"},
 }
 
 // 带光标的编号选项（「❯ 2. No」与另一条编号选项同屏），启动时出现就是在等人选。光标停在哪一项都算（自查：API key 确认默认在 2 上）；
@@ -59,11 +62,35 @@ func screenTail(screen string) []string {
 
 // StartupDialog 返回画面末尾 CLI 启动确认的说明；没有返回空。
 func StartupDialog(screen string) string {
+	if e := startupDialogCode(screen); e != nil {
+		return e.Error()
+	}
+	return ""
+}
+
+// markerCode 把确认码写成字面量调用。检查器只认调用里的字面量。
+func markerCode(k i18n.Key) *i18n.Error {
+	switch k {
+	case "err.deckd.startup.trust":
+		return i18n.E("err.deckd.startup.trust")
+	case "err.deckd.startup.settings":
+		return i18n.E("err.deckd.startup.settings")
+	case "err.deckd.startup.apikey":
+		return i18n.E("err.deckd.startup.apikey")
+	case "err.deckd.startup.choice":
+		return i18n.E("err.deckd.startup.choice")
+	default:
+		return i18n.E(k)
+	}
+}
+
+// startupDialogCode 与 StartupDialog 认同一块画面，但留下码，供通知嵌套。
+func startupDialogCode(screen string) *i18n.Error {
 	tail := screenTail(screen)
 	low := strings.ToLower(strings.Join(tail, "\n"))
 	for _, m := range startupMarkers {
 		if strings.Contains(low, m.needle) {
-			return m.what
+			return markerCode(m.key)
 		}
 	}
 	cursor, items := false, 0
@@ -74,9 +101,9 @@ func StartupDialog(screen string) string {
 		}
 	}
 	if cursor && items >= 2 {
-		return i18n.MustTextZH("err.deckd.startup.choice")
+		return i18n.E("err.deckd.startup.choice")
 	}
-	return ""
+	return nil
 }
 
 // ComposerReady：画面末尾是这个 CLI 真正的输入框（n055 评审 1 B3：两次相同的非空画面不等于就绪，欢迎或加载画面停久了，
@@ -148,29 +175,26 @@ func (s *Server) startupTiming() startupTiming {
 	return defaultStartupTiming
 }
 
-// notReady 是 settleScreen 在等不到就绪画面（取不到画面、一直空屏、一直在变或认不出输入框）时给的说明：这时不直接送，
-// 走与启动确认同一条后台路径，等到真正的输入框再送（自查与评审 1 B3：退回直送会让之后才出现的确认框挨打字）。
-var notReady = i18n.MustTextZH("err.deckd.startup.notready")
-
 // settleScreen 等 CLI 启动后就绪：画面连续两次一样、没有启动确认、并且认得出这个 CLI 的输入框（ComposerReady）。
-// 返回确认的说明；就绪返回空；等到上限仍没就绪返回 notReady。
-func (s *Server) settleScreen(ctx context.Context, id, tool string) string {
+// 返回确认的码；就绪返回 nil；等到上限仍没就绪返回 notready。
+// 没就绪时不直接送，走与启动确认同一条后台路径，等到真正的输入框再送（自查与评审 1 B3：退回直送会让之后才出现的确认框挨打字）。
+func (s *Server) settleScreen(ctx context.Context, id, tool string) *i18n.Error {
 	tm := s.startupTiming()
 	deadline := time.Now().Add(tm.settle)
 	prev := ""
 	for {
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
 		if err == nil {
-			if d := StartupDialog(screen); d != "" {
+			if d := startupDialogCode(screen); d != nil {
 				return d
 			}
 			if strings.TrimSpace(screen) != "" && screen == prev && ComposerReady(tool, screen) {
-				return ""
+				return nil
 			}
 			prev = screen
 		}
 		if time.Now().After(deadline) || sleepCtx(ctx, tm.poll) != nil {
-			return notReady
+			return i18n.E("err.deckd.startup.notready")
 		}
 	}
 }
@@ -187,13 +211,10 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // holdForOwner：CLI 停在启动确认上。记下、通知 owner；主 agent 显示到中间并放开输入。然后在后台等确认消失再送 brief。
-func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, permit lease.Permit) string {
-	var note string
-	switch {
-	case what == notReady:
-		note = i18n.E("err.deckd.serverholdforowner.1").Error()
-	default:
-		note = dialogNote(x, what, false)
+func (s *Server) holdForOwner(x deckstore.Session, key, id string, what *i18n.Error, brief string, permit lease.Permit) *i18n.Error {
+	note := dialogCoded(x, what, false)
+	if what != nil && what.Key == "err.deckd.startup.notready" {
+		note = i18n.E("err.deckd.serverholdforowner.1")
 	}
 	s.markAwaiting(x, key, id, note, true)
 	s.bgWG.Add(1)
@@ -201,12 +222,7 @@ func (s *Server) holdForOwner(x deckstore.Session, key, id, what, brief string, 
 	return note
 }
 
-// dialogNote 是 CLI 停在启动确认上时给 owner 的说明。uncertain 为真时第一条消息送没送到不确定（重启时见到「正在送」），deck 不会补送。
-func dialogNote(x deckstore.Session, what string, uncertain bool) string {
-	return dialogCoded(x, what, uncertain).Error()
-}
-
-func dialogCoded(x deckstore.Session, what string, uncertain bool) *i18n.Error {
+func dialogCoded(x deckstore.Session, what any, uncertain bool) *i18n.Error {
 	if uncertain {
 		if x.Role == "main" {
 			return i18n.E("err.deckd.startup.mainunc", what)
@@ -221,9 +237,13 @@ func dialogCoded(x deckstore.Session, what string, uncertain bool) *i18n.Error {
 
 // markAwaiting 记下「等 owner 处理」、通知。open 为真（owner 刚起的会话）时，主 agent 在 owner 没接管别的会话时换进中间；
 // 后台等待里补记时 open 为假：不切中间（owner 可能正在别的会话里打字，attempt 4 自查），只在它已经显示在中间时放开输入。
-func (s *Server) markAwaiting(x deckstore.Session, key, id, note string, open bool) {
-	s.store.SetAwaitingOwner(key, note)
-	s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
+func (s *Server) markAwaiting(x deckstore.Session, key, id string, note *i18n.Error, open bool) {
+	text := ""
+	if note != nil {
+		text = note.Error()
+	}
+	s.store.SetAwaitingOwner(key, text)
+	s.store.SetSessionStatus(key, deckstore.StatusRunning, text)
 	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.startup.banner", x.Title, note), "deckd")
 	if !open {
 		if x.Role == "main" && s.view != nil {
@@ -314,8 +334,8 @@ func (s *Server) waitForComposer(x deckstore.Session, key, id string, uncertain 
 		}
 		screen, err := s.agents.upstream.PaneOutputPlain(ctx, id)
 		if err == nil {
-			if d := StartupDialog(screen); d != "" {
-				if note := dialogNote(x, d, uncertain); cur.AwaitingOwner != note {
+			if d := startupDialogCode(screen); d != nil {
+				if note := dialogCoded(x, d, uncertain); cur.AwaitingOwner != note.Error() {
 					s.markAwaiting(x, key, id, note, false) // 之前没认出（例如重启前还在看画面）：补记等 owner、放开输入（评审 2 R1）
 				}
 				prev = ""
@@ -414,9 +434,9 @@ func (s *Server) ResumeAwaiting() {
 				s.finishUncertain(x, x.Key)
 				continue
 			}
-			note := i18n.E("err.deckd.serverresumeawaiting.1").Error()
+			note := i18n.E("err.deckd.serverresumeawaiting.1")
 			if x.Role != "main" {
-				note = i18n.E("err.deckd.serverresumeawaiting.2").Error()
+				note = i18n.E("err.deckd.serverresumeawaiting.2")
 			}
 			s.markAwaiting(x, x.Key, x.AgentDeckID, note, false)
 			x := x
@@ -440,7 +460,7 @@ func (s *Server) ResumeAwaiting() {
 		}
 		if x.AwaitingOwner == "" {
 			// 与正常启动的「还没就绪」一致：记下等待、对 owner 放开输入（不切中间），看到确认框或输入框再往下走（attempt 4 自查）
-			s.markAwaiting(x, x.Key, x.AgentDeckID, i18n.E("err.deckd.serverresumeawaiting.4").Error(), false)
+			s.markAwaiting(x, x.Key, x.AgentDeckID, i18n.E("err.deckd.serverresumeawaiting.4"), false)
 		}
 		x := x
 		s.bgWG.Add(1)

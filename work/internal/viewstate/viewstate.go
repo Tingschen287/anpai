@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
@@ -55,12 +56,12 @@ const NoClient = -1
 
 // ErrStaleClient 表示操作绑定的中间 client 已被替换或不在了（reset、resync 的通知来自旧 client 也是它）：
 // 不作用到新 client 上。
-var ErrStaleClient = errors.New("通知来自已经不在中间的旧 client")
+var ErrStaleClient = &codeErr{text: "通知来自已经不在中间的旧 client", key: "err.viewstate.stale"}
 
 // ErrRestoreUnconfirmed 表示命令落到了共用 tty 的新 client 上，且没能确认把新 client 还原成起点（deck-idle、只读）：
 // 新 client 可能停在焦点会话上、输入开着。总是与 ErrStaleClient 一起出现。遇到它不交还写入权、不恢复自动派送
 // （n049 评审 4，n051 承接）。
-var ErrRestoreUnconfirmed = errors.New("落到新 client 上的命令没能确认还原：新 client 的输入状态不确定")
+var ErrRestoreUnconfirmed = &codeErr{text: "落到新 client 上的命令没能确认还原：新 client 的输入状态不确定", key: "err.viewstate.restore"}
 
 // ErrPartial 表示操作做到一半停下，但已经写下了不可撤销的部分（lease 交还已落盘），或中间已经切了过去。
 // 状态按操作的目标补齐（焦点、打开集合一致），没做完的是 Cause（例如中间 client 被替换、放开输入失败）。
@@ -68,10 +69,19 @@ var ErrRestoreUnconfirmed = errors.New("落到新 client 上的命令没能确�
 type ErrPartial struct {
 	Done  string
 	Cause error
+	done  *i18n.Error
 }
 
 func (e *ErrPartial) Error() string { return "部分完成（" + e.Done + "）：" + e.Cause.Error() }
 func (e *ErrPartial) Unwrap() error { return e.Cause }
+
+func (e *ErrPartial) I18n() *i18n.Error {
+	done := any(e.Done)
+	if e.done != nil {
+		done = e.done
+	}
+	return i18n.E("err.viewstate.partial", done, e.Cause)
+}
 
 func isPartial(err error) bool {
 	var pe *ErrPartial
@@ -108,15 +118,58 @@ type Lookup func(id string) (Target, bool)
 
 // 错误。
 var (
-	ErrInputNotClosed = errors.New("中间窗格的输入关不上（只读设置或读回失败），不切换；中间显示「输入已关闭（异常）」")
-	ErrNotOpen        = errors.New("会话不在打开集合里")
-	ErrNotFocused     = errors.New("只能接管当前显示的会话")
-	ErrNotSub         = errors.New("只有子 agent 需要接管；主 agent 会话本来就可写")
-	ErrTakeoverStale  = errors.New("接管请求已作废：等待期间你切走了，或中间窗格重建了")
-	ErrTakeoverBusy   = errors.New("该会话的自动派送 10 秒内没有完成，接管失败，保持只读")
-	ErrOwnerTyping    = errors.New("你最近在主 agent 那里打过字，汇报先排队")
-	ErrNotTaken       = errors.New("这个会话没有在接管中")
+	ErrInputNotClosed = &codeErr{text: "中间窗格的输入关不上（只读设置或读回失败），不切换；中间显示「输入已关闭（异常）」", key: "err.viewstate.inputnotclosed"}
+	ErrNotOpen        = &codeErr{text: "会话不在打开集合里", key: "err.viewstate.notopen"}
+	ErrNotFocused     = &codeErr{text: "只能接管当前显示的会话", key: "err.viewstate.notfocused"}
+	ErrNotSub         = &codeErr{text: "只有子 agent 需要接管；主 agent 会话本来就可写", key: "err.viewstate.notsub"}
+	ErrTakeoverStale  = &codeErr{text: "接管请求已作废：等待期间你切走了，或中间窗格重建了", key: "err.viewstate.takeoverstale"}
+	ErrTakeoverBusy   = &codeErr{text: "该会话的自动派送 10 秒内没有完成，接管失败，保持只读", key: "err.viewstate.takeoverbusy"}
+	ErrOwnerTyping    = &codeErr{text: "你最近在主 agent 那里打过字，汇报先排队", key: "err.viewstate.ownertyping"}
+	ErrNotTaken       = &codeErr{text: "这个会话没有在接管中", key: "err.viewstate.nottaken"}
 )
+
+// codeErr 是哨兵错误。变量身份不变，所以 == 和 errors.Is 照旧。不提供 Unwrap。
+type codeErr struct {
+	text string
+	key  i18n.Key
+}
+
+func (e *codeErr) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.text
+}
+
+func (e *codeErr) I18n() *i18n.Error {
+	// 每个码都写成字面量调用。检查器不把结构体字段里的字符串当成「有人用」。
+	switch e.key {
+	case "err.viewstate.stale":
+		return i18n.E("err.viewstate.stale")
+	case "err.viewstate.restore":
+		return i18n.E("err.viewstate.restore")
+	case "err.viewstate.inputnotclosed":
+		return i18n.E("err.viewstate.inputnotclosed")
+	case "err.viewstate.notopen":
+		return i18n.E("err.viewstate.notopen")
+	case "err.viewstate.notfocused":
+		return i18n.E("err.viewstate.notfocused")
+	case "err.viewstate.notsub":
+		return i18n.E("err.viewstate.notsub")
+	case "err.viewstate.takeoverstale":
+		return i18n.E("err.viewstate.takeoverstale")
+	case "err.viewstate.takeoverbusy":
+		return i18n.E("err.viewstate.takeoverbusy")
+	case "err.viewstate.ownertyping":
+		return i18n.E("err.viewstate.ownertyping")
+	case "err.viewstate.nottaken":
+		return i18n.E("err.viewstate.nottaken")
+	case "err.viewstate.closed":
+		return i18n.E("err.viewstate.closed")
+	default:
+		return i18n.E(e.key)
+	}
+}
 
 // ErrHandback 表示交还失败：会话保持接管、自动派送保持暂停，可用 RetryHandback 重试。
 type ErrHandback struct {
@@ -129,6 +182,10 @@ func (e *ErrHandback) Error() string {
 }
 
 func (e *ErrHandback) Unwrap() error { return e.Cause }
+
+func (e *ErrHandback) I18n() *i18n.Error {
+	return i18n.E("err.viewstate.handback", e.Session, e.Cause)
+}
 
 // taken 是一个 owner 持有 lease 的会话。
 type taken struct {
@@ -144,7 +201,7 @@ type Machine struct {
 	center    Center
 	leases    Leases
 	lookup    Lookup
-	notify    func(text string) error
+	notify    func(*i18n.Error) error
 	stopped   func() error
 	now       func() time.Time
 	sleep     func(time.Duration)
@@ -163,9 +220,9 @@ type Machine struct {
 // New 建状态机。中间 client 初始假定为只读、显示 Idle（n049 建 client 时 attach -r）。
 // notify 必须把通知落盘并返回错误；stopped 返回 deck 存储的停止原因（nil 表示正常；lease 存储的停止由 Leases.Broken 给出）。
 // lease 存储里 owner 持有的会话恢复为等待交还（n050 评审 R5）。
-func New(center Center, leases Leases, lookup Lookup, notify func(string) error, stopped func() error) *Machine {
+func New(center Center, leases Leases, lookup Lookup, notify func(*i18n.Error) error, stopped func() error) *Machine {
 	if notify == nil {
-		notify = func(string) error { return nil }
+		notify = func(*i18n.Error) error { return nil }
 	}
 	if stopped == nil {
 		stopped = func() error { return nil }
@@ -215,7 +272,7 @@ func (m *Machine) State() State {
 func (m *Machine) canon(id string) (Target, error) {
 	t, ok := m.lookup(id)
 	if !ok || t.Session == "" {
-		return Target{}, fmt.Errorf("没有会话 %s", id)
+		return Target{}, i18n.E("err.viewstate.nosession", id)
 	}
 	return t, nil
 }
@@ -227,10 +284,10 @@ func (m *Machine) writable() error {
 		return ErrClosed
 	}
 	if err := m.stopped(); err != nil {
-		return fmt.Errorf("存储已停止，不改变中间窗格与写入权：%w", err)
+		return i18n.E("err.viewstate.stopped", err)
 	}
 	if err := m.leases.Broken(); err != nil {
-		return fmt.Errorf("写入权记账已停止，不改变中间窗格与写入权：%w", err)
+		return i18n.E("err.viewstate.leasebroken", err)
 	}
 	return nil
 }
@@ -324,7 +381,7 @@ func (m *Machine) hideLocked(id string) error {
 			return herr // 关不上输入、或中途 client 被替换而没写下任何东西：不改打开集合
 		}
 	} else if _, ok := m.taken[session]; ok {
-		herr = m.handbackLocked(session, "隐藏")
+		herr = m.handbackLocked(session, i18n.E("err.viewstate.why.hide"))
 	}
 	m.open = rest
 	return herr
@@ -375,7 +432,7 @@ func (m *Machine) bindTo(client int) (func(), error) {
 		return nil, err
 	}
 	if client <= 0 || id != client {
-		return nil, fmt.Errorf("%w（通知来自 client %d，中间现在是 %d）", ErrStaleClient, client, id)
+		return nil, i18n.E("err.viewstate.bindto", ErrStaleClient, client, id)
 	}
 	m.center.Bind(id)
 	return func() { m.center.Bind(0) }, nil
@@ -390,7 +447,7 @@ func (m *Machine) Fence() {
 }
 
 // ErrClosed 表示 deckd 正在退出，状态机不再接受操作。
-var ErrClosed = errors.New("deckd 正在退出，不再改变中间窗格与写入权")
+var ErrClosed = &codeErr{text: "deckd 正在退出，不再改变中间窗格与写入权", key: "err.viewstate.closed"}
 
 // Close 让状态机不再接受操作：等正在进行的那个做完（拿一次锁），之后的一律返回 ErrClosed。
 // deckd 退出、放单实例锁之前调用（n049 评审 4）。
@@ -444,7 +501,7 @@ func (m *Machine) RetryHandback(id string) error {
 			return err
 		}
 	}
-	return m.handbackLocked(t.Session, "重试交还")
+	return m.handbackLocked(t.Session, i18n.E("err.viewstate.why.retry"))
 }
 
 // switchLocked：先只读并确认 → 被接管的旧焦点交还 → 再查存储 → 切换 → 按新目标放开输入。
@@ -460,15 +517,15 @@ func (m *Machine) switchLocked(target string) error {
 	handedBack := false // 交还已落盘：之后再出错也不能整体撤回，只能补齐到目标
 	if prev != "" && prev != target {
 		if _, ok := m.taken[prev]; ok {
-			herr = m.handbackLocked(prev, "切走")
+			herr = m.handbackLocked(prev, i18n.E("err.viewstate.why.switch"))
 			handedBack = herr == nil
 		}
 	}
 	if err := m.writable(); err != nil {
 		if herr != nil {
-			return fmt.Errorf("%v；中间窗格保持只读、不切换（%v）", err, herr)
+			return i18n.E("err.viewstate.noswitchboth", err, herr)
 		}
-		return fmt.Errorf("%v；中间窗格保持只读、不切换", err)
+		return i18n.E("err.viewstate.noswitch", err)
 	}
 	tmux := Idle
 	var t Target
@@ -483,9 +540,10 @@ func (m *Machine) switchLocked(target string) error {
 		m.protectUnconfirmed(err)
 		if handedBack {
 			m.focus = target
-			return &ErrPartial{Done: "已交还 " + prev, Cause: fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)}
+			done := i18n.E("err.viewstate.handed", prev)
+			return &ErrPartial{Done: done.Error(), Cause: i18n.E("err.viewstate.switchfail", err), done: done}
 		}
-		return fmt.Errorf("切换中间窗格失败（输入保持关闭）：%w", err)
+		return i18n.E("err.viewstate.switchfail", err)
 	}
 	m.focus = target
 	if target != "" && t.ownerInput() {
@@ -496,7 +554,8 @@ func (m *Machine) switchLocked(target string) error {
 				return err
 			}
 			// 中间已经切了过去（或交还已落盘）：焦点按目标提交，输入保持只读
-			return &ErrPartial{Done: "已切到 " + title(t), Cause: fmt.Errorf("主 agent 会话放开输入失败（保持只读）：%w", err)}
+			done := i18n.E("err.viewstate.switched", title(t))
+			return &ErrPartial{Done: done.Error(), Cause: i18n.E("err.viewstate.openinput", err), done: done}
 		}
 	}
 	return herr
@@ -507,7 +566,7 @@ func (m *Machine) closeInputLocked() error {
 		m.protectUnconfirmed(err)
 		return err // 绑定的 client 已被替换：不是「关不上」，什么都没做
 	} else if err != nil {
-		m.notify("中间窗格输入已关闭（异常）：设置只读失败")
+		m.notify(i18n.E("err.viewstate.inputset"))
 		return ErrInputNotClosed
 	}
 	ro, err := m.center.ReadOnly()
@@ -515,7 +574,7 @@ func (m *Machine) closeInputLocked() error {
 		return err
 	}
 	if err != nil || !ro {
-		m.notify("中间窗格输入已关闭（异常）：读回只读状态失败")
+		m.notify(i18n.E("err.viewstate.inputread"))
 		return ErrInputNotClosed
 	}
 	if tk, ok := m.taken[m.focus]; ok && tk.writable {
@@ -559,7 +618,7 @@ func (m *Machine) Takeover(id string) error {
 			return nil // 已在接管中，输入在你手上
 		}
 		// 等待交还的会话（交还失败或重启后恢复）：lease 仍在 owner 手上，重新放开输入即可（n050 评审 R5）
-		return m.openTakenLocked(session, t, fmt.Sprintf("你重新接管了 %s：它的自动派送仍暂停", title(t)))
+		return m.openTakenLocked(session, t, i18n.E("err.viewstate.retook", title(t)))
 	}
 	reqLayout, reqClient := m.layoutGen, m.clientGen
 	deadline := m.now().Add(m.TakeoverWait)
@@ -587,7 +646,7 @@ func (m *Machine) Takeover(id string) error {
 		}
 		var busy *lease.ErrDeliveryInProgress
 		if !errors.As(err, &busy) {
-			return fmt.Errorf("登记接管失败（保持只读）：%w", err)
+			return i18n.E("err.viewstate.takeoverreg", err)
 		}
 		if !m.now().Before(deadline) {
 			return ErrTakeoverBusy
@@ -600,38 +659,38 @@ func (m *Machine) Takeover(id string) error {
 	}
 	// 从拿到写入权到放开输入，锁一直在手上：中间不会发生切换
 	m.taken[session] = taken{since: m.now()}
-	return m.openTakenLocked(session, t, fmt.Sprintf("你接管了 %s：它的自动派送已暂停", title(t)))
+	return m.openTakenLocked(session, t, i18n.E("err.viewstate.tookover", title(t)))
 }
 
 // openTakenLocked 为一个 lease 已在 owner 手上、正显示在中间的会话放开输入，并写接管通知。
 // 存储已停止就不放开（保持等待交还）。放开失败或通知写不进：先确认输入关闭再交还；
 // 关不上或交还失败都如实返回，会话保持接管、自动派送暂停（n050 评审 R5）。
-func (m *Machine) openTakenLocked(session string, t Target, note string) error {
+func (m *Machine) openTakenLocked(session string, t Target, note *i18n.Error) error {
 	if err := m.writable(); err != nil {
-		return fmt.Errorf("%v；输入保持关闭，会话保持接管、自动派送暂停", err)
+		return i18n.E("err.viewstate.inputstay", err)
 	}
 	if err := m.center.SetReadOnly(false); err != nil {
 		if errors.Is(err, ErrRestoreUnconfirmed) {
 			// 放开输入的命令落到了新 client 上，又没能确认还原：新 client 可能在这个会话上、输入开着。
 			// 不交还：写入权留在 owner 手上，自动派送保持暂停，等 owner 在中间确认后重新接管或交还
 			m.protectUnconfirmed(err)
-			return fmt.Errorf("%w；接管没有生效，保持接管、自动派送暂停", err)
+			return i18n.E("err.viewstate.takeoverhold", err)
 		}
 		if errors.Is(err, ErrStaleClient) {
 			// 新 client 一连上就是只读、旧的已不在：输入从没放开过。按交还收回（带画面摘要），
 			// 不留一个没生效的接管；交还不成就保持接管与暂停（既有的安全恢复）（n049 评审 3 B1-B）
-			if herr := m.handbackLocked(session, "中间 client 被替换"); herr != nil {
-				return fmt.Errorf("%w；接管没有生效，交还也没完成：%v", err, herr)
+			if herr := m.handbackLocked(session, i18n.E("err.viewstate.why.replaced")); herr != nil {
+				return i18n.E("err.viewstate.takeoverboth", err, herr)
 			}
-			return fmt.Errorf("%w；接管没有生效，已交还", err)
+			return i18n.E("err.viewstate.takeoverback", err)
 		}
 		if cerr := m.closeInputLocked(); cerr != nil {
-			return fmt.Errorf("放开输入失败，且确认不了输入已关闭，保持接管、自动派送暂停：%v", err)
+			return i18n.E("err.viewstate.openfailunconfirmed", err)
 		}
-		if herr := m.handbackLocked(session, "放开输入失败"); herr != nil {
-			return fmt.Errorf("放开输入失败（%v），输入已关闭；%w", err, herr)
+		if herr := m.handbackLocked(session, i18n.E("err.viewstate.why.openfail")); herr != nil {
+			return i18n.E("err.viewstate.openfailclosed", err, herr)
 		}
-		return fmt.Errorf("放开输入失败，已交还：%w", err)
+		return i18n.E("err.viewstate.openfailback", err)
 	}
 	// 输入回到 owner 手上：之前缓存的画面摘要已过时，重启恢复的豁免也到此为止——
 	// 下一次交还必须重新取到画面（n050 评审 A3-2）
@@ -641,12 +700,12 @@ func (m *Machine) openTakenLocked(session string, t Target, note string) error {
 	if err := m.notify(note); err != nil {
 		// 记不下来就不维持一个没人知道的接管：关输入、交还；哪一步不成都照实说
 		if cerr := m.closeInputLocked(); cerr != nil {
-			return fmt.Errorf("接管通知写不进（%v），且确认不了输入已关闭：保持接管、自动派送暂停", err)
+			return i18n.E("err.viewstate.notenotclosed", err)
 		}
-		if herr := m.handbackLocked(session, "通知写不进"); herr != nil {
-			return fmt.Errorf("接管通知写不进（%v），输入已关闭；%w", err, herr)
+		if herr := m.handbackLocked(session, i18n.E("err.viewstate.why.note")); herr != nil {
+			return i18n.E("err.viewstate.noteclosed", err, herr)
 		}
-		return fmt.Errorf("接管通知写不进，已撤回接管：%w", err)
+		return i18n.E("err.viewstate.notereverted", err)
 	}
 	return nil
 }
@@ -654,24 +713,24 @@ func (m *Machine) openTakenLocked(session string, t Target, note string) error {
 // handbackLocked 交还。前提：这个会话的输入已经关闭（调用方保证）。
 // 顺序：取画面摘要 → 写「正在交还」通知（落盘）→ 释放 lease（完整摘要随 lease 事件同一次落盘）。
 // 任一步失败都保持接管（m.taken 不删）、自动派送暂停，返回 *ErrHandback（n050 评审 B5、R2）。
-func (m *Machine) handbackLocked(session, why string) error {
+func (m *Machine) handbackLocked(session string, why *i18n.Error) error {
 	tk := m.taken[session]
 	tk.writable = false
 	m.taken[session] = tk
 	t, known := m.lookup(session)
 	fail := func(cause error) error {
-		m.notify(fmt.Sprintf("%s 交还没有完成，保持接管、自动派送暂停（可重试交还）：%v", title(t), cause))
+		m.notify(i18n.E("err.viewstate.handbacknotify", title(t), cause))
 		return &ErrHandback{Session: session, Cause: cause}
 	}
 	var hb lease.Handback
 	switch {
 	case m.focus == session:
 		if !known || t.Tmux == "" {
-			return fail(errors.New("找不到它的 tmux 会话，取不到画面摘要"))
+			return fail(i18n.E("err.viewstate.notmux"))
 		}
 		lines, err := m.center.Capture(t.Tmux, 5)
 		if err != nil {
-			return fail(fmt.Errorf("取不到画面摘要：%w", err))
+			return fail(i18n.E("err.viewstate.nocapture", err))
 		}
 		for i := range lines {
 			lines[i] = deckstore.Clean(lines[i], 200)
@@ -681,24 +740,24 @@ func (m *Machine) handbackLocked(session, why string) error {
 		m.taken[session] = tk
 	case tk.summary != nil:
 		hb.LastLines = append([]string(nil), tk.summary.LastLines...)
-		hb.Notes = append(hb.Notes, "画面摘要取自上一次交还尝试")
+		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.summaryprev").Error())
 	case tk.restored:
-		hb.Notes = append(hb.Notes, "重启后恢复的接管：它已不在中间，画面摘要取不到")
+		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.summaryrestored").Error())
 	default:
-		return fail(errors.New("它已不在中间，又没有取到过画面摘要；把它显示在中间后再交还"))
+		return fail(i18n.E("err.viewstate.nosummary"))
 	}
 	now := m.now()
 	hb.AttachedAt, hb.ReturnedAt, hb.DurationSeconds, hb.Via = tk.since, now, int64(now.Sub(tk.since).Seconds()), "deck"
-	hb.Notes = append([]string{"离开方式：" + why}, hb.Notes...)
+	hb.Notes = append([]string{i18n.E("err.viewstate.leftway", why).Error()}, hb.Notes...)
 	if len(hb.LastLines) > 0 {
-		hb.Notes = append(hb.Notes, "画面末行："+hb.LastLines[len(hb.LastLines)-1])
+		hb.Notes = append(hb.Notes, i18n.E("err.viewstate.lastline", hb.LastLines[len(hb.LastLines)-1]).Error())
 	}
-	text := fmt.Sprintf("你离开了 %s（%s），接管 %d 秒，正在自动交还", title(t), why, hb.DurationSeconds)
+	text := i18n.E("err.viewstate.left", title(t), why, hb.DurationSeconds)
 	if len(hb.LastLines) > 0 {
-		text += "；画面末行：" + hb.LastLines[len(hb.LastLines)-1]
+		text = i18n.E("err.viewstate.leftline", title(t), why, hb.DurationSeconds, hb.LastLines[len(hb.LastLines)-1])
 	}
 	if err := m.notify(text); err != nil {
-		return &ErrHandback{Session: session, Cause: fmt.Errorf("交还通知写不进：%w", err)}
+		return &ErrHandback{Session: session, Cause: i18n.E("err.viewstate.handbacknote", err)}
 	}
 	if err := m.leases.AutoHandback(session, hb); err != nil {
 		return fail(err)
@@ -728,7 +787,7 @@ func (m *Machine) deliverToMain(id string, deliver func() error, now bool) error
 	}
 	t, err := m.canon(id)
 	if err != nil || t.Role != "main" {
-		return fmt.Errorf("%s 不是主 agent 会话", id)
+		return i18n.E("err.viewstate.notmain", id)
 	}
 	if m.focus != t.Session {
 		return deliver()
@@ -741,7 +800,7 @@ func (m *Machine) deliverToMain(id string, deliver func() error, now bool) error
 	if !ro && !now {
 		last, err := m.center.LastInput()
 		if err != nil {
-			return fmt.Errorf("读不到你最后的输入时间，先不送：%w", err)
+			return i18n.E("err.viewstate.nolastinput", err)
 		}
 		if m.now().Sub(last) < m.OwnerIdle {
 			return ErrOwnerTyping
@@ -752,12 +811,16 @@ func (m *Machine) deliverToMain(id string, deliver func() error, now bool) error
 	}
 	derr := deliver()
 	if serr := m.writable(); serr != nil {
-		return errors.Join(derr, fmt.Errorf("%v；主 agent 输入保持关闭", serr))
+		kept := i18n.E("err.viewstate.inputkept", serr)
+		if derr == nil {
+			return kept
+		}
+		return i18n.E("err.viewstate.joinline", derr, kept)
 	}
 	// 送完按最新状态放开（第一条 brief 就是经这里送的：送前还在等 owner 处理启动确认、送后已确认，n055）
 	if cur, ok := m.lookup(id); ok && cur.ownerInput() {
 		if err := m.center.SetReadOnly(false); err != nil {
-			m.notify("送完汇报后放开主 agent 输入失败，中间保持只读")
+			m.notify(i18n.E("err.viewstate.reopenfail"))
 		}
 	}
 	return derr
@@ -819,17 +882,18 @@ func (m *Machine) protectUnconfirmed(err error) {
 	}
 	session := m.focus
 	t, ok := m.lookup(session)
-	note := "中间 client 被替换，且没能确认把新 client 还原成只读：它可能还开着输入。请在中间确认显示的是什么，再重新接管或交还"
+	base := i18n.E("err.viewstate.unconfirmed")
+	note := base
 	if ok && t.Role == "sub" {
 		if tk, held := m.taken[session]; held {
 			tk.writable = false
 			m.taken[session] = tk
-			note = title(t) + "：" + note + "；写入权保持在你手上，自动派送暂停"
+			note = i18n.E("err.viewstate.unconfirmed.hold", title(t), base)
 		} else if lerr := m.leases.OwnerTakeover(session, "deck"); lerr == nil {
 			m.taken[session] = taken{since: m.now()}
-			note = title(t) + "：" + note + "；已把写入权收到你手上，自动派送暂停"
+			note = i18n.E("err.viewstate.unconfirmed.take", title(t), base)
 		} else {
-			note = title(t) + "：" + note + "；收回写入权失败（" + lerr.Error() + "），请立刻处理"
+			note = i18n.E("err.viewstate.unconfirmed.fail", title(t), base, lerr)
 		}
 	}
 	m.notify(note)

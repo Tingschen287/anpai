@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
@@ -134,11 +135,13 @@ func newWorld(t *testing.T) *world {
 			}
 		}
 		return Target{}, false
-	}, func(n string) error {
+	}, func(n *i18n.Error) error {
 		if w.failNotify {
 			return errors.New("通知写不进")
 		}
-		w.notes = append(w.notes, n)
+		if n != nil {
+			w.notes = append(w.notes, n.Error())
+		}
 		return nil
 	}, func() error { return w.stopErr })
 	w.m.SetClock(func() time.Time { return w.now }, func(d time.Duration) { w.now = w.now.Add(d) })

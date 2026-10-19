@@ -118,8 +118,11 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 			return viewstate.Target{Session: x.AgentDeckID, Tmux: x.TmuxSession, Role: x.Role, BriefConfirmed: x.BriefConfirmed,
 				AwaitingOwner: x.AwaitingOwner != "", Title: x.Title}, true
 		}
-		notify := func(text string) error {
-			_, err := store.Notify("", "view", text, "deckd")
+		notify := func(n *i18n.Error) error {
+			if n == nil {
+				return nil
+			}
+			_, err := store.NotifyCoded("", "view", n, "deckd")
 			return err
 		}
 		view = viewstate.New(center, leases, lookup, notify, store.Broken)
