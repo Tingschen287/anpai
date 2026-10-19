@@ -1,3 +1,16 @@
+// n060 文字键检查器。
+//
+// 普通 Go 代码里，传给翻译函数的键只有两个来源：
+//  1. 类型（先 Unalias）为 i18n.Key、并且有常量值的最外层表达式。值必须在 i18n.Keys() 里。
+//  2. i18n 包之外，把非常量转成 i18n.Key 的显式转换（Fun 解析到 Key 这个类型，含别名）。
+//     操作数只能是返工 3 的三种形状：已登记包级键表的下标、.text 字段、
+//     "tier." + string(deckstore.Tier)。绑定按对象比对，不按名字。
+//
+// 以 i18n.Key 为类型实参的泛型实例化（info.Instances）一律报错，除非 genericKeyAllow 写明。
+//
+// 不在范围：reflect、unsafe、go:linkname、cgo、代码生成，
+// 以及经 encoding/json、fmt.Sscan 等反射式解码得到的 Key。
+// 这些路径编译器追踪不到，本检查器不假装盖住它们。
 package deckui
 
 import (
@@ -5,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/printer"
@@ -68,11 +82,8 @@ func dynamicTextKeys() []string {
 	return out
 }
 
-// dynamicCallAllow 是放行清单。粒度是「文件 · 函数 · 参数表达式原文」。
+// dynamicCallAllow 是非常量转换的放行清单。粒度是「文件 · 函数 · 操作数原文」。
 // 原文用 go/printer 打印。改一个字符就对不上，测试失败，要人工复核后再改清单。
-// 入口按 i18n 包里 T、Tf 两个函数对象认，不看导入名，也不看是选择器还是点导入后的裸名字。
-// 这两个函数的标识符必须处在直接调用的函数位置。拿去当值用就报位置。
-// 按对象找到的直接调用（含字面量键）少于此清单的条数，就当成入口坏了，不能静默通过。
 // 清单不是放行依据。依据是 go/types 的符号绑定，坏绑定写进清单也过不了：
 //   - 表[下标]、表[下标].字段：被下标的标识符必须绑定到包级变量（Parent 是包作用域），
 //     并且就是本包 TextKeys 枚举到的那张表。按对象比对，不按名字。字段也按对象比对。
@@ -80,6 +91,7 @@ func dynamicTextKeys() []string {
 //     前缀另由 checkTierConcat 锁成 tier.。
 //
 // 函数调用、局部变量、参数、闭包参数、接收者、字段、未登记拼接、被遮蔽的名字，一律拒绝。
+// 常量键不走这张清单，直接对 i18n.Keys()。
 var dynamicCallAllow = []string{
 	"layout.go · Keys · layoutKeyRows[i].text",
 	"render.go · RenderActivity · activityStatusKey[x.Status]",
@@ -89,6 +101,10 @@ var dynamicCallAllow = []string{
 	"settings.go · tabBar · pageText[i]",
 	"settings.go · tierName · \"tier.\" + string(t)",
 }
+
+// genericKeyAllow 是以 i18n.Key 为类型实参的泛型实例化。现在没有。
+// 写进来之前先说明这次实例化为什么造不出表外的键。
+var genericKeyAllow []string
 
 var keyShape = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z0-9]+)+$`)
 
@@ -194,7 +210,7 @@ func checkNoStrayChinese(t *testing.T) {
 				}
 			}
 			if strings.Contains(v, ".") {
-				if _, ok := i18n.TextZH(v); ok {
+				if _, ok := i18n.TextZH(i18n.Key(v)); ok {
 					used[v] = true
 				}
 			}
@@ -213,15 +229,15 @@ func checkNoStrayChinese(t *testing.T) {
 		})
 	})
 	for k := range used {
-		if _, ok := i18n.TextZH(k); !ok {
+		if _, ok := i18n.TextZH(i18n.Key(k)); !ok {
 			t.Errorf("文字表里没有 %q", k)
 		}
-		if _, ok := i18n.TextEN(k); !ok {
+		if _, ok := i18n.TextEN(i18n.Key(k)); !ok {
 			t.Errorf("英文没有 %q", k)
 		}
 	}
 	for _, k := range i18n.Keys() {
-		if !used[k] {
+		if !used[string(k)] {
 			t.Errorf("文字表里的 %q 没人用", k)
 		}
 	}
@@ -244,8 +260,8 @@ func checkFormatArgs(t *testing.T) {
 			if !literal {
 				return true
 			}
-			zh, ok := i18n.TextZH(key)
-			en, enOK := i18n.TextEN(key)
+			zh, ok := i18n.TextZH(i18n.Key(key))
+			en, enOK := i18n.TextEN(i18n.Key(key))
 			if !ok || !enOK {
 				t.Errorf("%s：%s(%q) 不在文字表里", fset.Position(call.Pos()), name, key)
 				return true
@@ -270,8 +286,8 @@ func absentTextKeys(keys []string) []string {
 			continue
 		}
 		seen[k] = true
-		_, zhOK := i18n.TextZH(k)
-		_, enOK := i18n.TextEN(k)
+		_, zhOK := i18n.TextZH(i18n.Key(k))
+		_, enOK := i18n.TextEN(i18n.Key(k))
 		if !zhOK || !enOK {
 			miss = append(miss, k)
 		}
@@ -345,7 +361,7 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 	if len(clean) != 0 {
 		t.Fatalf("未改动的源码不应报错：\n%s", strings.Join(clean, "\n"))
 	}
-	bases := []string{"render.go", "settings.go"}
+	bases := []string{"render.go", "settings.go", "idle.go"}
 	orig := map[string]string{}
 	pathOf := map[string]string{}
 	for _, base := range bases {
@@ -360,6 +376,12 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		orig[base] = string(b)
 		pathOf[base] = p
 	}
+	sanitizePath := filepath.Join(moduleRoot(), "internal", "deckstore", "sanitize.go")
+	sanBytes, err := os.ReadFile(sanitizePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sanitizeOrig := string(sanBytes)
 	t.Cleanup(func() {
 		for _, base := range bases {
 			got, err := os.ReadFile(pathOf[base])
@@ -371,40 +393,49 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 				t.Errorf("检查器把 %s 写回了磁盘", base)
 			}
 		}
+		got, err := os.ReadFile(sanitizePath)
+		if err != nil {
+			t.Errorf("重读 sanitize.go：%v", err)
+		} else if string(got) != sanitizeOrig {
+			t.Errorf("检查器把 sanitize.go 写回了磁盘")
+		}
 	})
 	cases := []struct {
-		name string
-		file string
-		pass bool
-		edit func(t *testing.T, src string) string
-		want []string
+		name   string
+		file   string
+		pass   bool
+		edit   func(t *testing.T, src string) string
+		also   func(t *testing.T) map[string]string
+		want   []string
+		need   int
+		needle string
 	}{
 		{
 			name: "Sprintf",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T(fmt.Sprintf("side.status.%s", "typo"))`)
+				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", `i18n.T(i18n.Key(fmt.Sprintf("side.status.%s", "typo")))`)
 			},
 			want: []string{"函数调用 fmt.Sprintf", "render.go"},
 		},
 		{
 			name: "LocalVar",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])", "k := \"side.status.\" + x.Status\n\t\tst := i18n.T(k)")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))", "k := \"side.status.\" + x.Status\n\t\tst := i18n.T(i18n.Key(k))")
 			},
 			want: []string{"局部变量或参数 k", "render.go"},
 		},
 		{
 			name: "UnregisteredConcat",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", `i18n.T("side.status." + x.Status)`)
+				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", `i18n.T(i18n.Key("side.status." + x.Status))`)
 			},
 			want: []string{"未登记的字符串拼接", "render.go"},
 		},
 		{
 			name: "UnregisteredMap",
 			edit: func(t *testing.T, src string) string {
-				src = replaceOnce(t, src, "func TextKeys() []string {", "var otherStatusKey = map[string]string{\"launching\": \"side.status.launching\"}\n\nfunc TextKeys() []string {")
-				return replaceOnce(t, src, "i18n.T(activityStatusKey[x.Status])", "i18n.T(otherStatusKey[x.Status])")
+				src = replaceOnce(t, src, "func TextKeys() []string {", "var otherStatusKey = map[string]i18n.Key{\"launching\": \"side.status.launching\"}\n\nfunc TextKeys() []string {")
+				return replaceOnce(t, src, "i18n.T(i18n.Key(activityStatusKey[x.Status]))", "i18n.T(i18n.Key(otherStatusKey[x.Status]))")
 			},
 			want: []string{"键表 otherStatusKey 没有被 TextKeys 枚举", "render.go"},
 		},
@@ -425,8 +456,8 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 		{
 			name: "ClosureParam",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"st := func(activityStatusKey map[string]string) string {\n\t\t\tst := i18n.T(activityStatusKey[x.Status])\n\t\t\treturn st\n\t\t}(map[string]string{\"launching\": \"side.status.\" + \"typo\"})")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := func(activityStatusKey map[string]string) string {\n\t\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\t\treturn st\n\t\t}(map[string]string{\"launching\": \"side.status.\" + \"typo\"})")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
 		},
@@ -434,16 +465,16 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			name: "StringShadow",
 			file: "settings.go",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, `func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }`,
-					"func tierName(t deckstore.Tier) string {\n\tstring := func(deckstore.Tier) string { return \"ty\" + \"po\" }\n\treturn T(\"tier.\" + string(t))\n}")
+				return replaceOnce(t, src, `func tierName(t deckstore.Tier) string { return T(i18n.Key("tier." + string(t))) }`,
+					"func tierName(t deckstore.Tier) string {\n\tstring := func(deckstore.Tier) string { return \"ty\" + \"po\" }\n\treturn T(i18n.Key(\"tier.\" + string(t)))\n}")
 			},
 			want: []string{"没有绑定到预声明类型", "settings.go"},
 		},
 		{
 			name: "LocalShadow",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"activityStatusKey := map[string]string{\"launching\": \"side.status.\" + \"typo\"}\n\t\tst := i18n.T(activityStatusKey[x.Status])")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"activityStatusKey := map[string]string{\"launching\": \"side.status.\" + \"typo\"}\n\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
 		},
@@ -451,15 +482,15 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			name: "ReceiverShadow",
 			edit: func(t *testing.T, src string) string {
 				return replaceOnce(t, src, "func TextKeys() []string {",
-					"type activityStatusMap map[string]string\n\nfunc (activityStatusKey activityStatusMap) text(status string) string {\n\treturn i18n.T(activityStatusKey[status])\n}\n\nfunc TextKeys() []string {")
+					"type activityStatusMap map[string]string\n\nfunc (activityStatusKey activityStatusMap) text(status string) string {\n\treturn i18n.T(i18n.Key(activityStatusKey[status]))\n}\n\nfunc TextKeys() []string {")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
 		},
 		{
 			name: "FieldShadow",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"box := struct{ activityStatusKey map[string]string }{activityStatusKey: map[string]string{\"launching\": \"side.status.\" + \"typo\"}}\n\t\tst := i18n.T(box.activityStatusKey[x.Status])")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"box := struct{ activityStatusKey map[string]string }{activityStatusKey: map[string]string{\"launching\": \"side.status.\" + \"typo\"}}\n\t\tst := i18n.T(i18n.Key(box.activityStatusKey[x.Status]))")
 			},
 			want: []string{"不是包级变量", "activityStatusKey", "render.go"},
 		},
@@ -468,37 +499,95 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
 					"tr \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = tr.T(\"side.status.\" + \"typo\")")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = tr.T(\"side.status.\" + \"typo\")")
 			},
-			want: []string{"未登记的字符串拼接", "render.go"},
+			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
 		{
 			name: "DotImport",
 			edit: func(t *testing.T, src string) string {
 				src = replaceOnce(t, src, `"github.com/Tingschen287/terminal-deck/work/internal/i18n"`,
 					". \"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"")
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"st := i18n.T(activityStatusKey[x.Status])\n\t\tst = T(\"side.status.\" + \"typo\")")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = T(\"side.status.\" + \"typo\")")
 			},
-			want: []string{"未登记的字符串拼接", "render.go"},
+			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
 		{
 			name: "FuncValue",
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, "st := i18n.T(activityStatusKey[x.Status])",
-					"f := i18n.T\n\t\t_ = f(\"side.status.\" + \"typo\")\n\t\tst := i18n.T(activityStatusKey[x.Status])")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"f := i18n.T\n\t\t_ = f(\"side.status.\" + \"typo\")\n\t\tst := i18n.T(i18n.Key(activityStatusKey[x.Status]))")
 			},
-			want: []string{"不在直接调用", "render.go"},
+			want: []string{`"side.status.typo"`, "不在 Keys() 里", "render.go"},
 		},
 		{
 			name: "AliasTier",
 			file: "settings.go",
 			pass: true,
 			edit: func(t *testing.T, src string) string {
-				return replaceOnce(t, src, `func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }`,
-					"type Tier2 = deckstore.Tier\n\nfunc tierName(t Tier2) string { return T(\"tier.\" + string(t)) }")
+				return replaceOnce(t, src, `func tierName(t deckstore.Tier) string { return T(i18n.Key("tier." + string(t))) }`,
+					"type Tier2 = deckstore.Tier\n\nfunc tierName(t Tier2) string { return T(i18n.Key(\"tier.\" + string(t))) }")
 			},
+		},
+		{
+			name: "Ellipsis",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = i18n.T(i18n.Key(\"side.status.\"+\"typo\"), []any{}...)\n\t\tst = i18n.T(\"side.status.\" + \"typo\", []any{}...)")
+			},
+			want:   []string{"不在 Keys() 里", "render.go"},
+			need:   2,
+			needle: `"side.status.typo"`,
+		},
+		{
+			name: "WrapperFuncValue",
+			file: "idle.go",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "\t}\n\tfor _, k := range layout.Keys() {",
+					"\t}\n\tf := T\n\tlines[2] = f(\"idle.\" + \"typo\")\n\tfor _, k := range layout.Keys() {")
+			},
+			want: []string{`"idle.typo"`, "不在 Keys() 里", "idle.go"},
+		},
+		{
+			name: "OutsidePackage",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := deckstore.ActivityTypoText()")
+			},
+			also: func(t *testing.T) map[string]string {
+				src := replaceOnce(t, sanitizeOrig, "import (\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n)",
+					"import (\n\t\"regexp\"\n\t\"strings\"\n\t\"unicode/utf8\"\n\n\t\"github.com/Tingschen287/terminal-deck/work/internal/i18n\"\n)\n\nfunc ActivityTypoText() string { return i18n.T(\"side.status.\" + \"typo\") }")
+				return map[string]string{sanitizePath: src}
+			},
+			want: []string{`"side.status.typo"`, "不在 Keys() 里", "sanitize.go"},
+		},
+		{
+			name: "ConstTypo",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\tst = i18n.T(\"side.status.typoo\")")
+			},
+			want: []string{`"side.status.typoo"`, "不在 Keys() 里", "render.go"},
+		},
+		{
+			name: "FormatErrorfDynamic",
+			edit: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(i18n.Key(activityStatusKey[x.Status]))\n\t\t_ = i18n.Format(i18n.Key(\"side.status.\" + x.Status))\n\t\t_ = i18n.Errorf(i18n.Key(\"act.status.\" + x.Status))")
+			},
+			want: []string{`"side.status." + x.Status`, `"act.status." + x.Status`, "未登记的字符串拼接", "render.go"},
+		},
+		{
+			name: "GenericKey",
+			edit: func(t *testing.T, src string) string {
+				src = replaceOnce(t, src, "func TextKeys() []string {",
+					"func keyAs[S ~string](s string) S { return S(s) }\n\nfunc TextKeys() []string {")
+				return replaceOnce(t, src, "st := i18n.T(i18n.Key(activityStatusKey[x.Status]))",
+					"st := i18n.T(keyAs[i18n.Key](\"side.status.typo\"))")
+			},
+			want: []string{"泛型实例化", "i18n.Key", "render.go"},
 		},
 	}
 	for _, tc := range cases {
@@ -507,24 +596,46 @@ func TestDynamicCallExprMutationsFail(t *testing.T) {
 			if file == "" {
 				file = "render.go"
 			}
-			edited := tc.edit(t, orig[file])
-			if edited == orig[file] {
-				t.Fatal("源码没有改动")
+			overlay := map[string]string{}
+			if tc.edit != nil {
+				edited := tc.edit(t, orig[file])
+				if edited == orig[file] {
+					t.Fatal("源码没有改动")
+				}
+				overlay[pathOf[file]] = edited
 			}
-			probs, err := dynamicKeyProblems(map[string]string{pathOf[file]: edited})
-			if err != nil {
-				t.Fatal(err)
+			if tc.also != nil {
+				for p, s := range tc.also(t) {
+					overlay[p] = s
+				}
 			}
+			probs, err := dynamicKeyProblems(overlay)
 			blob := strings.Join(probs, "\n")
+			if err != nil {
+				blob = err.Error() + "\n" + blob
+			}
 			if tc.pass {
-				if len(probs) != 0 {
+				if err != nil || len(probs) != 0 {
 					t.Fatalf("应通过，实际：\n%s", blob)
 				}
 				return
 			}
+			if strings.TrimSpace(blob) == "" {
+				t.Fatal("应失败，类型检查和检查器都通过了")
+			}
 			for _, w := range tc.want {
 				if !strings.Contains(blob, w) {
 					t.Fatalf("应报错含 %q，实际：\n%s", w, blob)
+				}
+			}
+			if tc.need > 0 && strings.Count(blob, tc.needle) < tc.need {
+				t.Fatalf("应至少出现 %d 次 %q，实际：\n%s", tc.need, tc.needle, blob)
+			}
+			if err != nil && !tc.pass {
+				for _, w := range tc.want {
+					if strings.Contains(err.Error(), w) && !strings.Contains(strings.Join(probs, "\n"), w) {
+						t.Fatalf("失败来自类型检查，不是检查器：\n%s", blob)
+					}
 				}
 			}
 		})
@@ -592,19 +703,11 @@ func dynamicKeyProblems(src map[string]string) ([]string, error) {
 func dynamicCallProblems(src map[string]string) ([]string, error) {
 	var probs []string
 	err := withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
-		files, err := parseCoveredInto(fset, src)
+		checked, err := checkModule(fset, imp, src)
 		if err != nil {
 			return err
 		}
-		text, err := i18nTextFuncs(imp)
-		if err != nil {
-			return err
-		}
-		checked, err := checkCovered(fset, imp, files)
-		if err != nil {
-			return err
-		}
-		probs = bindingProblems(fset, checked, text)
+		probs = keyInvariantProblems(fset, checked)
 		return nil
 	})
 	return probs, err
@@ -659,7 +762,7 @@ func tierProblems(src map[string]string, catalog map[string]bool) ([]string, err
 			if name == "" || literal {
 				return true
 			}
-			bin, ok := call.Args[0].(*ast.BinaryExpr)
+			bin, ok := unwrapKeyConv(call.Args[0]).(*ast.BinaryExpr)
 			if !ok || bin.Op != token.ADD {
 				return true
 			}
@@ -716,28 +819,14 @@ func pkgImportPath(dir string) string {
 	if err != nil {
 		panic(err)
 	}
+	if rel == "." {
+		return moduleImport
+	}
 	return moduleImport + "/" + filepath.ToSlash(rel)
 }
 
-// i18nTextFuncs 取出 i18n.T 与 i18n.Tf 的函数对象。比对用对象，不用名字。
-// 当前 i18n 没有 Tf。名字仍会查；以后加上，入口自动把它算进去。
-func i18nTextFuncs(imp types.Importer) (map[types.Object]bool, error) {
-	pkg, err := imp.Import(i18nImport)
-	if err != nil {
-		return nil, fmt.Errorf("导入 i18n：%w", err)
-	}
-	out := map[types.Object]bool{}
-	for _, name := range []string{"T", "Tf"} {
-		fn, ok := pkg.Scope().Lookup(name).(*types.Func)
-		if !ok {
-			if name == "T" {
-				return nil, errors.New("i18n.T 不是函数")
-			}
-			continue
-		}
-		out[fn] = true
-	}
-	return out, nil
+func isModulePath(path string) bool {
+	return path == moduleImport || strings.HasPrefix(path, moduleImport+"/")
 }
 
 func withTypeImp(fn func(*token.FileSet, types.Importer) error) error {
@@ -761,179 +850,410 @@ type checkedPkg struct {
 	enums map[*types.Var]enumInfo
 }
 
-func checkCovered(fset *token.FileSet, imp types.Importer, files []parsedFile) ([]checkedPkg, error) {
-	var order []string
-	by := map[string][]parsedFile{}
-	for _, pf := range files {
-		dir := filepath.Dir(pf.path)
-		if _, ok := by[dir]; !ok {
-			order = append(order, dir)
+func modulePkgDirs() ([]string, error) {
+	root := moduleRoot()
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		by[dir] = append(by[dir], pf)
+		if !d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if path != root && (name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".")) {
+			return filepath.SkipDir
+		}
+		ents, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, e := range ents {
+			n := e.Name()
+			if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+				dirs = append(dirs, path)
+				break
+			}
+		}
+		return nil
+	})
+	sort.Strings(dirs)
+	return dirs, err
+}
+
+func pkgSetProblems(dirs []string) []string {
+	if len(dirs) == 0 {
+		return []string{"枚举到的非测试包是 0 个"}
 	}
+	have := map[string]bool{}
+	for _, d := range dirs {
+		have[filepath.Base(d)] = true
+	}
+	var probs []string
+	for _, name := range []string{"deckui", "layout", "panels"} {
+		if !have[name] {
+			probs = append(probs, fmt.Sprintf("枚举到的包里没有 %s（共 %d 个）", name, len(dirs)))
+		}
+	}
+	return probs
+}
+
+type pkgGroup struct {
+	dir     string
+	path    string
+	files   []parsedFile
+	imports []string
+}
+
+func parseModule(fset *token.FileSet, src map[string]string) ([]*pkgGroup, error) {
+	dirs, err := modulePkgDirs()
+	if err != nil {
+		return nil, err
+	}
+	if probs := pkgSetProblems(dirs); len(probs) > 0 {
+		return nil, errors.New(strings.Join(probs, "\n"))
+	}
+	var out []*pkgGroup
+	for _, dir := range dirs {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		var names []string
+		for _, e := range ents {
+			n := e.Name()
+			if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		g := &pkgGroup{dir: dir, path: pkgImportPath(dir)}
+		seenImp := map[string]bool{}
+		for _, n := range names {
+			path := filepath.Join(dir, n)
+			var body any
+			if s, ok := src[path]; ok {
+				body = s
+			}
+			f, err := parser.ParseFile(fset, path, body, 0)
+			if err != nil {
+				return nil, fmt.Errorf("解析 %s：%w", path, err)
+			}
+			g.files = append(g.files, parsedFile{path: path, file: f})
+			for _, im := range f.Imports {
+				p, err := strconv.Unquote(im.Path.Value)
+				if err != nil || seenImp[p] {
+					continue
+				}
+				seenImp[p] = true
+				g.imports = append(g.imports, p)
+			}
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+func topoGroups(gs []*pkgGroup) ([]*pkgGroup, error) {
+	by := map[string]*pkgGroup{}
+	indeg := map[string]int{}
+	users := map[string][]string{}
+	for _, g := range gs {
+		if _, ok := by[g.path]; ok {
+			return nil, fmt.Errorf("导入路径重复：%s", g.path)
+		}
+		by[g.path] = g
+		indeg[g.path] = 0
+	}
+	for _, g := range gs {
+		seen := map[string]bool{}
+		for _, imp := range g.imports {
+			if _, ok := by[imp]; !ok || seen[imp] || imp == g.path {
+				continue
+			}
+			seen[imp] = true
+			users[imp] = append(users[imp], g.path)
+			indeg[g.path]++
+		}
+	}
+	var ready []string
+	for p, n := range indeg {
+		if n == 0 {
+			ready = append(ready, p)
+		}
+	}
+	var out []*pkgGroup
+	for len(ready) > 0 {
+		sort.Strings(ready)
+		p := ready[0]
+		ready = ready[1:]
+		out = append(out, by[p])
+		for _, u := range users[p] {
+			indeg[u]--
+			if indeg[u] == 0 {
+				ready = append(ready, u)
+			}
+		}
+	}
+	if len(out) != len(gs) {
+		return nil, fmt.Errorf("包依赖有环，排好 %d / %d", len(out), len(gs))
+	}
+	return out, nil
+}
+
+type overlayImporter struct {
+	base types.Importer
+	have map[string]*types.Package
+}
+
+func (o *overlayImporter) Import(path string) (*types.Package, error) {
+	if p := o.have[path]; p != nil {
+		return p, nil
+	}
+	if isModulePath(path) {
+		return nil, fmt.Errorf("内部包 %s 还没按依赖顺序检查", path)
+	}
+	return o.base.Import(path)
+}
+
+func (o *overlayImporter) ImportFrom(path, dir string, mode types.ImportMode) (*types.Package, error) {
+	if p := o.have[path]; p != nil {
+		return p, nil
+	}
+	if isModulePath(path) {
+		return nil, fmt.Errorf("内部包 %s 还没按依赖顺序检查", path)
+	}
+	if from, ok := o.base.(types.ImporterFrom); ok {
+		return from.ImportFrom(path, dir, mode)
+	}
+	return o.base.Import(path)
+}
+
+func checkModule(fset *token.FileSet, base types.Importer, src map[string]string) ([]checkedPkg, error) {
+	groups, err := parseModule(fset, src)
+	if err != nil {
+		return nil, err
+	}
+	order, err := topoGroups(groups)
+	if err != nil {
+		return nil, err
+	}
+	over := &overlayImporter{base: base, have: map[string]*types.Package{}}
 	var out []checkedPkg
-	for _, dir := range order {
-		group := by[dir]
-		asts := make([]*ast.File, len(group))
-		for i, pf := range group {
+	for _, g := range order {
+		asts := make([]*ast.File, len(g.files))
+		for i, pf := range g.files {
 			asts[i] = pf.file
 		}
 		info := &types.Info{
-			Types: make(map[ast.Expr]types.TypeAndValue),
-			Defs:  make(map[*ast.Ident]types.Object),
-			Uses:  make(map[*ast.Ident]types.Object),
+			Types:     make(map[ast.Expr]types.TypeAndValue),
+			Defs:      make(map[*ast.Ident]types.Object),
+			Uses:      make(map[*ast.Ident]types.Object),
+			Instances: make(map[*ast.Ident]types.Instance),
 		}
 		var msgs []string
 		conf := types.Config{
-			Importer: imp,
+			Importer: over,
 			Error: func(e error) {
 				if len(msgs) < 8 {
 					msgs = append(msgs, e.Error())
 				}
 			},
 		}
-		ip := pkgImportPath(dir)
-		pkg, err := conf.Check(ip, fset, asts, info)
+		pkg, err := conf.Check(g.path, fset, asts, info)
 		if err != nil {
-			return nil, fmt.Errorf("类型检查 %s：%v\n%s", ip, err, strings.Join(msgs, "\n"))
+			return nil, fmt.Errorf("类型检查 %s：%v\n%s", g.path, err, strings.Join(msgs, "\n"))
 		}
+		over.have[g.path] = pkg
 		out = append(out, checkedPkg{
-			dir: dir, files: group, pkg: pkg, info: info,
+			dir: g.dir, files: g.files, pkg: pkg, info: info,
 			enums: enumsIn(info, pkg, asts),
 		})
 	}
 	return out, nil
 }
 
-func bindingProblems(fset *token.FileSet, pkgs []checkedPkg, text map[types.Object]bool) []string {
-	var probs []string
-	got := map[string]bool{}
-	seen := map[token.Pos]bool{}
-	directCount := 0
+func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
+	var dirs []string
 	for _, cp := range pkgs {
-		w := bindWorld{info: cp.info, pkg: cp.pkg, enums: cp.enums, text: text}
-		direct, inFunc := directCalls(cp.files)
-		for id, obj := range cp.info.Uses {
-			if !text[obj] {
-				continue
-			}
-			site, ok := direct[id]
-			if !ok {
-				probs = append(probs, fmt.Sprintf("%s：文字函数 %s 不在直接调用的位置", fset.Position(id.Pos()), id.Name))
-				continue
-			}
-			directCount++
-			if !dynamicKeyCall(site.call) {
-				continue
-			}
-			seen[site.call.Pos()] = true
-			fn := inFunc[site.call]
-			if fn == "" {
-				probs = append(probs, fmt.Sprintf("%s：动态取键不在函数里", fset.Position(site.call.Pos())))
-				continue
-			}
-			recordDynamic(fset, &w, got, &probs, site.file, fn, site.call)
-		}
+		dirs = append(dirs, cp.dir)
+	}
+	probs := pkgSetProblems(dirs)
+	known := map[string]bool{}
+	for _, k := range i18n.Keys() {
+		known[string(k)] = true
+	}
+	genAllow := map[string]bool{}
+	for _, s := range genericKeyAllow {
+		genAllow[s] = true
+	}
+	got := map[string]bool{}
+	genGot := map[string]bool{}
+	for _, cp := range pkgs {
+		w := bindWorld{info: cp.info, pkg: cp.pkg, enums: cp.enums}
+		outside := cp.pkg.Path() != i18nImport
 		for _, pf := range cp.files {
 			base := filepath.Base(pf.path)
-			for _, d := range pf.file.Decls {
-				fd, ok := d.(*ast.FuncDecl)
-				if !ok || fd.Body == nil {
-					continue
-				}
-				ast.Inspect(fd.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					if id := callFunIdent(call); id != nil && text[objOf(cp.info, id)] {
-						return true
-					}
-					name, _, _, literal := isTextCall(call)
-					if name == "" || literal {
-						return true
-					}
-					seen[call.Pos()] = true
-					recordDynamic(fset, &w, got, &probs, base, fd.Name.Name, call)
-					return true
-				})
-			}
-			ast.Inspect(pf.file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
+			walkStack(pf.file, func(n ast.Node, stack []ast.Node) {
+				e, ok := n.(ast.Expr)
 				if !ok {
-					return true
+					return
 				}
-				name, _, _, literal := isTextCall(call)
-				if name != "" && !literal && !seen[call.Pos()] {
-					probs = append(probs, fmt.Sprintf("%s：动态取键不在函数里", fset.Position(call.Pos())))
+				if isConstKey(cp.info, e) && !isConstKey(cp.info, nearestExpr(stack)) {
+					val, okVal := keyString(cp.info.Types[e].Value)
+					if !okVal || !known[val] {
+						expr, err := printExpr(fset, e)
+						if err != nil {
+							probs = append(probs, err.Error())
+						} else {
+							probs = append(probs, fmt.Sprintf("%s：常量键 %q 不在 Keys() 里（%s）", fset.Position(e.Pos()), val, expr))
+						}
+					}
 				}
-				return true
+				call, ok := e.(*ast.CallExpr)
+				if !ok || !outside {
+					return
+				}
+				op, ok := keyConvOperand(cp.info, call)
+				if !ok || cp.info.Types[call].Value != nil {
+					return
+				}
+				fn := nearestFunc(stack)
+				expr, err := printExpr(fset, op)
+				if err != nil {
+					probs = append(probs, err.Error())
+					return
+				}
+				pos := fset.Position(call.Pos())
+				if fn == "" {
+					probs = append(probs, fmt.Sprintf("%s：非常量转换不在函数里（%s）", pos, expr))
+					return
+				}
+				if okShape, why := w.classify(op); !okShape {
+					probs = append(probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
+					return
+				}
+				got[base+" · "+fn+" · "+expr] = true
 			})
 		}
-	}
-	if directCount < len(dynamicCallAllow) {
-		probs = append(probs, fmt.Sprintf("按对象找到的直接调用有 %d 个，少于返工 3 统计的 %d 个", directCount, len(dynamicCallAllow)))
+		for id, inst := range cp.info.Instances {
+			if inst.TypeArgs == nil {
+				continue
+			}
+			hit := false
+			for i := 0; i < inst.TypeArgs.Len(); i++ {
+				if isI18nKey(inst.TypeArgs.At(i)) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+			fileBase := filepath.Base(fset.Position(id.Pos()).Filename)
+			fn := funcNameAt(cp.files, id.Pos())
+			site := fileBase + " · " + fn + " · " + id.Name
+			if !genAllow[site] {
+				probs = append(probs, fmt.Sprintf("%s：泛型实例化以 i18n.Key 为类型实参（%s）", fset.Position(id.Pos()), id.Name))
+				continue
+			}
+			genGot[site] = true
+		}
 	}
 	want := map[string]bool{}
 	for _, s := range dynamicCallAllow {
 		want[s] = true
+		if !got[s] {
+			probs = append(probs, "dynamicCallAllow 里的 "+s+" 已经不是动态取键")
+		}
 	}
 	for s := range got {
 		if !want[s] {
 			probs = append(probs, "新的动态取键 "+s+"：先确认键来自已枚举的集合，再写进 dynamicCallAllow")
 		}
 	}
-	for s := range want {
-		if !got[s] {
-			probs = append(probs, "dynamicCallAllow 里的 "+s+" 已经不是动态取键")
+	for _, s := range genericKeyAllow {
+		if !genGot[s] {
+			probs = append(probs, "genericKeyAllow 里的 "+s+" 已经不是泛型实例化")
 		}
 	}
 	sort.Strings(probs)
 	return probs
 }
 
-// callSite 是一处调用，以及它所在的文件（不含目录）。
-type callSite struct {
-	call *ast.CallExpr
-	file string
+func walkStack(root ast.Node, fn func(n ast.Node, stack []ast.Node)) {
+	var stack []ast.Node
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n == nil {
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			return false
+		}
+		fn(n, stack)
+		stack = append(stack, n)
+		return true
+	})
 }
 
-// directCalls 记下直接调用的函数位置：Fun 本身，或 Fun 这个选择器的 Sel。
-// inFunc 的值是包住这处调用的函数名。不在函数里则为空。
-// defer 与 go 的语句包着的仍是 CallExpr，算直接调用，不算取值。
-func directCalls(files []parsedFile) (map[*ast.Ident]callSite, map[*ast.CallExpr]string) {
-	direct := map[*ast.Ident]callSite{}
-	inFunc := map[*ast.CallExpr]string{}
+func isConstKey(info *types.Info, e ast.Expr) bool {
+	if info == nil || e == nil {
+		return false
+	}
+	tv, ok := info.Types[e]
+	return ok && tv.Value != nil && isI18nKey(tv.Type)
+}
+
+func nearestExpr(stack []ast.Node) ast.Expr {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if e, ok := stack[i].(ast.Expr); ok {
+			return e
+		}
+	}
+	return nil
+}
+
+func nearestFunc(stack []ast.Node) string {
+	for i := len(stack) - 1; i >= 0; i-- {
+		fd, ok := stack[i].(*ast.FuncDecl)
+		if ok && fd.Name != nil {
+			return fd.Name.Name
+		}
+	}
+	return ""
+}
+
+func keyString(v constant.Value) (string, bool) {
+	if v == nil || v.Kind() != constant.String {
+		return "", false
+	}
+	return constant.StringVal(v), true
+}
+
+func keyConvOperand(info *types.Info, call *ast.CallExpr) (ast.Expr, bool) {
+	if call == nil || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return nil, false
+	}
+	tn, ok := objOf(info, callFunIdent(call)).(*types.TypeName)
+	if !ok || !isI18nKey(tn.Type()) {
+		return nil, false
+	}
+	return call.Args[0], true
+}
+
+func funcNameAt(files []parsedFile, pos token.Pos) string {
 	for _, pf := range files {
-		base := filepath.Base(pf.path)
 		for _, d := range pf.file.Decls {
 			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
+			if !ok || fd.Name == nil {
 				continue
 			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					inFunc[call] = fd.Name.Name
-				}
-				return true
-			})
+			if fd.Pos() <= pos && pos < fd.End() {
+				return fd.Name.Name
+			}
 		}
-		ast.Inspect(pf.file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			site := callSite{call: call, file: base}
-			switch fun := call.Fun.(type) {
-			case *ast.Ident:
-				direct[fun] = site
-			case *ast.SelectorExpr:
-				direct[fun.Sel] = site
-			}
-			return true
-		})
 	}
-	return direct, inFunc
+	return ""
 }
 
 func callFunIdent(call *ast.CallExpr) *ast.Ident {
@@ -945,35 +1265,6 @@ func callFunIdent(call *ast.CallExpr) *ast.Ident {
 	default:
 		return nil
 	}
-}
-
-// dynamicKeyCall 是要交给参数检查的直接调用：有参数、不是展开、首参不是字符串字面量。
-func dynamicKeyCall(call *ast.CallExpr) bool {
-	if call == nil || len(call.Args) == 0 || call.Ellipsis.IsValid() {
-		return false
-	}
-	if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-		return false
-	}
-	return true
-}
-
-func recordDynamic(fset *token.FileSet, w *bindWorld, got map[string]bool, probs *[]string, fileBase, fn string, call *ast.CallExpr) {
-	expr, err := printExpr(fset, call.Args[0])
-	if err != nil {
-		*probs = append(*probs, err.Error())
-		return
-	}
-	pos := fset.Position(call.Pos())
-	if okCall, why := w.realTextCall(call); !okCall {
-		*probs = append(*probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
-		return
-	}
-	if okShape, why := w.classify(call.Args[0]); !okShape {
-		*probs = append(*probs, fmt.Sprintf("%s：%s（%s）", pos, why, expr))
-		return
-	}
-	got[fileBase+" · "+fn+" · "+expr] = true
 }
 
 // enumInfo 描述一张被 TextKeys 枚举到的包级表。比对用对象，不用名字。
@@ -988,7 +1279,6 @@ type bindWorld struct {
 	info  *types.Info
 	pkg   *types.Package
 	enums map[*types.Var]enumInfo
-	text  map[types.Object]bool
 }
 
 func enumsIn(info *types.Info, pkg *types.Package, files []*ast.File) map[*types.Var]enumInfo {
@@ -1095,16 +1385,30 @@ func valueIsKeyType(t types.Type) bool {
 	if t == nil {
 		return false
 	}
+	var elem types.Type
 	switch u := t.Underlying().(type) {
 	case *types.Map:
-		return isPlainString(u.Elem())
+		elem = u.Elem()
 	case *types.Slice:
-		return isPlainString(u.Elem())
+		elem = u.Elem()
 	case *types.Array:
-		return isPlainString(u.Elem())
+		elem = u.Elem()
 	default:
 		return false
 	}
+	return isPlainString(elem) || isI18nKey(elem)
+}
+
+func isI18nKey(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Name() == "Key" && obj.Pkg() != nil && obj.Pkg().Path() == i18nImport
 }
 
 func isPlainString(t types.Type) bool {
@@ -1120,40 +1424,6 @@ func objOf(info *types.Info, id *ast.Ident) types.Object {
 		return obj
 	}
 	return info.Defs[id]
-}
-
-func (w *bindWorld) realTextCall(call *ast.CallExpr) (bool, string) {
-	if id := callFunIdent(call); id != nil && w.text[objOf(w.info, id)] {
-		return true, ""
-	}
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		fn, ok := objOf(w.info, fun).(*types.Func)
-		if !ok || fn.Parent() != w.pkg.Scope() || (fun.Name != "T" && fun.Name != "Tf") {
-			return false, "函数 " + fun.Name + " 绑定的不是包级文字函数"
-		}
-		return true, ""
-	case *ast.SelectorExpr:
-		base, ok := fun.X.(*ast.Ident)
-		if !ok {
-			return false, "函数 " + fun.Sel.Name + " 绑定的不是 i18n 的文字函数"
-		}
-		if _, ok := objOf(w.info, base).(*types.PkgName); !ok {
-			return false, "函数 " + fun.Sel.Name + " 绑定的不是 i18n 的文字函数"
-		}
-		fn, ok := objOf(w.info, fun.Sel).(*types.Func)
-		if !ok || fn.Pkg() == nil || fn.Pkg().Path() != i18nImport {
-			return false, "函数 " + fun.Sel.Name + " 绑定的不是 i18n 的文字函数"
-		}
-		switch fun.Sel.Name {
-		case "T", "Tf", "Format", "Errorf":
-			return true, ""
-		default:
-			return false, "函数 " + fun.Sel.Name + " 绑定的不是 i18n 的文字函数"
-		}
-	default:
-		return false, "函数绑定的不是文字函数"
-	}
 }
 
 func (w *bindWorld) classify(arg ast.Expr) (bool, string) {
@@ -1330,6 +1600,19 @@ func hasAdd(e ast.Expr) bool {
 	return found
 }
 
+// unwrapKeyConv 只给档位前缀的语法扫描用。真正的转换认 go/types。
+func unwrapKeyConv(e ast.Expr) ast.Expr {
+	call, ok := unparen(e).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return e
+	}
+	id := callFunIdent(call)
+	if id == nil || id.Name != "Key" {
+		return e
+	}
+	return call.Args[0]
+}
+
 func unparen(e ast.Expr) ast.Expr {
 	for {
 		p, ok := e.(*ast.ParenExpr)
@@ -1382,8 +1665,8 @@ func checkDynamicKeysPlain(t *testing.T, keys []string) {
 	for _, k := range keys {
 		if !seen[k] {
 			seen[k] = true
-			zh, zhOK := i18n.TextZH(k)
-			en, enOK := i18n.TextEN(k)
+			zh, zhOK := i18n.TextZH(i18n.Key(k))
+			en, enOK := i18n.TextEN(i18n.Key(k))
 			if zhOK && enOK {
 				if vz, ve := verbs(zh), verbs(en); len(vz) > 0 || len(ve) > 0 {
 					t.Errorf("动态键 %q 带占位符 %v / %v，参数个数扫不到", k, vz, ve)

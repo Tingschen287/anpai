@@ -1,7 +1,7 @@
 package i18n
 
 // zh 是界面文字（n060）。键与另一套语言一一对应。
-var zh = map[string]string{
+var zh = map[Key]string{
 	"title":                   "设置",
 	"page.project":            "项目",
 	"page.agents":             "全局 agent",

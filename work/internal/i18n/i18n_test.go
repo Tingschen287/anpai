@@ -1,7 +1,16 @@
 package i18n
 
 import (
+	"go/ast"
+	"go/constant"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
@@ -80,4 +89,101 @@ func TestTablesMatch(t *testing.T) {
 			t.Errorf("中文没有 %q", k)
 		}
 	}
+}
+
+// TestStringToKeyConversionsStayInTable 证明：i18n 生产代码里，
+// 显式把值转成 Key 时，要么是常量而且在表里，要么就失败。
+// 非常量转换能造出任意键，这里不允许。
+// 表字面量里的无类型常量不是这种转换，不在这里记。
+func TestStringToKeyConversionsStayInTable(t *testing.T) {
+	srcDir := filepath.Dir(currentFile(t))
+	fset := token.NewFileSet()
+	var files []*ast.File
+	ents, err := os.ReadDir(srcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		n := e.Name()
+		if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+			names = append(names, n)
+		}
+	}
+	if len(names) < 3 {
+		t.Fatalf("非测试文件只有 %d 个", len(names))
+	}
+	for _, n := range names {
+		f, err := parser.ParseFile(fset, filepath.Join(srcDir, n), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
+		Uses:  make(map[*ast.Ident]types.Object),
+	}
+	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
+	pkg, err := conf.Check("github.com/Tingschen287/terminal-deck/work/internal/i18n", fset, files, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nConv := 0
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+				return true
+			}
+			var id *ast.Ident
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				id = fun
+			case *ast.SelectorExpr:
+				id = fun.Sel
+			default:
+				return true
+			}
+			tn, ok := info.Uses[id].(*types.TypeName)
+			if !ok || !isOurKey(tn.Type(), pkg) {
+				return true
+			}
+			nConv++
+			tv := info.Types[call]
+			pos := fset.Position(call.Pos())
+			if tv.Value == nil {
+				t.Errorf("%s：非常量转成 Key，可能造出表外的键", pos)
+				return true
+			}
+			if tv.Value.Kind() != constant.String {
+				t.Errorf("%s：Key 常量不是字符串", pos)
+				return true
+			}
+			k := Key(constant.StringVal(tv.Value))
+			if _, ok := zh[k]; !ok {
+				t.Errorf("%s：转换出的键 %q 不在表里", pos, k)
+			}
+			return true
+		})
+	}
+	t.Logf("i18n 生产代码里显式转成 Key 的地方：%d", nConv)
+}
+
+func isOurKey(t types.Type, pkg *types.Package) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Name() == "Key" && obj.Pkg() == pkg
+}
+
+func currentFile(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(1)
+	if !ok {
+		t.Fatal("caller")
+	}
+	return file
 }

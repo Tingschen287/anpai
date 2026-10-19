@@ -1,7 +1,7 @@
 package i18n
 
 // en 是界面文字（n060）。键与另一套语言一一对应。
-var en = map[string]string{
+var en = map[Key]string{
 	"title":                   "Settings",
 	"page.project":            "Project",
 	"page.agents":             "Agents",

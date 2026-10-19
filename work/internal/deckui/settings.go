@@ -19,6 +19,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // agent 设置界面（架构稿 §14.2，n049；n057 owner：「我没看到哪里可以配置我全局可用的agent和模型，还有每个主会话可用的agent和模型」）：
@@ -121,12 +122,14 @@ const (
 	pageCount
 )
 
-var pageText = [pageCount]string{"page.project", "page.agents", "page.trust"}
+var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust"}
 
 // TextKeys 返回页签文字键。tabBar 用下标取，调用处不是字符串字面量。
 func TextKeys() []string {
 	out := make([]string, len(pageText))
-	copy(out, pageText[:])
+	for i, k := range pageText {
+		out[i] = string(k)
+	}
 	return out
 }
 
@@ -865,7 +868,7 @@ func (m *Settings) note(s string) string {
 }
 
 // tierName 是档位的中文名（n059，owner：「先中文」）：文件、命令行 --tier 与 deckd 接口仍用英文。
-func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }
+func tierName(t deckstore.Tier) string { return T(i18n.Key("tier." + string(t))) }
 
 // tierColor 是档位的颜色：三档一眼分得开。
 func tierColor(t deckstore.Tier) string {
@@ -896,9 +899,9 @@ func (m *Settings) hl(s string) string {
 func (m *Settings) tabBar() string {
 	var tabs []string
 	for i := range pageText {
-		name := " " + T(pageText[i]) + " "
+		name := " " + T(i18n.Key(pageText[i])) + " "
 		if page(i) == pageTrust && len(m.trust) > 0 {
-			name = " " + T(pageText[i]) + fmt.Sprintf(" %d ", len(m.trust))
+			name = " " + T(i18n.Key(pageText[i])) + fmt.Sprintf(" %d ", len(m.trust))
 		}
 		if page(i) == m.page {
 			tabs = append(tabs, tabOn+name+reset)
