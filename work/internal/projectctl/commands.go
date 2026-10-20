@@ -2,7 +2,6 @@ package projectctl
 
 import (
 	"context"
-	"encoding/json"
 	"regexp"
 	"time"
 
@@ -16,7 +15,7 @@ func (c *Client) Validate(ctx context.Context) (ValidateResult, error) {
 		return ValidateResult{}, err
 	}
 	var v ValidateResult
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := i18n.UnmarshalExternal(raw, &v); err != nil {
 		return ValidateResult{}, i18n.E("err.projectctl.validate.parse", err)
 	}
 	return v, nil
@@ -47,7 +46,7 @@ func (c *Client) Next(ctx context.Context) ([]ReadyNode, error) {
 		return nil, err
 	}
 	var out []ReadyNode
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := i18n.UnmarshalExternal(raw, &out); err != nil {
 		return nil, i18n.E("err.projectctl.next.parse", err)
 	}
 	return out, nil
@@ -73,7 +72,7 @@ func (c *Client) VerifyChain(ctx context.Context) (ChainStatus, error) {
 		LagDays     *float64 `json:"lag_days"`
 		AuditFailed bool     `json:"audit_failed"`
 	}
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := i18n.UnmarshalExternal(raw, &v); err != nil {
 		return ChainStatus{}, i18n.E("err.projectctl.verifychain.parse", err)
 	}
 	out := ChainStatus{
@@ -115,7 +114,7 @@ func (c *Client) BriefState(ctx context.Context, nodeID string) (State, error) {
 		return "", err
 	}
 	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
+	if err := i18n.UnmarshalExternal(raw, &text); err != nil {
 		return "", i18n.E("err.projectctl.briefstate.parse", err)
 	}
 	m := briefStateRe.FindStringSubmatch(text)

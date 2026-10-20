@@ -29,7 +29,10 @@ type CenterLoop struct {
 	Fence func()
 	// Pause 显示原因并等 owner 决定：true 重试，false 退出循环。
 	Pause func(reason string) bool
-	Now   func() time.Time
+	// PauseLive 不为 nil 时代替 Pause：原因给的是函数，每次调用按此刻的界面语言重新拼，
+	// 停住等按键期间 owner 改了界面语言，调用方可以重画整屏（n060 段 3）。
+	PauseLive func(reason func() string) bool
+	Now       func() time.Time
 
 	QuickExit time.Duration // 默认 3 秒
 	MaxQuick  int           // 默认 3 次
@@ -69,11 +72,21 @@ func (l *CenterLoop) Run() {
 			quick = 0
 		}
 		if quick >= l.MaxQuick {
-			reason := i18n.T("layout.err.center", quick, l.QuickExit)
-			if err != nil {
-				reason += i18n.T("layout.err.center.last") + deckclient.Show(err) // 带码的 tmux 退出说明按界面语言显示（返工 4）；中文与 Present(err.Error()) 逐字相同
+			quick, quickExit, lastErr := quick, l.QuickExit, err
+			reason := func() string {
+				r := i18n.T("layout.err.center", quick, quickExit)
+				if lastErr != nil {
+					r += i18n.T("layout.err.center.last") + deckclient.Show(lastErr) // 带码的 tmux 退出说明按界面语言显示（返工 4）；中文与 Present(err.Error()) 逐字相同
+				}
+				return r
 			}
-			if !l.Pause(reason) {
+			retry := false
+			if l.PauseLive != nil {
+				retry = l.PauseLive(reason)
+			} else {
+				retry = l.Pause(reason())
+			}
+			if !retry {
 				return
 			}
 			op, quick = "resync", 0

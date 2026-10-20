@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
@@ -101,7 +100,7 @@ func (c *Client) InboxExport(ctx context.Context) ([]InboxRecord, error) {
 		return nil, err
 	}
 	var records []InboxRecord
-	if err := json.Unmarshal(out, &records); err != nil {
+	if err := i18n.UnmarshalExternal(out, &records); err != nil {
 		return nil, i18n.E("err.agentdeck.clientinboxexport.1", err)
 	}
 	return records, nil
@@ -119,7 +118,7 @@ func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
 		return WriterStatus{}, err
 	}
 	var st WriterStatus
-	if err := json.Unmarshal(out, &st); err != nil {
+	if err := i18n.UnmarshalExternal(out, &st); err != nil {
 		return WriterStatus{}, i18n.E("err.agentdeck.clientinboxwriterstatus.1", err)
 	}
 	return st, nil

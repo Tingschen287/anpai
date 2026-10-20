@@ -14,7 +14,11 @@ import (
 //     请求带 i18n.MarkHeader（界面用 deckclient.NewUI）的，线路上保留标记，界面按当前语言翻译；
 //     不带的（deck agent 命令、模型、旧工具）拿到的标记一律换成中文「[已打码]」，和改码之前逐字一样。
 //  2. 测试钩子。i18n.WireHook 默认是 nil，生产行为不变；测试里设上以后，每一段写给客户端的响应或通知都交给它检查。
-type markFilter struct{ next http.Handler }
+//  3. 界面语言（n060 段 3）。lang 不为 nil 时，每个响应带 i18n.LangHeader：此刻的界面语言。界面进程据此换语言。
+type markFilter struct {
+	next http.Handler
+	lang func() string
+}
 
 func (m markFilter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = neutralRequest(r) // 路径、查询串、Last-Event-ID 里伪造的标记（返工 4）
@@ -24,6 +28,9 @@ func (m markFilter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h("request "+r.Method+" "+r.URL.Path, b)
 			r.Body = io.NopCloser(bytes.NewReader(b))
 		}
+	}
+	if m.lang != nil {
+		w.Header().Set(i18n.LangHeader, m.lang())
 	}
 	fw := &filterWriter{ResponseWriter: w, neutral: r.Header.Get(i18n.MarkHeader) == i18n.MarkNeutral,
 		kind: r.Method + " " + r.URL.Path, status: http.StatusOK}

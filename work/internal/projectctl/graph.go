@@ -62,6 +62,8 @@ func LoadGraph(projectRoot string) (Graph, error) {
 	if err := yaml.Unmarshal(i18n.NeutralizeBytes(data), &g); err != nil { // 项目文件是外部原文（返工 4）
 		return Graph{}, i18n.E("err.projectctl.graph.parse", path, err)
 	}
+	// YAML 双引号字符串的 \uE000 转义要解码之后才变成标记字符：解码后的字符串再中和一次（段 3，复审 4 必改 1）
+	i18n.NeutralizeValue(&g)
 	if len(g.Nodes) == 0 {
 		return Graph{}, i18n.E("err.projectctl.graph.empty", path)
 	}

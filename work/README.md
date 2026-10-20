@@ -171,6 +171,7 @@ deck reports deliver-now [--project <id>]
 
 `R` 重新读取。改动自动保存，对之后起的会话生效，已在跑的会话不变；存不上时 `s` 重试。档位在界面里叫最强、日常、便宜，
 文件、命令行 `--tier` 与 deckd 接口仍用 `frontier`、`balanced`、`economy`。
+设置里可切换界面语言（中文 / English），第一次运行跟随系统语言。
 
 ### 配置文件
 

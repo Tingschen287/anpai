@@ -34,6 +34,10 @@ type Config struct {
 	// UpstreamAddr 是 agent-deck headless 服务地址（例如 127.0.0.1:8420），用来读会话运行状态；留空则状态一律 unknown。
 	UpstreamAddr  string
 	UpstreamToken string
+	// SystemLang 是系统语言（zh 或 en）：owner 没在设置里选过界面语言时，界面用它（n060 段 3）。
+	// 由 deck up 按它自己（owner 的 shell）的环境变量算好，经 deck daemon 的 -system-lang 传进来；
+	// 空（测试、没传）按中文。deckd 自己不换语言：给模型、落盘、日志的文字一直是中文，这个值只经 LangHeader 告诉界面。
+	SystemLang string
 }
 
 type paneResolver interface {
@@ -84,6 +88,7 @@ func NewServer(cfg Config, store *deckstore.Store, resolver paneResolver, quota 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/lang", s.getLang)
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
 	mux.HandleFunc("GET /v1/quota", s.getQuota)
 	mux.HandleFunc("GET /v1/projects", s.getProjects)
@@ -115,7 +120,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/reports/wait", s.getReportsWait)
 	mux.HandleFunc("POST /v1/reports/ack", s.postReportsAck)
 	mux.HandleFunc("POST /v1/reports/deliver-now", s.postReportsDeliverNow)
-	return markFilter{next: mux}
+	return markFilter{next: mux, lang: s.uiLang}
+}
+
+// uiLang 是此刻的界面语言：owner 在设置里选的；没选过就是系统语言（Config.SystemLang）；再没有就是中文。
+// 每个响应都带它（markFilter 写 i18n.LangHeader），界面进程据此换语言。
+func (s *Server) uiLang() string {
+	if l := s.store.UILang(); i18n.ValidLang(l) {
+		return l
+	}
+	if i18n.ValidLang(s.cfg.SystemLang) {
+		return s.cfg.SystemLang
+	}
+	return i18n.ZH
+}
+
+// getLang 回此刻的界面语言，以及它是 owner 选的（saved）还是跟随系统的。界面进程启动时用它先对一次语言，不必等第一个业务请求。
+func (s *Server) getLang(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"lang": s.uiLang(), "saved": i18n.ValidLang(s.store.UILang())})
 }
 
 // ---------------- 通用 ----------------
@@ -546,6 +568,7 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 	var b answerBody
 	// 只有 owner 的界面能答。它回传的 option 是界面显示过的选项原文，存下来的选项可能带真标记，
 	// 只拿来和存下来的选项比较，所以不在这里中和（中和了就对不上选项）。别的请求体一律 readBody 中和（返工 4）。
+	// 这个例外只限比较：比较失败时 Store.Answer 在 option 进错误参数之前先中和它（段 3，复审 4 必改 2）。
 	if err := readBodyRaw(r, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
@@ -590,6 +613,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		Agents     *[]deckstore.AgentDef   `json:"agents"`
 		Projects   *[]deckstore.ProjectDef `json:"projects"`
 		Generation *int                    `json:"generation"`
+		// UILang：界面语言。不带这个字段（旧客户端、deck project add）表示不动已存的语言，不是「清空」；带 "" 才是清回跟随系统
+		UILang *string `json:"ui_lang"`
 	}
 	if err := readBody(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
@@ -603,7 +628,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverputsettings.2"))
 		return
 	}
-	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
+	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects, UILang: s.store.UILang()}
+	if body.UILang != nil {
+		next.UILang = *body.UILang
+	}
 	if err := checkAgentEdits(s.store.Settings(), next); err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return

@@ -12,7 +12,6 @@ package agentdeck
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"io"
 	"net/http"
@@ -233,7 +232,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return i18n.E("err.agentdeck.clientget.2", path, err)
 	}
-	return json.NewDecoder(bytes.NewReader(i18n.NeutralizeBytes(data))).Decode(out)
+	return i18n.DecodeExternal(data, out) // 解码之后再中和：JSON 转义写法的伪造标记只有解码后才出现（段 3）
 }
 
 func truncate(s string, n int) string {

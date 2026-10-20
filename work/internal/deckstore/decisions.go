@@ -223,7 +223,9 @@ func (s *Store) Answer(id, option string, version int, by string) (Decision, err
 			}
 		}
 		if !valid {
-			return nil, nil, i18n.E("err.deckstore.storeanswer.4", option, id)
+			// option 是请求里的原样值（deckd 为了和存下来的选项比较，没有中和它）。比较失败，它就不是任何一个存下来的选项，
+			// 里面的私用区标记只能是伪造或过期的：进错误参数之前先中和，不让它在界面上变成假的打码记号（段 3，复审 4 必改 2）
+			return nil, nil, i18n.E("err.deckstore.storeanswer.4", i18n.Neutralize(option), id)
 		}
 		switch option {
 		case OptApprove:

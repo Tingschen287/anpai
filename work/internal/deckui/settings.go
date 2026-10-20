@@ -72,7 +72,11 @@ func (a DeckSettingsAPI) Load(ctx context.Context) (deckstore.Settings, []deckst
 
 func (a DeckSettingsAPI) Save(ctx context.Context, s deckstore.Settings) (int, error) {
 	var out deckstore.Settings
-	err := a.C.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}, &out)
+	body := map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}
+	if s.UILang != "" {
+		body["ui_lang"] = s.UILang // 没选过语言就不带：deckd 当作「不动已存的」（n060 段 3）
+	}
+	err := a.C.Do(ctx, "PUT", "/v1/settings", body, &out)
 	return out.Generation, err
 }
 
@@ -103,6 +107,7 @@ const (
 	rowTrust                    // 一条记住的授权
 	rowGlobal                   // 全局可用的一个 agent（⏎ 打开编辑）
 	rowAddAgent                 // 「加入本机的 agent」
+	rowLang                     // 「界面语言」（n060 段 3）：中文 / English，空格或 ⏎ 切换
 )
 
 type row struct {
@@ -183,11 +188,12 @@ type loadedMsg struct {
 type doneMsg struct {
 	what    string
 	err     error
-	save    bool // 是保存（不是撤销授权）
-	edits   int  // 保存时的改动计数
-	gen     int  // 保存时带的代数
-	saved   int  // 存下的代数（deckd 回的）
-	reloads int  // 发出时的重读次数
+	save    bool   // 是保存（不是撤销授权）
+	edits   int    // 保存时的改动计数
+	gen     int    // 保存时带的代数
+	saved   int    // 存下的代数（deckd 回的）
+	reloads int    // 发出时的重读次数
+	lang    string // 保存时带的界面语言（n060 段 3）：存上了才换语言
 }
 
 func (m *Settings) Init() tea.Cmd { return m.load }
@@ -249,7 +255,7 @@ func (m *Settings) rows() []row {
 		for _, a := range m.set.Agents {
 			rs = append(rs, row{kind: rowGlobal, agent: a.ID})
 		}
-		rs = append(rs, row{kind: rowAddAgent})
+		rs = append(rs, row{kind: rowAddAgent}, row{kind: rowLang})
 	case pageTrust:
 		for _, g := range m.trust {
 			rs = append(rs, row{kind: rowTrust, trust: g})
@@ -536,7 +542,7 @@ func (m *Settings) save() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		saved, err := m.API.Save(ctx, set)
-		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved, reloads: reloads}
+		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved, reloads: reloads, lang: set.UILang}
 	}
 }
 
@@ -575,6 +581,11 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 		return nil
 	}
 	m.saveErr, m.saved = "", true
+	if i18n.ValidLang(msg.lang) {
+		// 语言存上了才换（deckd 的响应头也会让本进程换到同一个语言；这里不依赖它，测试里的假 API 也一样）。
+		// 其他界面进程在下一次向 deckd 取数时跟着换：侧栏、标签条 1 秒内，面板 2 秒内
+		i18n.SetLang(msg.lang)
+	}
 	if m.set.Generation == msg.gen {
 		m.set.Generation = msg.saved // 下一次保存带存下的代数（rev 127 起代数不是 +1，用 deckd 回的）
 	}
@@ -650,6 +661,8 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, m.openAgent(r.agent)
 		case rowAddAgent:
 			return m, m.openAdd()
+		case rowLang:
+			m.toggleLang()
 		}
 	case "a":
 		if m.loaded {
@@ -1057,7 +1070,48 @@ func (m *Settings) agentsPage(b *strings.Builder, row, cont func(string) string)
 			b.WriteString(cont(indent+l) + "\n")
 		}
 	}
-	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n")
+	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n\n")
+	b.WriteString(row(m.langRow()) + "\n")
+}
+
+// uiLang 是界面语言一行此刻选中的：owner 选过的；没选过就是此刻界面正在用的（第一次按系统语言）。
+func (m *Settings) uiLang() string {
+	if i18n.ValidLang(m.set.UILang) {
+		return m.set.UILang
+	}
+	return i18n.Lang()
+}
+
+// toggleLang 在中文与 English 之间切换。改的是设置里的 ui_lang，和别的设置一样自动保存；存上之后界面才换语言（saveDone）。
+func (m *Settings) toggleLang() {
+	next := i18n.EN
+	if m.uiLang() == i18n.EN {
+		next = i18n.ZH
+	}
+	m.set.UILang = next
+	m.touch()
+}
+
+// langName 是语言的显示名：中文界面「中文 / English」，英文界面「Chinese / English」。
+func langName(code string) string {
+	if code == i18n.EN {
+		return T("settings.lang.en")
+	}
+	return T("settings.lang.zh")
+}
+
+// langRow 是「界面语言」一行：当前选中的亮着。
+func (m *Settings) langRow() string {
+	cur := m.uiLang()
+	var opts []string
+	for _, code := range []string{i18n.ZH, i18n.EN} {
+		if code == cur {
+			opts = append(opts, green+"●"+reset+" "+bold+langName(code)+reset)
+		} else {
+			opts = append(opts, dimOn+"○ "+langName(code)+reset)
+		}
+	}
+	return bold + T("settings.lang.label") + reset + "  " + strings.Join(opts, "   ")
 }
 
 // modelTokens 把一个 agent 的模型按档位从高到低分组：每组第一个带档位名，组内用「、」接，组间空三格。折行只在这些地方断。
@@ -1185,6 +1239,8 @@ func (m *Settings) rowHelp() string {
 		return T("help.agent")
 	case rowAddAgent:
 		return T("help.add")
+	case rowLang:
+		return T("help.lang")
 	case rowTrust:
 		return T("help.trust")
 	}

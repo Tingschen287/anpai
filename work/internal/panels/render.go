@@ -331,9 +331,30 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 
 func decisionText(d deckstore.Decision) string {
 	if d.SummaryCode == "" {
-		return deckstore.Display(d.Summary, 800)
+		// 没有码的旧摘要。系统生成的那几类（花额度、Codex 授权）里能逐字认出的，deckstore.Open 已经补了码；
+		// 剩下的混有外部原文、反解不确定，英文界面整条显示原文并加「旧记录」标签；中文界面照旧。主 agent 写的摘要本来就是外部原文，不加（段 3）
+		return legacyPrefix(d.Summary, deckstore.SystemSummaryKind(d.Kind)) + deckstore.Display(d.Summary, 800)
 	}
 	return deckstore.Clip(deckclient.Text(d.SummaryCode, []any(d.SummaryArgs), d.Summary), 800)
+}
+
+// legacyPrefix 是兼容显示策略：英文界面里没有码、含汉字的旧系统记录，整条显示原文，前面加「旧记录」标签（按语言）。
+// 中文界面、没有汉字的、不是系统记录的都不加。
+func legacyPrefix(text string, system bool) string {
+	if !system || i18n.Lang() != i18n.EN || !hasCJK(text) {
+		return ""
+	}
+	return dim.Render("[" + i18n.T("legacy.label") + "] ")
+}
+
+// hasCJK 与检查器同一口径：汉字、中文标点（U+3000–303F）、全角形式（U+FF00–FFEF）。
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if (r >= 0x4e00 && r <= 0x9fff) || (r >= 0x3400 && r <= 0x4dbf) || (r >= 0x3000 && r <= 0x303f) || (r >= 0xff00 && r <= 0xffef) {
+			return true
+		}
+	}
+	return false
 }
 
 func kindLabel(k string) string {
@@ -406,14 +427,19 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 			line += dim.Render(n.Project + " · ")
 		}
 		text := i18n.Present(n.Text) // 无码通知的正文是清洗过再存的，里面可能有中性打码标记
+		prefix := ""
 		if n.Code != "" {
 			text = deckclient.Text(n.Code, []any(n.Args), n.Text)
+		} else {
+			// 没有码的通知是旧记录（现在的通知都带码）：认得出的固定句子 deckstore.Open 已经补了码，
+			// 剩下的英文界面整条显示原文并加「旧记录」标签（段 3）
+			prefix = legacyPrefix(n.Text, true)
 		}
 		text = deckstore.Clip(text, 600)
 		if n.Kind == "decision" {
 			text = warn.Render(text)
 		}
-		b.WriteString(line + text + "\n")
+		b.WriteString(line + prefix + text + "\n")
 	}
 	return b.String()
 }

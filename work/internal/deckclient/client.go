@@ -20,6 +20,8 @@ type Client struct {
 	tr http.RoundTripper
 	// neutral 为真：请求带 i18n.MarkHeader，deckd 在线路上留着中性打码标记，界面按当前语言翻译。
 	neutral bool
+	// follow 为真：deckd 每个响应带的 i18n.LangHeader 就是本进程的界面语言，收到就 SetLang（n060 段 3，见 FollowLang）。
+	follow bool
 	// Socket 是 deckd 的 unix socket 路径（deck center 的栅栏据此找到同目录的单实例锁）。
 	Socket string
 }
@@ -40,6 +42,27 @@ func NewUI(socket string) *Client {
 	return c
 }
 
+// FollowLang 返回一个跟随 deckd 界面语言的副本（同一个 socket 与连接池）：每个响应（包括出错的）带的 i18n.LangHeader
+// 是 zh 或 en 就 SetLang。界面进程（侧栏、标签条、面板、设置、中间窗格、空闲页）用它，所以 owner 在设置里改了语言之后，
+// 各进程在下一次向 deckd 取数时就换过去，不用重启。只给界面进程用：deck agent 命令、模型用的客户端不跟，永远是中文。
+func (c *Client) FollowLang() *Client {
+	cp := *c
+	cp.follow = true
+	return &cp
+}
+
+// SyncLang 向 deckd 问一次界面语言并采用（界面进程启动时用，不必等第一个业务请求）。返回采用后的语言。
+// 连不上返回错误，语言不变。
+func (c *Client) SyncLang(ctx context.Context) (string, error) {
+	var out struct {
+		Lang string `json:"lang"`
+	}
+	if err := c.FollowLang().Get(ctx, "/v1/lang", &out); err != nil {
+		return i18n.Lang(), err
+	}
+	return i18n.Lang(), nil
+}
+
 // DefaultTimeout 是一般请求等 deckd 答复的上限。
 const DefaultTimeout = 30 * time.Second
 
@@ -48,7 +71,7 @@ const LongTimeout = 5 * time.Minute
 
 // WithTimeout 返回一个等答复上限为 d 的副本（同一个 socket 与连接池）。
 func (c *Client) WithTimeout(d time.Duration) *Client {
-	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket, neutral: c.neutral}
+	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket, neutral: c.neutral, follow: c.follow}
 }
 
 // Error 是 deckd 返回的错误。
@@ -94,6 +117,11 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		return i18n.E("err.deckclient.dial", err)
 	}
 	defer resp.Body.Close()
+	if c.follow {
+		if l := resp.Header.Get(i18n.LangHeader); i18n.ValidLang(l) && l != i18n.Lang() {
+			i18n.SetLang(l)
+		}
+	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 300 {
 		var e struct {

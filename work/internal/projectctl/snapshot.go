@@ -75,7 +75,7 @@ func (r *Reader) loadCache(events int) {
 		return
 	}
 	var f cacheFile
-	if err := json.Unmarshal(i18n.NeutralizeBytes(data), &f); err != nil {
+	if err := i18n.UnmarshalExternal(data, &f); err != nil {
 		return
 	}
 	// 缓存是按项目存的，换了项目就不能用。

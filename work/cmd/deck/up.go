@@ -192,15 +192,23 @@ func buildLayout(dirs deckstore.Dirs, spec layout.Spec) error {
 func ensureDeckd(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
 	var health map[string]any
 	if deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/health", &health) != nil {
-		d := []string{layout.Quote(spec.Deck), "daemon", "-layout-socket", layout.Quote(spec.LayoutSocket), "-agent-socket", layout.Quote(spec.AgentSocket)}
-		if upstream != "" {
-			d = append(d, "-upstream", layout.Quote(upstream))
-		}
-		if err := agentdeck.LayoutBackgroundWindow(context.Background(), spec.LayoutSocket, "deck", "deckd", strings.Join(d, " ")); err != nil {
+		if err := agentdeck.LayoutBackgroundWindow(context.Background(), spec.LayoutSocket, "deck", "deckd", deckdCommand(spec, upstream, os.Getenv)); err != nil {
 			return fmt.Errorf("起 deckd 失败：%w", err)
 		}
 	}
 	return nil
+}
+
+// deckdCommand 是在布局后台窗口里起 deckd 的命令行。
+// 系统语言按 deck up 自己（owner 的 shell）的环境变量算好传进去（-system-lang）：deckd 在布局 tmux 的后台窗口里，
+// 那里的环境来自第一次建布局的 shell，可能已经和 owner 现在的不同（n060 段 3）。
+func deckdCommand(spec layout.Spec, upstream string, getenv func(string) string) string {
+	d := []string{layout.Quote(spec.Deck), "daemon", "-layout-socket", layout.Quote(spec.LayoutSocket), "-agent-socket", layout.Quote(spec.AgentSocket),
+		"-system-lang", i18n.SystemLang(getenv)}
+	if upstream != "" {
+		d = append(d, "-upstream", layout.Quote(upstream))
+	}
+	return strings.Join(d, " ")
 }
 
 // center：中间窗格里的重连循环（架构稿 §1、§7）。
@@ -209,7 +217,7 @@ func center(dirs deckstore.Dirs, args []string) {
 	_, agentSock := socketFlags(fs)
 	fs.Parse(args)
 	self, _ := os.Executable()
-	client := deckclient.NewUI(deckd.SocketPath(dirs))
+	client := uiClient(dirs)
 	in := bufio.NewReader(os.Stdin)
 	loop := &layout.CenterLoop{
 		Attach: func() (int, func() error, error) {
@@ -238,13 +246,42 @@ func center(dirs deckstore.Dirs, args []string) {
 				fmt.Print("\x1b[2J\x1b[H\n  " + msg + "\n")
 			})
 		},
-		Pause: func(reason string) bool {
-			fmt.Print(pauseScreen(reason, *agentSock))
+		PauseLive: func(reason func() string) bool {
+			// 停住等 owner 按键期间界面语言可能被改：每 2 秒向 deckd 对一次，变了就按新语言重画整屏（n060 段 3）
+			fmt.Print(pauseScreen(reason(), *agentSock))
+			stop := make(chan struct{})
+			defer close(stop)
+			go func() {
+				t := time.NewTicker(pauseLangEvery)
+				defer t.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-t.C:
+						if syncLang(client) {
+							fmt.Print(pauseScreen(reason(), *agentSock))
+						}
+					}
+				}
+			}()
 			line, _ := in.ReadString('\n')
 			return strings.TrimSpace(line) != "q"
 		},
 	}
 	loop.Run()
+}
+
+// pauseLangEvery 是停住等按键时多久向 deckd 对一次界面语言。
+const pauseLangEvery = 2 * time.Second
+
+// syncLang 向 deckd 对一次界面语言，语言变了返回 true。连不上就当没变。
+func syncLang(c *deckclient.Client) bool {
+	before := i18n.Lang()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c.SyncLang(ctx)
+	return i18n.Lang() != before
 }
 
 // pauseScreen 是停止重试后画在中间窗格里的整屏文字：清屏、原因、操作说明（按界面语言）。
@@ -373,7 +410,8 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 func idleLines(w int) []string { return deckui.IdleLines(w) }
 
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
-func idle() {
+func idle(dirs deckstore.Dirs) {
+	c := uiClient(dirs) // 空闲页在 agent-deck 的 tmux 里，也跟着界面语言走：每个 tick 向 deckd 对一次，变了就重画（n060 段 3）
 	draw := func() {
 		w, h, err := term.GetSize(os.Stdout.Fd())
 		if err != nil {
@@ -422,6 +460,9 @@ func idle() {
 			}
 			draw()
 		case <-tick.C:
+			if syncLang(c) {
+				draw()
+			}
 			if exeReplaced(self, started) {
 				signal.Stop(sig)
 				syscall.Exec(self, os.Args, os.Environ()) // 成功就不回来；失败（新文件还没写完等）照旧跑

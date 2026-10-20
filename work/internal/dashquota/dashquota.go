@@ -8,7 +8,6 @@
 package dashquota
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -173,7 +172,7 @@ func (c *Client) fetch(ctx context.Context) (*payload, error) {
 	var p payload
 	body, rerr := io.ReadAll(resp.Body)
 	if rerr == nil {
-		rerr = json.NewDecoder(bytes.NewReader(i18n.NeutralizeBytes(body))).Decode(&p) // 看板响应是外部原文（返工 4）
+		rerr = i18n.DecodeExternal(body, &p) // 看板响应是外部原文：解码之后再中和，JSON 转义写法的伪造标记也挡住（返工 4、段 3）
 	}
 	if err := rerr; err != nil {
 		c.data, c.err = nil, fmt.Errorf("Token 看板数据解析不了（%v）", err)
@@ -320,7 +319,7 @@ func (c *Client) claudeStatusline() ([]Window, bool) {
 	}
 	// 缓存里还有许多别的字段（类型各异）：只解出要的两项，别的不管（真实缓存整体按对象解会失败）
 	var raw map[string]json.RawMessage
-	if json.Unmarshal(i18n.NeutralizeBytes(data), &raw) != nil {
+	if i18n.UnmarshalExternal(data, &raw) != nil {
 		return nil, false
 	}
 	var wins []Window
@@ -329,7 +328,7 @@ func (c *Client) claudeStatusline() ([]Window, bool) {
 			Utilization *float64 `json:"utilization"`
 			ResetsAt    string   `json:"resets_at"`
 		}
-		if json.Unmarshal(raw[k[0]], &x) != nil || x == nil || x.Utilization == nil {
+		if i18n.UnmarshalExternal(raw[k[0]], &x) != nil || x == nil || x.Utilization == nil {
 			continue
 		}
 		w := Window{Key: k[1], Pct: int(math.Round(*x.Utilization))}
@@ -370,7 +369,7 @@ func (c *Client) antigravity(ctx context.Context) []ToolQuota {
 			winsJSON
 		} `json:"rows"`
 	}
-	if json.Unmarshal(raw, &ag) != nil {
+	if i18n.UnmarshalExternal(raw, &ag) != nil {
 		return nil
 	}
 	var out []ToolQuota
@@ -429,7 +428,7 @@ func windowsFor(p *payload, prof string) ([]Window, bool) {
 	var w *winsJSON
 	if raw, ok := p.Quota[prof]; ok && string(raw) != "null" {
 		var x winsJSON
-		if json.Unmarshal(raw, &x) == nil && len(x.Windows) > 0 {
+		if i18n.UnmarshalExternal(raw, &x) == nil && len(x.Windows) > 0 {
 			w = &x
 		}
 	}

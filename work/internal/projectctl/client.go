@@ -121,7 +121,7 @@ func (c *Client) run(ctx context.Context, command string, args ...string) (json.
 
 	// verify-chain 审计不过时退出码是 2，但 stdout 仍是合法结果，要照常解析。
 	var env envelope
-	if jsonErr := json.Unmarshal(outBytes, &env); jsonErr != nil {
+	if jsonErr := i18n.UnmarshalExternal(outBytes, &env); jsonErr != nil { // 解码之后再中和：JSON 转义写法的伪造标记（段 3）
 		if runErr != nil {
 			return nil, i18n.E("err.projectctl.run.1", command, runErr, truncate(errText, 400))
 		}
@@ -219,7 +219,7 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	outBytes, errText := i18n.NeutralizeBytes(stdout.Bytes()), i18n.Neutralize(stderr.String()) // 子进程的输出是外部原文（返工 4）
 	reconcile := func(cause error) (StartResult, error) { return c.reconcileStart(ctx, r, before.Events, cause) }
 	var env envelope
-	if err := json.Unmarshal(outBytes, &env); err != nil {
+	if err := i18n.UnmarshalExternal(outBytes, &env); err != nil {
 		if runErr != nil {
 			return reconcile(i18n.E("err.projectctl.run.1", StartCommand, runErr, truncate(errText, 400)))
 		}
@@ -233,7 +233,7 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 		return reconcile(i18n.E("err.projectctl.start.exitbad", runErr, truncate(errText, 400)))
 	}
 	var res StartResult
-	if err := json.Unmarshal(env.Result, &res); err != nil {
+	if err := i18n.UnmarshalExternal(env.Result, &res); err != nil {
 		return reconcile(i18n.E("err.projectctl.start.badreceipt", err))
 	}
 	if res.Attempt <= 0 || res.NodeID != r.NodeID {

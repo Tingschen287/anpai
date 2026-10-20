@@ -149,6 +149,9 @@ type Settings struct {
 	Projects []ProjectDef `yaml:"projects" json:"projects"`
 	// Generation 是两份设置文件当前的代数（n057）：整份保存时要带上读到的代数，对不上就拒绝（别处在这期间改过）。
 	Generation int `yaml:"-" json:"generation"`
+	// UILang 是 owner 在设置里选的界面语言（n060 段 3）：zh、en，或空（没选过：第一次按系统语言，见 deckd.Config.SystemLang）。
+	// 存在 agents.yaml 的可选字段 ui_lang 里；空时不写这个字段，没有这个字段的旧文件照常读取，也不会因为别的保存被补上。
+	UILang string `yaml:"-" json:"ui_lang,omitempty"`
 }
 
 // DefaultEnvelope 是 owner 批准的推荐默认值（O5）。
@@ -199,6 +202,9 @@ func ValidID(s string) bool { return idRe.MatchString(s) }
 
 // Validate 检查设置自洽。任何一条不过，整份设置不用（不猜）。
 func (s Settings) Validate() error {
+	if s.UILang != "" && !i18n.ValidLang(s.UILang) {
+		return i18n.E("err.deckstore.settingsvalidate.17", s.UILang)
+	}
 	agents := map[string]AgentDef{}
 	for _, a := range s.Agents {
 		if !idRe.MatchString(a.ID) {
@@ -434,6 +440,8 @@ func (s Settings) ResolveModel(projectID, model string) (Resolved, error) {
 type agentsFile struct {
 	Generation int        `yaml:"generation"`
 	Agents     []AgentDef `yaml:"agents"`
+	// UILang：界面语言（n060 段 3），可选。空时 omitempty 不写出，旧文件读进来就是空。
+	UILang string `yaml:"ui_lang,omitempty"`
 }
 
 type projectsFile struct {
@@ -509,7 +517,7 @@ func LoadSettings(cfgDir string) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
-	s := Settings{Agents: a.Agents, Projects: p.Projects, Generation: p.Generation}
+	s := Settings{Agents: a.Agents, Projects: p.Projects, Generation: p.Generation, UILang: a.UILang}
 	if !haveAgents {
 		s.Agents = DefaultAgents()
 		if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: p.Generation, Agents: s.Agents}); err != nil {
@@ -529,7 +537,7 @@ func CheckSettings(cfgDir string) error {
 	if err != nil {
 		return err
 	}
-	s := Settings{Agents: a.Agents, Projects: p.Projects}
+	s := Settings{Agents: a.Agents, Projects: p.Projects, UILang: a.UILang}
 	if !haveAgents {
 		s.Agents = DefaultAgents()
 	}
@@ -568,7 +576,7 @@ func saveSettings(cfgDir string, s Settings) (int, error) {
 	if err := saveFaultBefore("agents.yaml"); err != nil {
 		return 0, err
 	}
-	if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: gen, Agents: s.Agents}); err != nil {
+	if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: gen, Agents: s.Agents, UILang: s.UILang}); err != nil {
 		return 0, err
 	}
 	if err := saveFaultBefore("projects.yaml"); err != nil {

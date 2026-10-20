@@ -28,7 +28,7 @@ type intake struct{ kind, why string }
 
 var intakeFiles = map[string]intake{
 	// ---- 已中和：外部原文 ----
-	"internal/deckd/server.go":         {neutral, "readBody 解码后 neutralizeValue；readBodyRaw 只给两处：带指纹的开子 agent 请求（planSpawn 核对完指纹立刻中和）、owner 回答决定（option 只和存下来的选项比较，选项可能带真标记）"},
+	"internal/deckd/server.go":         {neutral, "readBody 解码后 neutralizeValue；readBodyRaw 只给两处：带指纹的开子 agent 请求（planSpawn 里先中和业务副本 b，原样的 raw 只用来核对指纹，不进错误参数或通知）、owner 回答决定（option 只和存下来的选项比较；比较失败时 Store.Answer 在 option 进错误参数前先中和）"},
 	"internal/deckd/marks.go":          {neutral, "markFilter 先 neutralRequest 处理路径、查询串、Last-Event-ID；请求体只交给测试钩子，不进业务"},
 	"internal/agentdeck/client.go":     {neutral, "上游 agent-deck 子命令的 stdout、stderr 和 HTTP 响应"},
 	"internal/agentdeck/events.go":     {neutral, "上游事件流的每一行"},
@@ -66,7 +66,9 @@ var intakeFiles = map[string]intake{
 }
 
 // neutralCall 认调用，不认注释里的字。
-var neutralCall = regexp.MustCompile(`(i18n\.Neutralize(Bytes)?|neutralizeValue|neutralRequest)\(`)
+// 段 3 起，解码外部 JSON 的文件用 i18n.UnmarshalExternal、DecodeExternal（解码后再中和），也算中和调用；
+// 解码后的中和是否真在解码的函数里，由 decode_test.go 的结构守卫另外盯着。
+var neutralCall = regexp.MustCompile(`(i18n\.(Neutralize(Bytes|JSON|Value)?|UnmarshalExternal|DecodeExternal)|neutralizeValue|neutralRequest)\(`)
 
 func workRoot(t *testing.T) string {
 	t.Helper()

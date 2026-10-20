@@ -2,7 +2,6 @@ package agentdeck
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
 )
@@ -134,7 +133,7 @@ func (c *Client) Launch(ctx context.Context, req LaunchRequest) (LaunchResult, e
 		return LaunchResult{}, err
 	}
 	var res LaunchResult
-	if jsonErr := json.Unmarshal(out, &res); jsonErr != nil {
+	if jsonErr := i18n.UnmarshalExternal(out, &res); jsonErr != nil {
 		return LaunchResult{}, i18n.E("err.agentdeck.clientlaunch.1", jsonErr)
 	}
 	// 上游失败时退出码可能仍是 0，真正的结论在 success 字段上，

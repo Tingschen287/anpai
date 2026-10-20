@@ -2,7 +2,6 @@ package agentdeck
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
@@ -114,7 +113,7 @@ func sendResult(sessionID string, out []byte, err error, deferIfBusy bool) error
 		Submitted *bool  `json:"submitted"`
 		Error     string `json:"error"`
 	}
-	jsonErr := json.Unmarshal(out, &rep)
+	jsonErr := i18n.UnmarshalExternal(out, &rep)
 	if err == nil {
 		// 上游按成功退出，也要看 submitted：只有 true 才算送达。delivery=unverified 时上游退出 0、submitted=false，
 		// 意思是「提交结果未知」（上游 session_cmd.go:3059-3066）——那不是送达（n042 attempt 2 评审 blocker）。

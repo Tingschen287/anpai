@@ -3,7 +3,6 @@ package agentdeck
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"strings"
@@ -82,7 +81,7 @@ func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 				continue
 			}
 			var ev MenuEvent
-			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			if err := i18n.UnmarshalExternal([]byte(payload), &ev); err != nil {
 				// 单条解析不了不该掀翻整条流，但也不能装作没发生。
 				return i18n.E("err.agentdeck.clientwatchmenu.3", err)
 			}

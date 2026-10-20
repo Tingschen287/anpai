@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -48,7 +50,7 @@ func main() {
 	case "center":
 		center(dirs, os.Args[2:])
 	case "idle":
-		idle()
+		idle(dirs)
 	case "layout":
 		layoutCmd(os.Args[2:])
 	case "sidebar", "tabs":
@@ -91,6 +93,7 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	dash := fs.String("dashboard", "http://127.0.0.1:8899", "Token 看板地址")
 	script := fs.String("projectctl", "", "Graph 控制器脚本路径，留空按工作区布局查找")
 	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（读会话运行状态）；留空则用 agent-deck list --json 读（n055，默认）")
+	sysLang := fs.String("system-lang", "", "owner 没选过界面语言时用的系统语言（zh 或 en）；deck up 按自己的环境变量算好传进来，留空则按 deckd 自己的环境变量")
 	fs.Parse(args)
 	pc := *script
 	if pc == "" {
@@ -99,7 +102,7 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc,
-		UpstreamAddr: *upstream, UpstreamToken: config.Token()}
+		UpstreamAddr: *upstream, UpstreamToken: config.Token(), SystemLang: daemonSystemLang(*sysLang, os.Getenv)}
 	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", deckd.SocketPath(dirs), *profile)
 	if err := deckd.Run(ctx, cfg, deckd.NewTmuxCenter(*layout, *agent)); err != nil {
 		fail("%v", err)
@@ -113,7 +116,7 @@ func panel(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("panel", flag.ExitOnError)
 	project := fs.String("project", "", "只看这个项目")
 	fs.Parse(args[1:])
-	c := deckclient.NewUI(deckd.SocketPath(dirs))
+	c := uiClient(dirs)
 	if args[0] == "quota" {
 		// 额度面板要在每个来源前贴 logo（sixel），用与侧栏同一套整屏帧画法（n056）
 		if err := deckui.RunQuota(c, func() string { return logo.CurrentMode(dirs.State) }); err != nil {
@@ -137,6 +140,33 @@ func fail(format string, a ...any) {
 	os.Exit(1)
 }
 
+// 界面语言（n060 段 3）。
+//
+// 选择存在设置里（agents.yaml 的 ui_lang），deckd 是唯一的真相，每个响应带 X-Deck-Lang。界面进程（panel、sidebar、tabs、settings、
+// center、idle）用 uiClient 建客户端：先按自己的环境变量猜一个（deckd 连不上时用），再向 deckd 对一次，之后每次请求的响应都带语言，
+// 变了就换（侧栏、标签条每秒取一次，面板每 2 秒，所以改完语言后 1～2 秒内各进程都换过去，不用重启）。
+// deck agent、deck project、deck reports、whoami 这些命令行（给模型和 owner 的 shell）和 deckd、deck up 不跟：永远是中文。
+
+// uiClient 建界面进程用的 deckd 客户端，并先对一次界面语言。
+func uiClient(dirs deckstore.Dirs) *deckclient.Client {
+	i18n.SetLang(i18n.SystemLang(os.Getenv))
+	c := deckclient.NewUI(deckd.SocketPath(dirs)).FollowLang()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	c.SyncLang(ctx) // 连不上就保持按环境变量猜的；循环里每次请求还会再对
+	return c
+}
+
+// daemonSystemLang 是 deckd 用的系统语言：deck up 传来的优先（它跑在 owner 的 shell 里，环境最可信）；
+// 没传（手动 deck daemon）就按 deckd 自己的环境变量。deckd 跑在布局 tmux 的后台窗口里，那个环境来自第一次建布局的 shell，
+// 可能和 owner 现在的 shell 不同，所以不靠它。
+func daemonSystemLang(flagValue string, getenv func(string) string) string {
+	if i18n.ValidLang(flagValue) {
+		return flagValue
+	}
+	return i18n.SystemLang(getenv)
+}
+
 // displayWidth 是字符串在终端里占的列数（中文算两列）。
 func displayWidth(s string) int { return lipgloss.Width(s) }
 
@@ -145,7 +175,7 @@ func ui(dirs deckstore.Dirs, which string, args []string) {
 	fs := flag.NewFlagSet(which, flag.ExitOnError)
 	layoutSock, _ := socketFlags(fs)
 	fs.Parse(args)
-	api := deckui.DeckAPI{C: deckclient.NewUI(deckd.SocketPath(dirs))}
+	api := deckui.DeckAPI{C: uiClient(dirs)}
 	var err error
 	if which == "sidebar" {
 		err = deckui.RunSidebar(api, *layoutSock, func() string { return logo.CurrentMode(dirs.State) })
@@ -170,7 +200,7 @@ func settings(dirs deckstore.Dirs, args []string) {
 		fmt.Println("设置没有问题：" + dirs.Config)
 		return
 	}
-	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: deckclient.NewUI(deckd.SocketPath(dirs))}); err != nil {
+	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: uiClient(dirs)}); err != nil {
 		fail("%v", err)
 	}
 }

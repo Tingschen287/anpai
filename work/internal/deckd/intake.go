@@ -1,10 +1,8 @@
 package deckd
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
-	"reflect"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
@@ -20,75 +18,9 @@ import (
 // 外部命令的输出、上游 HTTP 响应、读进来的文件在各自的适配包里同样处理，入口清单见 inventory.md，
 // 守卫测试 wirecheck.TestN060ExternalIntakeFilesAreListed 按文件盯着不让新增入口漏掉。
 
-var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
-
 // neutralizeValue 把 v 指向的值里所有字符串里的标记字符换成 U+FFFD。v 必须是指针。
-func neutralizeValue(v any) {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return
-	}
-	neutralizeWalk(rv.Elem())
-}
-
-func neutralizeWalk(v reflect.Value) {
-	switch v.Kind() {
-	case reflect.String:
-		if v.CanSet() {
-			if s := v.String(); i18n.HasMark(s) {
-				v.SetString(i18n.Neutralize(s))
-			}
-		}
-	case reflect.Pointer:
-		if !v.IsNil() {
-			neutralizeWalk(v.Elem())
-		}
-	case reflect.Interface:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		e := v.Elem()
-		cp := reflect.New(e.Type()).Elem()
-		cp.Set(e)
-		neutralizeWalk(cp)
-		v.Set(cp)
-	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			neutralizeWalk(v.Field(i))
-		}
-	case reflect.Slice:
-		if v.Type() == rawMessageType {
-			if v.CanSet() && !v.IsNil() {
-				v.SetBytes(i18n.NeutralizeBytes(v.Bytes()))
-			}
-			return
-		}
-		for i := 0; i < v.Len(); i++ {
-			neutralizeWalk(v.Index(i))
-		}
-	case reflect.Array:
-		for i := 0; i < v.Len(); i++ {
-			neutralizeWalk(v.Index(i))
-		}
-	case reflect.Map:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		for _, k := range v.MapKeys() {
-			val := v.MapIndex(k)
-			cp := reflect.New(val.Type()).Elem()
-			cp.Set(val)
-			neutralizeWalk(cp)
-			nk := k
-			if k.Kind() == reflect.String && i18n.HasMark(k.String()) {
-				nk = reflect.New(k.Type()).Elem()
-				nk.SetString(i18n.Neutralize(k.String()))
-				v.SetMapIndex(k, reflect.Value{})
-			}
-			v.SetMapIndex(nk, cp)
-		}
-	}
-}
+// 走遍字符串、map 的键和值、嵌套值、RawMessage 的逻辑在 i18n.NeutralizeValue（适配包解码外部 JSON、YAML 之后也用它）。
+func neutralizeValue(v any) { i18n.NeutralizeValue(v) }
 
 // neutralRequest 返回路径、查询串、Last-Event-ID 头里没有伪造标记的请求。本来就没有的原样返回，不复制。
 func neutralRequest(r *http.Request) *http.Request {

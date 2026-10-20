@@ -2369,6 +2369,9 @@ func TestChineseUINoKeyMiss(t *testing.T) {
 	renderStage1(t, false)
 }
 
+// stage1Capture 不为 nil 时，renderStage1 把每个画面的纯文字也交给它（段 3：运行中切换的测试拿来前后对比）。
+var stage1Capture func(name, text string)
+
 func renderStage1(t *testing.T, english bool) {
 	t.Helper()
 	stop := i18n.RecordMisses()
@@ -2385,6 +2388,9 @@ func renderStage1(t *testing.T, english bool) {
 			got = append(got, name)
 		}
 		snaps = append(snaps, snap{name, plain})
+		if stage1Capture != nil {
+			stage1Capture(name, plain)
+		}
 	}
 
 	sb := &Sidebar{Data: englishData(), Mode: "none"}

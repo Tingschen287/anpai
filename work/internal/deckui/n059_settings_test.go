@@ -96,7 +96,7 @@ func TestHelpFollowsCursorAndRowIsHighlighted(t *testing.T) {
 		t.Fatalf("固定的大段说明应去掉：\n%s", v)
 	}
 	press(m, "tab")
-	m.cur = len(m.rows()) - 1
+	m.cur = rowIdx(t, m, rowAddAgent, "", "") // 段 3：全局 agent 页最后一行是「界面语言」，「加入」行改按种类找（断言不变）
 	if !strings.Contains(plainView(m), "从本机装了的 CLI 里加入") {
 		t.Fatal("全局 agent 页「加入」行的说明")
 	}

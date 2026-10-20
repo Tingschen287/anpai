@@ -108,6 +108,7 @@ func Open(dirs Dirs) (*Store, error) {
 			d.Version++
 			changed = true
 		}
+		backfillDecisionSummaryCode(d) // 只在内存里补；下一次保存决定时一并落盘
 		s.decs[d.ID] = d
 	}
 	if err := s.loadNotes(); err != nil {
@@ -169,6 +170,37 @@ func backfillMainTitleCode(x *Session, set Settings) bool {
 	return false
 }
 
+// backfillNotificationCode 给老通知里「码表里的固定句子」补上 code/args（段 3，第 2 段复审 4 的必改 3）。
+// 码是第 2 段才加的，更早的通知只有中文 text。只认逐字匹配：整句恰好等于某个码的中文模板填入标识类参数后的样子
+// （i18n.LegacyCode），text 原文不改；只在内存里补，notifications.jsonl 是追加的历史，不重写。
+// 混有外部原文、反解不确定的认不出，原样留着，由界面按兼容策略显示（panels：英文下加「旧记录」标签）。
+func backfillNotificationCode(n *Notification) {
+	if n.Code != "" || n.Text == "" {
+		return
+	}
+	if code, args, ok := i18n.LegacyCode(n.Text); ok {
+		n.Code, n.Args = code, i18n.Args(args)
+	}
+}
+
+// backfillDecisionSummaryCode 同上，给老决定的摘要补 summary_code/summary_args。
+// 只补系统自己生成的那几类（花额度、Codex 授权）：其余类别的摘要是主 agent 写的外部原文，本来就不该有码。
+func backfillDecisionSummaryCode(d *Decision) bool {
+	if d.SummaryCode != "" || d.Summary == "" || !SystemSummaryKind(d.Kind) {
+		return false
+	}
+	code, args, ok := i18n.LegacyCode(d.Summary)
+	if !ok {
+		return false
+	}
+	d.SummaryCode, d.SummaryArgs = code, i18n.Args(args)
+	return true
+}
+
+// SystemSummaryKind 说明这一类决定的摘要是系统生成的（deckd 用码造的），而不是主 agent 写的外部原文。
+// 界面据此决定：没有码的旧摘要要不要按「旧记录」显示。
+func SystemSummaryKind(kind string) bool { return kind == KindCost || kind == KindCodexTrust }
+
 // OnChange 设置变化回调（在锁外调用）。
 func (s *Store) OnChange(f func(Event)) { s.mu.Lock(); s.hook = f; s.mu.Unlock() }
 
@@ -229,6 +261,13 @@ func (s *Store) Settings() Settings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneSettings(s.settings)
+}
+
+// UILang 返回 owner 保存的界面语言（没保存过是空）。每个响应都要带界面语言，所以不走整份复制。
+func (s *Store) UILang() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settings.UILang
 }
 
 // ReplaceSettings 校验后整份写回文件（不核对代数：deckd 内部与测试用）。
@@ -871,6 +910,7 @@ func (s *Store) loadNotes() error {
 		if json.Unmarshal(sc.Bytes(), &n) != nil {
 			continue // 最后一行写到一半：跳过，不影响序号连续性判断
 		}
+		backfillNotificationCode(&n)
 		s.notes = append(s.notes, n)
 		if n.Seq > s.noteSeq {
 			s.noteSeq = n.Seq
