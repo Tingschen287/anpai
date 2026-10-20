@@ -1,6 +1,7 @@
 package i18n
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,13 @@ import (
 //   - 给模型读的、落盘记账的、日志与 Error()：PresentZH，永远是中文「[已打码]」，和改码之前逐字一样。
 //
 // 外部原文里字面写着的「[已打码]」不是标记，原样保留。
-// 清洗时输入里本来就有的私用区字符先用 Neutralize 去掉，外部文字伪造不出标记。
+// 外部原文一进来（HTTP 请求体、外部命令的输出、读进来的文件）就先过 Neutralize 去掉输入里本来就有的私用区字符，
+// 外部文字伪造不出标记；之后清洗过的文字再进参数用 Tidy 语义，不再去标记，真标记才能活下来。
+//
+// 两条已知限制（返工 4 写明，不是遗漏）：
+//   - 这次改动之前落盘的老数据里，真打码写的是中文「[已打码]」。它和外部原文里字面写的「[已打码]」长得一样，
+//     无法可靠区分，所以英文界面里这些老文字仍显示中文记号，不迁移。只有新写入的数据才带中性标记。
+//   - 降级到不认识中性标记的旧版本，读新写入的数据会把这 5 个私用区字符画成方块。升级后回退要先备份状态目录。
 const RedactMark = "\uE000\uE001\uE002\uE003\uE004"
 
 // MarkHeader 是请求头：界面（deckclient.NewUI）带上它，表示自己会把中性标记翻成当前语言，
@@ -40,6 +47,15 @@ func Neutralize(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// NeutralizeBytes 对字节做 Neutralize。外部命令的输出、HTTP 响应、读进来的文件在边界上先过它：
+// 标记字符在 UTF-8 里是 U+E000..U+E004（EE 80 80..84），换成 U+FFFD（EF BF BD）长度不变，所以不影响后面的解析。
+func NeutralizeBytes(b []byte) []byte {
+	if !bytes.Contains(b, []byte("\xee\x80")) {
+		return b
+	}
+	return []byte(Neutralize(string(b)))
 }
 
 // HasMark 说明文字里有没有中性标记（含被截断的残缺标记）。

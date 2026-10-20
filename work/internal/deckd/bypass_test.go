@@ -68,6 +68,7 @@ func TestProcessBypassStopsSessionWithoutBrief(t *testing.T) {
 func TestProcessBypassStopFailsKeepsSlotUncertain(t *testing.T) {
 	w := newAgentWorld(t)
 	w.procBypass = errors.New("核对不了")
+	wirecheck.External("上游停不了") // 夹具：替身上游停不掉时返回的错误原文（以前靠别的测试的全局登记碰巧放行，返工 4 起按测试登记）
 	w.up.stopErr = errors.New("上游停不了")
 	before := w.store.Slots("alpha")
 	w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "停不了", "t", "c4", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))

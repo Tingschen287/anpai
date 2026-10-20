@@ -490,16 +490,52 @@ func (s *Server) uncertainReadyNow(x deckstore.Session) bool {
 	return true
 }
 
-// background 是后台工作的 context：deckd 关闭时取消（daemon 用 WithBackground 接上），没接上时不取消。
+// background 是后台工作的 context：deckd 关闭时取消（daemon 用 WithBackground 接上），没接上时不取消（Close 会取消）。
 func (s *Server) background() context.Context {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
 	if s.bg != nil {
 		return s.bg
 	}
-	return context.Background()
+	if s.life == nil {
+		var stop context.CancelFunc
+		s.life, stop = context.WithCancel(context.Background())
+		s.bgCancels = append(s.bgCancels, stop)
+		if s.closed {
+			stop()
+		}
+	}
+	return s.life
 }
 
 // WaitBackground 等后台工作（等 owner 处理启动确认后送 brief）结束；deckd 关闭时在取消 background 之后、释放写入者锁之前调。
 func (s *Server) WaitBackground() { s.bgWG.Wait() }
 
 // WithBackground 接上 deckd 的后台 context（关闭时取消，后台等 owner 处理启动确认的工作随之结束）。
-func (s *Server) WithBackground(ctx context.Context) { s.bg = ctx }
+// 传进来的 context 外面再包一层，Close 能一并取消它。生产里只在 daemon 启动时调一次，行为和直接用传入的 context 一样。
+func (s *Server) WithBackground(ctx context.Context) {
+	c, cancel := context.WithCancel(ctx)
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	s.bg = c
+	s.bgCancels = append(s.bgCancels, cancel)
+	if s.closed {
+		cancel()
+	}
+}
+
+// Close 取消全部后台工作并等它们结束（返工 4）。生产里 daemon 自己按「取消 background → WaitBackground → 释放写入者锁」收尾，
+// 不调它；它给测试夹具在清理时用：测试看到状态更新就返回时，后台那一路可能还在写状态或通知，不等它结束，
+// 临时目录的清理就会和它的写盘赛跑（TempDir RemoveAll … directory not empty）。
+// 调用前要先让 HTTP 服务停止接收请求（httptest.Server.Close），免得处理中的请求还在登记新的后台任务。
+func (s *Server) Close() {
+	s.bgMu.Lock()
+	s.closed = true
+	cancels := s.bgCancels
+	s.bgCancels = nil
+	s.bgMu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+	s.bgWG.Wait()
+}

@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -218,18 +219,45 @@ func LocalLooking(s string) (string, bool) {
 
 var (
 	extMu sync.Mutex
-	ext   = map[string]bool{}
+	// ext：外部原文 → 登记者（测试名；包初始化时登记的夹具是空串，对全包有效）→ 登记位置。
+	ext = map[string]map[string]string{}
 )
 
 // External 把一些文字登记为外部原文：测试夹具里「上游说的话」「用户起的名字」这类，不是本项目写的句子。
-// 响应里的字符串恰好等于其中一条（去掉首尾空白），或参数里含有其中一条（至少 3 个汉字），就不算本地中文。
 // 只在测试里用，登记要写在造出这段文字的地方，一眼看得出它是夹具。
+//
+// 范围（返工 4 收窄）：
+//   - 生命周期：在测试里登记的只对这个测试有效（按测试名；Track 的清理也会删掉它）；包初始化（init）时登记的夹具清单对全包有效。
+//   - 匹配：响应里的字符串恰好等于其中一条（去掉首尾空白）才放行；参数里含有其中一条（至少 3 个汉字）时，
+//     把所有登记的片段从参数里去掉，剩下的部分还有中文（本地写的前缀、后缀）就照样命中，不再整串放行。
+//   - 来源：每条记着登记它的测试名和代码位置，命中报告里能看到。
 func External(texts ...string) {
+	owner := cheapTest()
+	_, file, line, _ := runtime.Caller(1)
+	at := fmt.Sprintf("%s:%d", filepath.Base(file), line)
 	extMu.Lock()
 	defer extMu.Unlock()
 	for _, s := range texts {
 		if s = strings.TrimSpace(s); s != "" {
-			ext[s] = true
+			if ext[s] == nil {
+				ext[s] = map[string]string{}
+			}
+			ext[s][owner] = at
+		}
+	}
+}
+
+// forgetExternal 删掉某个测试登记的外部原文（Track 的清理调用）。
+func forgetExternal(owner string) {
+	if owner == "" {
+		return
+	}
+	extMu.Lock()
+	defer extMu.Unlock()
+	for text, owners := range ext {
+		delete(owners, owner)
+		if len(owners) == 0 {
+			delete(ext, text)
 		}
 	}
 }
@@ -247,7 +275,8 @@ func requestBody(doc []byte) {
 		switch t := x.(type) {
 		case string:
 			if HasHan(t) {
-				External(t)
+				// deckd 在入口把伪造的打码标记换成 U+FFFD 再回显，两种写法都算外部原文（返工 4）
+				External(t, i18n.Neutralize(t))
 			}
 		case []any:
 			for _, e := range t {
@@ -262,20 +291,38 @@ func requestBody(doc []byte) {
 	collect(v)
 }
 
+// isExternal 说明 s 是不是登记过的外部原文（只看对当前测试有效的登记）。
+// contains 为假：整句相等才算。为真：s 里含有登记的片段（至少 3 个汉字），并且把这些片段去掉之后不再有中文。
 func isExternal(s string, contains bool) bool {
+	now := cheapTest()
 	extMu.Lock()
 	defer extMu.Unlock()
-	if ext[strings.TrimSpace(s)] {
+	valid := func(owners map[string]string) bool {
+		_, mine := owners[now]
+		_, global := owners[""]
+		return mine || global
+	}
+	if owners, ok := ext[strings.TrimSpace(s)]; ok && valid(owners) {
 		return true
 	}
-	if contains {
-		for e := range ext {
-			if hanCount(e) >= 3 && strings.Contains(s, e) {
-				return true
-			}
+	if !contains {
+		return false
+	}
+	var frags []string
+	for e, owners := range ext {
+		if hanCount(e) >= 3 && valid(owners) && strings.Contains(s, e) {
+			frags = append(frags, e)
 		}
 	}
-	return false
+	if len(frags) == 0 {
+		return false
+	}
+	sort.Slice(frags, func(i, j int) bool { return len(frags[i]) > len(frags[j]) })
+	rest := s
+	for _, f := range frags {
+		rest = strings.ReplaceAll(rest, f, "")
+	}
+	return !HasHan(rest)
 }
 
 // ---------------- 响应和通知 ----------------
@@ -471,6 +518,7 @@ func Track(t *testing.T) {
 	}
 	cur.Store(name)
 	t.Cleanup(func() {
+		forgetExternal(name)
 		if cur.Load() == name {
 			cur.Store("")
 		}

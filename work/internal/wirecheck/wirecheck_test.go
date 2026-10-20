@@ -54,7 +54,7 @@ func TestArgsRules(t *testing.T) {
 		t.Fatalf("列表里英文和嵌套码都放行：%+v", got)
 	}
 	External("上游自己的话 ABC")
-	if got := hits("GET /v1/x OK", `{"error":"x","code":"err.x","args":["说：上游自己的话 ABC"]}`); len(got) != 0 {
+	if got := hits("GET /v1/x OK", `{"error":"x","code":"err.x","args":["say: 上游自己的话 ABC"]}`); len(got) != 0 {
 		t.Fatalf("登记过的外部原文（参数里含有它）放行：%+v", got)
 	}
 	if got := hits("GET /v1/x OK", `{"error":"上游自己的话 ABC"}`); len(got) != 0 {
@@ -139,5 +139,40 @@ func TestHasHanMatchesTheStageOneDefinition(t *testing.T) {
 		if HasHan(s) {
 			t.Errorf("%q 不该算中文", s)
 		}
+	}
+}
+
+// 返工 4（Codex 复审 3 建议 2）：外部原文登记只对登记它的测试有效；本地写的中文前缀加外部原文不整串放行。
+func TestN060ExternalIsScopedToTheRegisteringTest(t *testing.T) {
+	defer cur.Store("")
+	cur.Store("TestOwnerA")
+	External("只给甲测试用的外部话 QQQ")
+	if !isExternal("只给甲测试用的外部话 QQQ", false) || !isExternal("say: 只给甲测试用的外部话 QQQ", true) {
+		t.Fatal("登记它的测试里应放行")
+	}
+	cur.Store("TestOwnerB")
+	if isExternal("只给甲测试用的外部话 QQQ", false) || isExternal("x 只给甲测试用的外部话 QQQ", true) {
+		t.Fatal("别的测试不该继承登记")
+	}
+	cur.Store("TestOwnerA")
+	forgetExternal("TestOwnerA")
+	if isExternal("只给甲测试用的外部话 QQQ", false) {
+		t.Fatal("清理之后登记应当消失")
+	}
+}
+
+func TestN060ExternalDoesNotExemptALocalChinesePrefix(t *testing.T) {
+	External("上游自己的原话 MIX")
+	// 纯外部原文（前面只有英文）放行
+	if got := hits("GET /v1/x OK", `{"error":"x","code":"err.x","args":["upstream: 上游自己的原话 MIX"]}`); len(got) != 0 {
+		t.Fatalf("外部原文前面只有英文：%+v", got)
+	}
+	// 本地中文前缀加外部原文：整串放行是漏洞，必须命中
+	if got := hits("GET /v1/x OK", `{"error":"x","code":"err.x","args":["本地写的中文前缀：上游自己的原话 MIX"]}`); len(got) != 1 {
+		t.Fatalf("本地中文前缀 + 外部原文应当命中：%+v", got)
+	}
+	// 外部原文后面跟本地中文后缀
+	if got := hits("GET /v1/x OK", `{"error":"x","code":"err.x","args":["上游自己的原话 MIX（本地写的中文后缀）"]}`); len(got) != 1 {
+		t.Fatalf("外部原文 + 本地中文后缀应当命中：%+v", got)
 	}
 }

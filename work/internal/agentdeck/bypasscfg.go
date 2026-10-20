@@ -47,7 +47,7 @@ func CheckUpstreamConfigNoBypass(tool string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return i18n.E("err.agentdeck.checkupstreamconfignobypass.2", path, err)
 	}
-	if err := checkConfigText(tool, string(data)); err != nil {
+	if err := checkConfigText(tool, i18n.Neutralize(string(data))); err != nil { // 上游配置文件是外部原文（返工 4）
 		return i18n.E("err.agentdeck.checkupstreamconfignobypass.3", path, err)
 	}
 	return nil
@@ -204,7 +204,7 @@ func CustomToolNotCodex(tool string) bool {
 	if err != nil {
 		return false
 	}
-	return customToolNotCodex(tool, string(data))
+	return customToolNotCodex(tool, i18n.Neutralize(string(data)))
 }
 
 func customToolNotCodex(tool, text string) bool {

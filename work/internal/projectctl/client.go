@@ -116,12 +116,14 @@ func (c *Client) run(ctx context.Context, command string, args ...string) (json.
 	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
+	// 子进程的输出是外部原文：伪造的打码标记在这里换掉（返工 4）
+	outBytes, errText := i18n.NeutralizeBytes(stdout.Bytes()), i18n.Neutralize(stderr.String())
 
 	// verify-chain 审计不过时退出码是 2，但 stdout 仍是合法结果，要照常解析。
 	var env envelope
-	if jsonErr := json.Unmarshal(stdout.Bytes(), &env); jsonErr != nil {
+	if jsonErr := json.Unmarshal(outBytes, &env); jsonErr != nil {
 		if runErr != nil {
-			return nil, i18n.E("err.projectctl.run.1", command, runErr, truncate(stderr.String(), 400))
+			return nil, i18n.E("err.projectctl.run.1", command, runErr, truncate(errText, 400))
 		}
 		return nil, i18n.E("err.projectctl.run.2", command, jsonErr)
 	}
@@ -214,11 +216,12 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+	outBytes, errText := i18n.NeutralizeBytes(stdout.Bytes()), i18n.Neutralize(stderr.String()) // 子进程的输出是外部原文（返工 4）
 	reconcile := func(cause error) (StartResult, error) { return c.reconcileStart(ctx, r, before.Events, cause) }
 	var env envelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+	if err := json.Unmarshal(outBytes, &env); err != nil {
 		if runErr != nil {
-			return reconcile(i18n.E("err.projectctl.run.1", StartCommand, runErr, truncate(stderr.String(), 400)))
+			return reconcile(i18n.E("err.projectctl.run.1", StartCommand, runErr, truncate(errText, 400)))
 		}
 		return reconcile(i18n.E("err.projectctl.run.2", StartCommand, err))
 	}
@@ -227,7 +230,7 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	}
 	// 回执说 ok、进程却非零退出：两边对不上就不信，不拿这个 attempt 去派（n042 attempt 1 评审次要项）。
 	if runErr != nil {
-		return reconcile(i18n.E("err.projectctl.start.exitbad", runErr, truncate(stderr.String(), 400)))
+		return reconcile(i18n.E("err.projectctl.start.exitbad", runErr, truncate(errText, 400)))
 	}
 	var res StartResult
 	if err := json.Unmarshal(env.Result, &res); err != nil {

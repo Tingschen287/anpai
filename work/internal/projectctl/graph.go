@@ -59,7 +59,7 @@ func LoadGraph(projectRoot string) (Graph, error) {
 		return Graph{}, i18n.E("err.projectctl.graph.read", path, err)
 	}
 	var g Graph
-	if err := yaml.Unmarshal(data, &g); err != nil {
+	if err := yaml.Unmarshal(i18n.NeutralizeBytes(data), &g); err != nil { // 项目文件是外部原文（返工 4）
 		return Graph{}, i18n.E("err.projectctl.graph.parse", path, err)
 	}
 	if len(g.Nodes) == 0 {

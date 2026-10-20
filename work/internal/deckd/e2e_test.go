@@ -51,6 +51,7 @@ func TestE2EIdentityFromRealPanes(t *testing.T) {
 	r, _ := st.Reserve(deckstore.Session{Project: "alpha", Role: "main", Agent: "claude", Tool: "claude", Model: "claude-opus-5-5", Tier: deckstore.Frontier, Title: "主 agent", CreatedBy: "owner",
 		RequestID: "req-main", Dir: "/tmp/alpha", TaskSHA256: strings.Repeat("a", 64), ArgsSHA256: strings.Repeat("b", 64)}, "")
 	st.LaunchSucceeded(r.Key, "ad-main", "agentdeck_alpha_main")
+	wirecheck.Track(t)                  // 登记只对这个测试有效（返工 4），服务端 goroutine 里的检查按测试名归属
 	wirecheck.External("按状态分组？", "按项目") // 夹具直接写进存储的决定，不经请求体：登记为外部原文
 	dec, _ := st.CreateDecision(deckstore.NewDecision{Project: "alpha", Kind: deckstore.KindDeviation, Summary: "按状态分组？", Options: []string{"按项目"}, CreatedBy: r.Key})
 

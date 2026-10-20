@@ -30,10 +30,11 @@ const muxTimeout = 5 * time.Second
 func runMux(cmd *exec.Cmd) ([]byte, error) {
 	cmd.Env = withoutTmux(os.Environ())
 	out, err := cmd.Output()
+	out = i18n.NeutralizeBytes(out) // tmux 的输出（含窗格画面）是外部原文（返工 4）
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return out, i18n.E("err.agentdeck.runmux.1", err, strings.TrimSpace(string(ee.Stderr)))
+			return out, i18n.E("err.agentdeck.runmux.1", err, strings.TrimSpace(i18n.Neutralize(string(ee.Stderr))))
 		}
 		return out, err
 	}

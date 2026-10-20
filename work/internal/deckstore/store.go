@@ -89,6 +89,9 @@ func Open(dirs Dirs) (*Store, error) {
 			x.SendInFlight = false // 发话那一路已随旧进程结束；代次保留（话可能已送到）
 			changed = true
 		}
+		if backfillMainTitleCode(x, set) {
+			changed = true
+		}
 		s.sessions[x.Key] = x
 	}
 	if _, err := readJSON(s.path("trust.json"), &s.trust); err != nil {
@@ -142,6 +145,28 @@ func Open(dirs Dirs) (*Store, error) {
 		s.NotifyCoded(r.Project, "report", i18n.E("err.deckstore.open.3", r.Sub, ArgText(r.Text, 160)), "deckd")
 	}
 	return s, nil
+}
+
+// backfillMainTitleCode 给老注册表里系统生成的主 agent 标题补码（返工 4）。
+// 标题码是后来才加的：之前开的主 agent 注册表里只有 role=main 和中文 title，没有 title_code，英文界面就一直显示中文。
+// 只认系统生成的确切形状：role=main，且 title 逐字等于用本项目现在的名字（或编号）拼出来的「主 agent · 名字」。
+// owner 或别的程序改过的标题、项目已改名对不上的标题都不认，原样保留。title 的中文原文不动。返回有没有补。
+func backfillMainTitleCode(x *Session, set Settings) bool {
+	if x.Role != "main" || x.TitleCode != "" {
+		return false
+	}
+	p, ok := set.Project(x.Project)
+	if !ok {
+		return false
+	}
+	for _, name := range []string{p.Name, p.ID} {
+		// 码和 deckd.postMain 拼标题用的是同一个；两处的字面量由 deckd.TestN060LegacyMainTitleBackfillMatchesNewMain 守着一致
+		if e := i18n.E("err.deckd.serverpostmain.4", name); name != "" && x.Title == e.Error() {
+			x.TitleCode, x.TitleArgs = string(e.Key), i18n.Args{name}
+			return true
+		}
+	}
+	return false
 }
 
 // OnChange 设置变化回调（在锁外调用）。

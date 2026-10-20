@@ -196,10 +196,11 @@ func (c *Client) execWithStdin(ctx context.Context, stdin io.Reader, sub string,
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// 外部命令的输出是外部原文：伪造的打码标记在这里换掉（返工 4）
 	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), i18n.E("err.agentdeck.clientexecwithstdin.1", sub, err, truncate(stderr.String(), 400))
+		return i18n.NeutralizeBytes(stdout.Bytes()), i18n.E("err.agentdeck.clientexecwithstdin.1", sub, err, truncate(i18n.Neutralize(stderr.String()), 400))
 	}
-	return stdout.Bytes(), nil
+	return i18n.NeutralizeBytes(stdout.Bytes()), nil
 }
 
 // get 请求 headless 服务的一个 JSON 端点。
@@ -227,7 +228,12 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if resp.StatusCode != http.StatusOK {
 		return i18n.E("err.agentdeck.clientget.3", path, resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// 上游的 HTTP 响应是外部原文：先整体读进来换掉伪造的标记再解码（返工 4）
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return i18n.E("err.agentdeck.clientget.2", path, err)
+	}
+	return json.NewDecoder(bytes.NewReader(i18n.NeutralizeBytes(data))).Decode(out)
 }
 
 func truncate(s string, n int) string {

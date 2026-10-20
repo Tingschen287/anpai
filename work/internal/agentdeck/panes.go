@@ -22,6 +22,7 @@ type TmuxPane struct {
 func ListTmuxPanes(ctx context.Context, socket string) ([]TmuxPane, error) {
 	cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{session_name}")
 	out, err := cmd.Output()
+	out = i18n.NeutralizeBytes(out)
 	if err != nil {
 		if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
 			return nil, nil

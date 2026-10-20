@@ -17,6 +17,7 @@ import (
 type markFilter struct{ next http.Handler }
 
 func (m markFilter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = neutralRequest(r) // 路径、查询串、Last-Event-ID 里伪造的标记（返工 4）
 	if h := i18n.WireHook; h != nil && r.Body != nil && r.Body != http.NoBody {
 		// 请求体交给钩子：客户端自己写的文字（标题、任务、汇报、选项）是外部原文，响应里原样回显时不算本地中文。
 		if b, err := io.ReadAll(r.Body); err == nil {

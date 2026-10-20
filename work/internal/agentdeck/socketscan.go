@@ -144,7 +144,7 @@ func instanceIDOf(ctx context.Context, socket, tmuxSession string) (string, bool
 	if err != nil {
 		return "", false
 	}
-	line := strings.TrimSpace(string(out))
+	line := strings.TrimSpace(i18n.Neutralize(string(out)))
 	// 形如 AGENTDECK_INSTANCE_ID=<id>；变量不存在时 tmux 会输出 -AGENTDECK_INSTANCE_ID。
 	_, value, ok := strings.Cut(line, "=")
 	if !ok || strings.HasPrefix(line, "-") {
@@ -166,7 +166,7 @@ func probeSocket(ctx context.Context, socket, tmuxSession, wantInstanceID string
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return classifyHasSession(socket, probeCtx.Err(), err, strings.TrimSpace(stderr.String()))
+		return classifyHasSession(socket, probeCtx.Err(), err, strings.TrimSpace(i18n.Neutralize(stderr.String())))
 	}
 	if wantInstanceID == "" {
 		return probe{socket: socket, verdict: probeMatch}

@@ -157,10 +157,12 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b spawnBody
-	if err := readBody(r, &b); err != nil {
+	if err := readBodyRaw(r, &b); err != nil { // 指纹是客户端对原文算的：planSpawn 里先核对指纹，再中和（返工 4）
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
+	raw := b
+	neutralizeValue(&b)
 	project := b.Project
 	if c.Role == RoleMain {
 		if project != "" && project != c.Project {
@@ -169,7 +171,7 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		project = c.Project
 	}
-	plan, err := s.planSpawn(r.Context(), c, project, b)
+	plan, err := s.planSpawn(r.Context(), c, project, b, raw)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
@@ -183,8 +185,10 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 func detached(r *http.Request) context.Context { return context.WithoutCancel(r.Context()) }
 
 // planSpawn 解析 agent 与模型，做全部硬拒绝。
-func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spawnBody) (spawnPlan, error) {
+// b 是中和过伪造标记的请求，raw 是原样的请求：只有核对客户端对原文算的指纹时才用 raw（返工 4）。
+func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b, raw spawnBody) (spawnPlan, error) {
 	var plan spawnPlan
+
 	set := s.store.Settings()
 	p, ok := set.Project(project)
 	if !ok {
@@ -238,10 +242,14 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 	if err := deckstore.CheckPath(dir); err != nil {
 		return plan, i18n.E("err.deckd.serverplanspawn.7", err)
 	}
-	if b.TaskSHA256 != TaskSHA256(b.Task) {
+	rawDir := raw.Dir
+	if rawDir == "" {
+		rawDir = p.Path
+	}
+	if b.TaskSHA256 != TaskSHA256(raw.Task) {
 		return plan, i18n.E("err.deckd.serverplanspawn.8")
 	}
-	if want := SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, b.Title, dir, b.GraphNode); b.ArgsSHA256 != want {
+	if want := SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, raw.Title, rawDir, raw.GraphNode); b.ArgsSHA256 != want {
 		return plan, i18n.E("err.deckd.serverplanspawn.9")
 	}
 	x := deckstore.Session{Project: project, Role: "sub", Parent: c.Session, Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model,

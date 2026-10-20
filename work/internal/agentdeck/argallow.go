@@ -295,7 +295,7 @@ func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
 	if err != nil || len(data) == 0 {
 		return false, nil
 	}
-	argv := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(data)), "\x00"), "\x00") // 进程命令行是外部原文（返工 4）
 	if args, ok := cliArgs(argv, want); ok {
 		if err := CheckCLIArgs(args, want); err != nil {
 			return true, i18n.E("err.agentdeck.procargsok.1", filepath.Base(argv[0]), err)

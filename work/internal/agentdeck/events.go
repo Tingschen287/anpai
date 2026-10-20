@@ -72,7 +72,7 @@ func (c *Client) WatchMenu(ctx context.Context, onEvent func(MenuEvent)) error {
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var eventName string
 	for sc.Scan() {
-		line := sc.Text()
+		line := i18n.Neutralize(sc.Text()) // 上游事件流是外部原文（返工 4）
 		switch {
 		case strings.HasPrefix(line, "event:"):
 			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))

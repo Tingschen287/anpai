@@ -163,7 +163,7 @@ func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
 		if err != nil || len(raw) == 0 {
 			continue // 进程已经没了，或是内核线程
 		}
-		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(raw)), "\x00"), "\x00")
 		if !strings.Contains(filepath.Base(argv[0]), "agent-deck") {
 			continue
 		}

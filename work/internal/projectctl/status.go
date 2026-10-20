@@ -73,7 +73,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
-		line := sc.Text()
+		line := i18n.Neutralize(sc.Text()) // 状态投影是外部原文（返工 4）
 		switch {
 		case strings.HasPrefix(line, "## "):
 			section = strings.TrimSpace(strings.TrimPrefix(line, "## "))

@@ -8,9 +8,11 @@
 package dashquota
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -18,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 状态。
@@ -167,7 +171,11 @@ func (c *Client) fetch(ctx context.Context) (*payload, error) {
 		return nil, c.err
 	}
 	var p payload
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+	body, rerr := io.ReadAll(resp.Body)
+	if rerr == nil {
+		rerr = json.NewDecoder(bytes.NewReader(i18n.NeutralizeBytes(body))).Decode(&p) // 看板响应是外部原文（返工 4）
+	}
+	if err := rerr; err != nil {
 		c.data, c.err = nil, fmt.Errorf("Token 看板数据解析不了（%v）", err)
 		return nil, c.err
 	}
@@ -312,7 +320,7 @@ func (c *Client) claudeStatusline() ([]Window, bool) {
 	}
 	// 缓存里还有许多别的字段（类型各异）：只解出要的两项，别的不管（真实缓存整体按对象解会失败）
 	var raw map[string]json.RawMessage
-	if json.Unmarshal(data, &raw) != nil {
+	if json.Unmarshal(i18n.NeutralizeBytes(data), &raw) != nil {
 		return nil, false
 	}
 	var wins []Window

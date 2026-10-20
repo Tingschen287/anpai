@@ -22,7 +22,7 @@ func ToolInfo(ctx context.Context, binary string) (path, version string, err err
 	if err != nil {
 		return path, "", i18n.E("err.agentdeck.toolinfo.2", binary, err)
 	}
-	version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
+	version, _, _ = strings.Cut(strings.TrimSpace(i18n.Neutralize(string(out))), "\n")
 	return path, strings.TrimSpace(version), nil
 }
 
@@ -32,5 +32,5 @@ func ListModels(ctx context.Context, binary string, args []string) (string, erro
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binary, args...).Output()
-	return string(out), err
+	return i18n.Neutralize(string(out)), err
 }

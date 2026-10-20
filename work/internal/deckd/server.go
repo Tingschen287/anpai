@@ -65,6 +65,12 @@ type Server struct {
 	// bg 是后台工作的 context（n055：等 owner 处理 CLI 启动确认后再送 brief），deckd 关闭时取消
 	bg   context.Context
 	bgWG sync.WaitGroup
+	// bgMu 护着 bg 和下面几项。life 是没接 WithBackground 时的后台 context；bgCancels 是 Close 要取消的全部；
+	// closed 之后新造的后台 context 一出生就是取消的
+	bgMu      sync.Mutex
+	life      context.Context
+	bgCancels []context.CancelFunc
+	closed    bool
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
@@ -197,6 +203,17 @@ func storeErr(w http.ResponseWriter, err error) {
 }
 
 func readBody(r *http.Request, v any) error {
+	if err := readBodyRaw(r, v); err != nil {
+		return err
+	}
+	// 请求体是外部原文的入口：里面伪造的打码标记在这里换掉，后面进通知参数时才分得清真假（返工 4）
+	neutralizeValue(v)
+	return nil
+}
+
+// readBodyRaw 只解码、不中和标记。只有带指纹的请求用它（开子 agent：指纹是客户端对原文算的），
+// 用的地方要自己在核对完指纹后立刻 neutralizeValue。
+func readBodyRaw(r *http.Request, v any) error {
 	const max = 64 << 10
 	data, err := io.ReadAll(io.LimitReader(r.Body, max+1))
 	if err != nil {
@@ -527,7 +544,9 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b answerBody
-	if err := readBody(r, &b); err != nil {
+	// 只有 owner 的界面能答。它回传的 option 是界面显示过的选项原文，存下来的选项可能带真标记，
+	// 只拿来和存下来的选项比较，所以不在这里中和（中和了就对不上选项）。别的请求体一律 readBody 中和（返工 4）。
+	if err := readBodyRaw(r, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
