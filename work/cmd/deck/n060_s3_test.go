@@ -158,3 +158,43 @@ func TestN060S3PauseScreenFollowsTheLanguage(t *testing.T) {
 		t.Fatalf("切回中文后与切换前不一致：\n%q\n%q", zh, again)
 	}
 }
+
+// 第一次运行（deckd 还没有、也没保存过语言）：界面进程按真实环境变量判断，LC_ALL → LC_MESSAGES → LANG → LANGUAGE。
+// 用 t.Setenv 注入各种组合，包括 C、POSIX、C.UTF-8、空；deckd 手动起（没传 -system-lang）时同一套判断。
+func TestN060S3FirstRunFollowsTheSystemLanguage(t *testing.T) {
+	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"zh_CN.UTF-8", map[string]string{"LANG": "zh_CN.UTF-8"}, i18n.ZH},
+		{"en_US.UTF-8", map[string]string{"LANG": "en_US.UTF-8"}, i18n.EN},
+		{"C", map[string]string{"LANG": "C"}, i18n.EN},
+		{"POSIX", map[string]string{"LANG": "POSIX"}, i18n.EN},
+		{"空", map[string]string{}, i18n.EN},
+		{"C.UTF-8", map[string]string{"LANG": "C.UTF-8"}, i18n.EN},
+		{"LC_ALL 压过 LANG", map[string]string{"LC_ALL": "zh_CN.UTF-8", "LANG": "en_US.UTF-8"}, i18n.ZH},
+		{"LC_ALL=C 压过 LANG=zh", map[string]string{"LC_ALL": "C", "LANG": "zh_CN.UTF-8"}, i18n.EN},
+		{"LC_MESSAGES 压过 LANG", map[string]string{"LC_MESSAGES": "zh_CN.UTF-8", "LANG": "en_US.UTF-8"}, i18n.ZH},
+		{"只有 LANGUAGE", map[string]string{"LANGUAGE": "zh_CN:en_US"}, i18n.ZH},
+	}
+	for _, c := range cases {
+		for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"} {
+			t.Setenv(k, c.env[k])
+		}
+		// 先放成相反的语言：确认结果是这次判断出来的，不是上一轮留下的
+		if c.want == i18n.ZH {
+			i18n.SetLang(i18n.EN)
+		} else {
+			i18n.SetLang(i18n.ZH)
+		}
+		uiClient(shortDirs(t))
+		if i18n.Lang() != c.want {
+			t.Errorf("%s：界面语言 %s，应为 %s", c.name, i18n.Lang(), c.want)
+		}
+		if got := daemonSystemLang("", os.Getenv); got != c.want {
+			t.Errorf("%s：deckd 的系统语言 %s，应为 %s", c.name, got, c.want)
+		}
+	}
+}

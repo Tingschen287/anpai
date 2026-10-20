@@ -155,6 +155,7 @@ func TestN060S3PutSettingsRejectsUnknownLangAndStaleGeneration(t *testing.T) {
 // 重启 deckd（重新 Open 同一份设置）语言保持；deckd 进程自己的语言不变（给模型、落盘、日志的文字仍是中文）。
 func TestN060S3LangSurvivesDeckdRestartAndDeckdStaysChinese(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
+	i18n.SetLang(i18n.ZH) // 进程语言设成英文跑测试时（N060_TEST_LANG=en）也从中文起，才看得出选语言有没有动它
 	f := newFixture(t)
 	if code, b := putS3Settings(t, f, func(m map[string]any) { m["ui_lang"] = "en" }); code != 200 {
 		t.Fatalf("%d %s", code, b)
