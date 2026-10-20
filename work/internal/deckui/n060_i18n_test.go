@@ -320,13 +320,22 @@ func checkFormatArgs(t *testing.T) {
 // prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
 // viewstate 在这份名单里，这样哨兵的字面量调用才算「有人用」。
 func prodDirs() []string {
-	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock", "projectctl")
+	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock", "projectctl"), cmdDeckDir())
+}
+
+// cmdDeckDir 是 cmd/deck：deck center 自己往中间窗格画字（fence、Pause），也在「键有人用、参数个数对」和中文字面量的核对之内（返工 4）。
+func cmdDeckDir() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("caller")
+	}
+	return filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(file))), "cmd", "deck")
 }
 
 // ownerScanDirs 是「函数里不能再留中文字面量」的包。
 // viewstate 也在里面，按函数登记哨兵正文，不整包排除。
 func ownerScanDirs() []string {
-	return pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate")
+	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate"), cmdDeckDir())
 }
 
 func pkgDirs(names ...string) []string {
@@ -1231,6 +1240,12 @@ func (o *overlayImporter) ImportFrom(path, dir string, mode types.ImportMode) (*
 	return o.base.Import(path)
 }
 
+// moduleCheckCache 存没被改动的包的类型检查结果（返工 4，建议 1）。反例每次只改 deckd/agents.go 这类一个文件，
+// 其余包重新装载、类型检查是纯重复：21 个参数反例 + 32 个动态键反例各做一遍，占了这组测试的大半耗时。
+// 只缓存「自己没有被覆盖、依赖的模块内部包也都没被覆盖」的包，所以结果与每次重做逐字相同。
+// 只在共享的 fset（withTypeImp 给的）上用，调用都在 typeImpMu 里，不用另外加锁。
+var moduleCheckCache = map[string]checkedPkg{}
+
 func checkModule(fset *token.FileSet, base types.Importer, src map[string]string) ([]checkedPkg, error) {
 	groups, err := parseModule(fset, src)
 	if err != nil {
@@ -1242,7 +1257,30 @@ func checkModule(fset *token.FileSet, base types.Importer, src map[string]string
 	}
 	over := &overlayImporter{base: base, have: map[string]*types.Package{}}
 	var out []checkedPkg
+	dirty := map[string]bool{}
 	for _, g := range order {
+		changed := false
+		for _, pf := range g.files {
+			if _, ok := src[pf.path]; ok {
+				changed = true
+			}
+		}
+		for _, imp := range g.imports {
+			if dirty[imp] {
+				changed = true
+			}
+		}
+		if changed {
+			dirty[g.path] = true
+		}
+		useCache := !changed && fset == typeImpFset
+		if useCache {
+			if cp, ok := moduleCheckCache[g.path]; ok {
+				over.have[g.path] = cp.pkg
+				out = append(out, cp)
+				continue
+			}
+		}
 		asts := make([]*ast.File, len(g.files))
 		for i, pf := range g.files {
 			asts[i] = pf.file
@@ -1267,10 +1305,14 @@ func checkModule(fset *token.FileSet, base types.Importer, src map[string]string
 			return nil, fmt.Errorf("类型检查 %s：%v\n%s", g.path, err, strings.Join(msgs, "\n"))
 		}
 		over.have[g.path] = pkg
-		out = append(out, checkedPkg{
+		cp := checkedPkg{
 			dir: g.dir, files: g.files, pkg: pkg, info: info,
 			enums: enumsIn(info, pkg, asts),
-		})
+		}
+		if useCache {
+			moduleCheckCache[g.path] = cp
+		}
+		out = append(out, cp)
 	}
 	return out, nil
 }

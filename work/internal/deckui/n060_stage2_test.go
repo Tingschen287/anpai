@@ -49,6 +49,27 @@ var ownerChineseAllow = map[string]string{
 	"viewstate.go · (pkg)":                 "哨兵 codeErr 的中文正文必须留在源码里，和码表逐字相同",
 	"viewstate.go · ErrPartial.Error":      "Error() 拼出来的中文必须和 I18n() 逐字相同",
 	"viewstate.go · ErrHandback.Error":     "Error() 拼出来的中文必须和 I18n() 逐字相同",
+
+	// cmd/deck（返工 4）。deck center 自己画在中间窗格里的字（fence、Pause）已经改成码，不在这里；
+	// 下面这些要么只写日志，要么是命令行输出（命令行输出的边界：打在调用者终端，不属于界面）。
+	"up.go · fence":            "只写 center.log 的日志行；画在中间窗格的提示已改成 center.fence.waiting 和 err.deck.fence.*",
+	"up.go · announce":         "只写 center.log 的日志行（client 已连上，界面看不到）",
+	"up.go · up":               "deck up 的 flag 说明和失败说明，打在 owner 启动命令的终端 stderr，布局建好之前",
+	"up.go · ensureDeckd":      "deck up 的失败说明（stderr），同上",
+	"up.go · buildLayout":      "deck up 的失败说明（stderr），同上",
+	"up.go · layoutCmd":        "deck layout 子命令的用法，由 tmux 快捷键在后台调用，输出不进窗格",
+	"up.go · socketFlags":      "flag 说明",
+	"main.go · daemon":         "deckd 前台进程的 flag 说明和启动横幅，跑在布局的后台窗口里，等同日志",
+	"main.go · usage":          "deck 命令行用法（stderr）",
+	"main.go · panel":          "deck panel 的 flag 说明和用法（stderr）",
+	"main.go · settings":       "deck settings -check 的命令行输出和 flag 说明（升级前自查用，不需要 deckd）",
+	"agent.go · agentCmd":      "deck agent 命令行：给模型和 owner 的 shell 看的 stderr 和 flag 说明，错误正文是中文 err.Error()，合同不改",
+	"agent.go · agentSpawn":    "同上：flag 说明",
+	"agent.go · agentEscalate": "同上：flag 说明",
+	"agent.go · agentUsage":    "同上：用法",
+	"agent.go · needArg":       "同上：缺参数的失败说明",
+	"agent.go · projectCmd":    "同上：deck project 的用法和 flag 说明",
+	"agent.go · reportsCmd":    "同上：deck reports 的用法",
 }
 
 // TestOwnerFacingChineseIsCoded：deckd、deckstore、agentdeck、deckclient、viewstate 里，

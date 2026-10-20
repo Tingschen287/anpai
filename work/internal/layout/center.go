@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
@@ -70,7 +71,7 @@ func (l *CenterLoop) Run() {
 		if quick >= l.MaxQuick {
 			reason := i18n.T("layout.err.center", quick, l.QuickExit)
 			if err != nil {
-				reason += i18n.T("layout.err.center.last") + i18n.Present(err.Error())
+				reason += i18n.T("layout.err.center.last") + deckclient.Show(err) // 带码的 tmux 退出说明按界面语言显示（返工 4）；中文与 Present(err.Error()) 逐字相同
 			}
 			if !l.Pause(reason) {
 				return

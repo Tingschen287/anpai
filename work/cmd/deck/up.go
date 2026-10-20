@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/termprobe"
@@ -223,7 +225,7 @@ func center(dirs deckstore.Dirs, args []string) {
 				err := cmd.Wait()
 				if msg := strings.TrimSpace(errBuf.String()); err != nil && msg != "" {
 					lines := strings.Split(msg, "\n")
-					err = fmt.Errorf("%w（%s）", err, deckstore.Clean(lines[len(lines)-1], 160))
+					err = i18n.E("err.deck.center.attachexit", err, deckstore.Clean(lines[len(lines)-1], 160)) // 带码：中间窗格按界面语言显示（返工 4）
 				}
 				return err
 			}, nil
@@ -237,13 +239,17 @@ func center(dirs deckstore.Dirs, args []string) {
 			})
 		},
 		Pause: func(reason string) bool {
-			fmt.Print("\x1b[2J\x1b[H")
-			fmt.Printf("\n  %s\n\n  检查 agent-deck 的 tmux server（%s）后按回车重试，输入 q 回车退出。\n", reason, *agentSock)
+			fmt.Print(pauseScreen(reason, *agentSock))
 			line, _ := in.ReadString('\n')
 			return strings.TrimSpace(line) != "q"
 		},
 	}
 	loop.Run()
+}
+
+// pauseScreen 是停止重试后画在中间窗格里的整屏文字：清屏、原因、操作说明（按界面语言）。
+func pauseScreen(reason, agentSock string) string {
+	return "\x1b[2J\x1b[H" + fmt.Sprintf("\n  %s\n\n  %s\n", reason, i18n.T("center.pause.hint", agentSock))
 }
 
 // fence 在起新的中间 client 之前，确认 deckd 没有做到一半的视图操作（n049 评审 3 B1-A）：
@@ -262,10 +268,11 @@ func fence(c *deckclient.Client, logPath string, show func(string)) {
 		if err == nil && out.Fenced {
 			return
 		}
-		var why string
+		// why 是带码的：写进 center.log 的用 why.Error()（中文，和以前逐字一样），画在中间窗格的按界面语言（返工 4）
+		var why *i18n.Error
 		switch {
 		case err == nil:
-			why = "deckd 的回答没有确认（fenced 不是 true）"
+			why = i18n.E("err.deck.fence.unconfirmed")
 		default:
 			// 连不上不等于没有进行中的操作：deckd 关闭时先关监听、再等手上的请求。以单实例锁为准（n049 评审 4）
 			st, perr := deckd.ProbeLock(lock)
@@ -274,19 +281,33 @@ func fence(c *deckclient.Client, logPath string, show func(string)) {
 				centerLog(logPath, "deckd 没在运行（单实例锁已释放），不用等进行中的操作：%v", err)
 				return
 			case perr != nil:
-				why = fmt.Sprintf("探测 deckd 单实例锁失败：%v（%v）", perr, err)
+				why = i18n.E("err.deck.fence.probefail", errArg(perr), errArg(err))
 			case st == deckd.LockHeld:
-				why = fmt.Sprintf("deckd 的单实例锁还被持有（可能正在关闭、手上还有请求）（%v）", err)
+				why = i18n.E("err.deck.fence.lockheld", errArg(err))
 			default:
-				why = fmt.Sprintf("deckd 还没起来（%s 不存在）（%v）", lock, err)
+				why = i18n.E("err.deck.fence.notup", lock, errArg(err))
 			}
 		}
 		if i == 0 {
-			centerLog(logPath, "重连前等 deckd 确认没有进行中的操作，还没确认：%s（不起新 client，每秒再试）", why)
+			centerLog(logPath, "重连前等 deckd 确认没有进行中的操作，还没确认：%s（不起新 client，每秒再试）", why.Error())
 		}
-		show("等 deckd 确认没有进行中的操作再重连中间窗格…（" + deckstore.Display(why, 160) + "）")
+		show(i18n.T("center.fence.waiting", deckstore.Display(deckclient.Show(why), 160)))
 		time.Sleep(fenceRetry)
 	}
+}
+
+// errArg 把错误收成可翻译的参数：deckd 回的 HTTP 错误拆成「状态码 + 消息（有码的是嵌套码）」，其余原样。
+// 中文 Error() 和 %v 打出来的字和原来逐字相同。
+func errArg(err error) any {
+	var de *deckclient.Error
+	if errors.As(err, &de) && de != nil {
+		var msg any = de.Message
+		if de.Code != "" {
+			msg = i18n.Nest{Code: de.Code, Args: de.Args, Error: de.Message}
+		}
+		return i18n.E("err.deckclient.status", de.Status, msg)
+	}
+	return err
 }
 
 // 栅栏每次等多久、没确认时隔多久再试（测试可调小）。
