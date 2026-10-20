@@ -277,8 +277,8 @@ func TestN060S3RunningSwitchChineseEnglishChinese(t *testing.T) {
 	}
 }
 
-// 不重启：侧栏和标签条每秒向 deckd 取一次数，响应头带的语言一变，下一次画面就是新语言。
-// 用真实的 unix socket 客户端（FollowLang）和侧栏、标签条的取数循环，假 deckd 只改它回的语言头。
+// 不重启：侧栏和标签条每秒向 deckd 取一次数（DeckAPI.Fetch），响应头带的语言一变，下一次画面就是新语言。
+// 用真实的 unix socket 客户端（FollowLang）和侧栏、标签条的取数，假 deckd 只改它回的语言头。
 func TestN060S3SidebarAndTabsFollowDeckdWithoutRestart(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	sock := filepath.Join(t.TempDir(), "d.sock")
@@ -305,18 +305,17 @@ func TestN060S3SidebarAndTabsFollowDeckdWithoutRestart(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	i18n.SetLang(i18n.ZH)
+	// 侧栏、标签条的取数循环（newLoop）每秒调一次 DeckAPI.Fetch；这里直接调 Fetch，不起循环的 goroutine（它没有停止的办法）。
 	api := DeckAPI{C: deckclient.NewUI(sock).FollowLang()}
-	loop := newLoop(api)
 	next := func() Data {
 		t.Helper()
-		loop.refresh()
-		select {
-		case d := <-loop.data:
-			return d
-		case <-time.After(5 * time.Second):
-			t.Fatal("取数循环没有送数据")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d, err := api.Fetch(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return Data{}
+		return d
 	}
 	render := func(d Data) (side, tabs string) {
 		sb := &Sidebar{Data: d, Mode: "none"}
@@ -330,9 +329,7 @@ func TestN060S3SidebarAndTabsFollowDeckdWithoutRestart(t *testing.T) {
 
 	lang.Store("en") // owner 在设置里切到英文；deckd 的响应头随之变
 	var enSide, enTabs string
-	for i := 0; i < 3 && i18n.Lang() != i18n.EN; i++ {
-		d = next() // 第一次取数的响应头把本进程换成英文；循环里先发出的那次取数可能还是旧画面，再取一次
-	}
+	d = next() // 下一次取数：响应头把本进程换成英文，这一次画出来的就是英文
 	if i18n.Lang() != i18n.EN {
 		t.Fatalf("下一次取数之后本进程应是英文：%s", i18n.Lang())
 	}
@@ -348,9 +345,7 @@ func TestN060S3SidebarAndTabsFollowDeckdWithoutRestart(t *testing.T) {
 	}
 
 	lang.Store("zh")
-	for i := 0; i < 3 && i18n.Lang() != i18n.ZH; i++ {
-		d = next()
-	}
+	d = next()
 	backSide, backTabs := render(d)
 	if backSide != zhSide || backTabs != zhTabs {
 		t.Fatalf("切回中文后与切换前不一致：\n%s\n---\n%s", zhSide, backSide)
