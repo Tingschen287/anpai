@@ -8,6 +8,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -615,29 +616,38 @@ func TestN060ArgScanFindsPlantedChinese(t *testing.T) {
 		{"LocalViaHelperChain", "func plantedEcho(s string) string { out := s; return out }\n\nfunc plantedEcho2(s string) string { mid := plantedEcho(s); return mid }\n\nfunc planted() { _ = i18n.E(\"err.deckd.serverrunspawn.47\", plantedEcho2(plantedCN)) }"},
 		{"LocalViaHelperMulti", "func plantedPair(s string) (string, int) { out := s; return out, 1 }\n\nfunc planted() { v, _ := plantedPair(plantedCN); _ = i18n.E(\"err.deckd.serverrunspawn.47\", v) }"},
 	}
-	for _, tc := range cases {
-		tc := tc
+	// 段 3（第 2 段复审 4 的建议 2）：以前每个反例都把 deckd 及依赖它的包完整装载、类型检查一遍（21 次）。
+	// 现在所有反例放进同一份 agents.go 的覆盖里，只装载检查一次：每个反例的函数名与自带的辅助名各加两位序号后缀（planted_03、
+	// plantedEcho_03），共用的 plantedCN、plantedHelper 在 decl 里只声明一次，不加后缀；每个反例仍要各自被抓到（站点 agents.go · planted_NN），一个都不能少。
+	path := filepath.Join(moduleRoot(), "internal", "deckd", "agents.go")
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rename := regexp.MustCompile(`\bplanted(Box|Take|Echo2|Echo|Pair)?\b`)
+	var planted strings.Builder
+	for i, tc := range cases {
+		suffix := fmt.Sprintf("_%02d", i)
+		planted.WriteString("\n" + rename.ReplaceAllStringFunc(tc.body, func(m string) string { return m + suffix }) + "\n")
+	}
+	src := map[string]string{path: string(orig) + decl + planted.String()}
+	var hits []argHit
+	err = withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
+		pkgs, err := checkModule(fset, imp, src)
+		if err != nil {
+			return err
+		}
+		hits = scanArgChinese(pkgs, fset)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range cases {
+		prefix := fmt.Sprintf("agents.go · planted_%02d", i)
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(moduleRoot(), "internal", "deckd", "agents.go")
-			orig, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			src := map[string]string{path: string(orig) + decl + "\n" + tc.body + "\n"}
-			var hits []argHit
-			err = withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
-				pkgs, err := checkModule(fset, imp, src)
-				if err != nil {
-					return err
-				}
-				hits = scanArgChinese(pkgs, fset)
-				return nil
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			for _, h := range hits {
-				if strings.HasPrefix(h.site, "agents.go · planted") {
+				if strings.HasPrefix(h.site, prefix) {
 					return
 				}
 			}
