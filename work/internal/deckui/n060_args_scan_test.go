@@ -400,6 +400,25 @@ type argHit struct {
 	what string
 }
 
+// scanArgChineseAll 在 darwin 和 linux 各检查一遍再扫（n067）：两个平台的命中合并，同一处只算一次。
+func scanArgChineseAll(src map[string]string) ([]argHit, error) {
+	plats, err := checkModuleAll(src)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var hits []argHit
+	for _, pp := range plats {
+		for _, h := range scanArgChinese(pp.pkgs, pp.fset) {
+			if k := h.pos + "|" + h.what + "|" + h.site; !seen[k] {
+				seen[k] = true
+				hits = append(hits, h)
+			}
+		}
+	}
+	return hits, nil
+}
+
 func argScanTargets() map[string]bool {
 	return map[string]bool{"deckd": true, "deckstore": true, "agentdeck": true, "lease": true, "viewstate": true}
 }
@@ -551,15 +570,7 @@ func scanArgs(pkgs []checkedPkg, fset *token.FileSet, errText bool) []argHit {
 }
 
 func TestN060NoLocalChineseInArgs(t *testing.T) {
-	var hits []argHit
-	err := withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
-		pkgs, err := checkModule(fset, imp, nil)
-		if err != nil {
-			return err
-		}
-		hits = scanArgChinese(pkgs, fset)
-		return nil
-	})
+	hits, err := scanArgChineseAll(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,15 +642,7 @@ func TestN060ArgScanFindsPlantedChinese(t *testing.T) {
 		planted.WriteString("\n" + rename.ReplaceAllStringFunc(tc.body, func(m string) string { return m + suffix }) + "\n")
 	}
 	src := map[string]string{path: string(orig) + decl + planted.String()}
-	var hits []argHit
-	err = withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
-		pkgs, err := checkModule(fset, imp, src)
-		if err != nil {
-			return err
-		}
-		hits = scanArgChinese(pkgs, fset)
-		return nil
-	})
+	hits, err := scanArgChineseAll(src)
 	if err != nil {
 		t.Fatal(err)
 	}
