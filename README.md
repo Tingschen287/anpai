@@ -13,13 +13,13 @@
 
 ## 平台状态
 
-支持 macOS 和 Linux；本机前提是装好 tmux 和 upstream agent-deck（用 Graph 项目时还要 Python 3.11 及以上来跑 projectctl，`PATH` 上有就自动找，也可以用环境变量 `DECK_PROJECTCTL_PYTHON` 指定解释器）。
+支持 macOS 和 Linux；本机前提是装好 tmux（要带 `--enable-sixel` 编译，侧栏的图标才显示）和 upstream agent-deck；用 Graph 项目时 projectctl 要 Python 3.11 及以上，环境变量 `DECK_PROJECTCTL_PYTHON` 可指定解释器。
 
 | 平台 | 状态 |
 |---|---|
 | WSL 2 + Windows Terminal | 当前支持 |
 | 其他 Linux 终端 | 没有专门验证 |
-| macOS | 适配中（n067）：在 x86 macOS 15 + tmux 3.4 上编译、测试与隔离端到端都跑通（tmux 要带 `--enable-sixel` 才显示 Sixel logo，见 `work/README.md`）；认调用者用 `LOCAL_PEERCRED`、`LOCAL_PEERPID` 和进程出生时间，比 Linux 的 `SO_PEERPIDFD` 弱一档，差异见 [`work/README.md`](work/README.md) |
+| macOS | 支持（n067） |
 | Windows 原生 | 不支持 |
 
 ## 依赖
