@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/constant"
 	"go/importer"
 	"go/parser"
@@ -1134,6 +1135,11 @@ func parseModule(fset *token.FileSet, src map[string]string) ([]*pkgGroup, error
 		for _, e := range ents {
 			n := e.Name()
 			if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+				// n067：类型检查只装载本平台会编进去的文件。_linux.go 与 _darwin.go 各自声明同名函数，
+				// 一起检查会报重复声明（文字扫描类的守卫仍然看全部文件，不受影响）
+				if ok, err := build.Default.MatchFile(dir, n); err == nil && !ok {
+					continue
+				}
 				names = append(names, n)
 			}
 		}
@@ -2239,7 +2245,12 @@ func assertRenderMiss(t *testing.T, overlay map[string]string) {
 	if err := os.WriteFile(ov, buf, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/home/linux/.local/go/bin/go", "test", "-overlay", ov, "-count=1", "-timeout", "180s", "-run", "^TestEnglishUIHasNoHan$", "./internal/deckui")
+	// go 可执行文件：按当前测试进程的 GOROOT 找（以前写死 /home/linux/.local/go/bin/go，换机器就找不到；n067）
+	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if _, err := os.Stat(goBin); err != nil {
+		goBin = "go"
+	}
+	cmd := exec.Command(goBin, "test", "-overlay", ov, "-count=1", "-timeout", "180s", "-run", "^TestEnglishUIHasNoHan$", "./internal/deckui")
 	cmd.Dir = moduleRoot()
 	env := make([]string, 0, len(os.Environ())+3)
 	for _, e := range os.Environ() {

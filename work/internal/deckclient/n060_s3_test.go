@@ -4,12 +4,12 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // 段 3：界面进程用 FollowLang 的客户端，deckd 每个响应带的 X-Deck-Lang 就是本进程的界面语言。
@@ -23,7 +23,7 @@ type fakeLangServer struct {
 
 func newFakeLangServer(t *testing.T) *fakeLangServer {
 	t.Helper()
-	f := &fakeLangServer{sock: filepath.Join(t.TempDir(), "d.sock")}
+	f := &fakeLangServer{sock: testsock.Path(t, "d.sock")}
 	f.lang.Store("zh")
 	f.status.Store(200)
 	l, err := net.Listen("unix", f.sock)
@@ -112,7 +112,7 @@ func TestN060S3SyncLang(t *testing.T) {
 		t.Fatalf("SyncLang：%q %v lang=%s", got, err, i18n.Lang())
 	}
 	// 连不上：返回错误，语言不变
-	got, err = NewUI(filepath.Join(t.TempDir(), "none.sock")).SyncLang(context.Background())
+	got, err = NewUI(testsock.Path(t, "none.sock")).SyncLang(context.Background())
 	if err == nil || got != i18n.EN || i18n.Lang() != i18n.EN {
 		t.Fatalf("连不上应报错且语言不变：%q %v lang=%s", got, err, i18n.Lang())
 	}

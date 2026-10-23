@@ -70,7 +70,8 @@ func newCenterWorld(t *testing.T, centerCmd func(agent string) string) *centerWo
 }
 
 func attachIdle(agent string) string {
-	return "tmux -S " + agent + " attach-session -r -t =" + viewstate.Idle
+	// 目标加双引号：tmux 窗格的 shell 在 macOS 上是 zsh，裸的 =name 会被 zsh 当成「命令 name 的路径」展开而失败（n067）
+	return "tmux -S " + agent + " attach-session -r -t \"=" + viewstate.Idle + "\""
 }
 
 // 中间窗格进程本身就是 client，或 client 是它的子进程（deck center 的情形），都要认得出。

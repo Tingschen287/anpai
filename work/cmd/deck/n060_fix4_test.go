@@ -18,6 +18,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // 返工 4 第 2 条：deck center 自己画在中间窗格里的提示按界面语言显示。
@@ -62,7 +63,7 @@ type fenceCase struct {
 
 func fenceCases() []fenceCase {
 	dial := func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") }
-	dirSock := func(t *testing.T) string { return filepath.Join(t.TempDir(), "deckd.sock") }
+	dirSock := func(t *testing.T) string { return testsock.Path(t, "deckd.sock") }
 	return []fenceCase{
 		{"unconfirmed", func(*http.Request) (*http.Response, error) { return jsonResp(200, `{"fenced":false}`), nil }, dirSock,
 			func(string, error, error) string { return "deckd 的回答没有确认（fenced 不是 true）" }},

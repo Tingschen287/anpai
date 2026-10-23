@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // 段 3：设置里的「界面语言」一项，保存后立刻生效（不重启），各界面进程跟着换。
@@ -200,7 +200,7 @@ func TestN060S3LanguageChangeCoalescesWithAutosave(t *testing.T) {
 // DeckSettingsAPI 的保存请求：选过语言才带 ui_lang；没选过不带（deckd 当「不动已存的」）。
 func TestN060S3SaveRequestCarriesLangOnlyWhenChosen(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	sock := testsock.Path(t, "d.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +281,7 @@ func TestN060S3RunningSwitchChineseEnglishChinese(t *testing.T) {
 // 用真实的 unix socket 客户端（FollowLang）和侧栏、标签条的取数，假 deckd 只改它回的语言头。
 func TestN060S3SidebarAndTabsFollowDeckdWithoutRestart(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	sock := testsock.Path(t, "d.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

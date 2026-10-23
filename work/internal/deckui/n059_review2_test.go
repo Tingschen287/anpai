@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
@@ -121,11 +122,21 @@ func TestReview2Layout(t *testing.T) {
 	})
 	t.Run("browse_long_real_directory", func(t *testing.T) {
 		dir := t.TempDir()
+		// 一层层建到 15 层；系统的路径总长上限（Linux 4096，macOS 1024）到了就停——建不出更深的目录不是产品问题，
+		// 至少要建出 3 层才算「长目录」（n067）
+		depth := 0
 		for i := 0; i < 15; i++ {
-			dir = filepath.Join(dir, strings.Repeat("目", 60))
+			next := filepath.Join(dir, strings.Repeat("目", 60))
+			if err := os.MkdirAll(filepath.Join(next, "child"), 0o755); err != nil {
+				if !errors.Is(err, syscall.ENAMETOOLONG) {
+					t.Fatal(err)
+				}
+				break
+			}
+			dir, depth = next, depth+1
 		}
-		if err := os.MkdirAll(filepath.Join(dir, "child"), 0o755); err != nil {
-			t.Fatal(err)
+		if depth < 3 {
+			t.Fatalf("只建出 %d 层长目录，不够压力", depth)
 		}
 		m, _ := n057Fixture()
 		m.width, m.height, m.Start = 80, 24, dir

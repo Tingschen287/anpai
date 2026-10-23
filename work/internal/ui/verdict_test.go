@@ -136,12 +136,26 @@ func TestReviewBriefNamesTheReportPath(t *testing.T) {
 	}
 }
 
+// useRealPythonInCommands 让命令文字里的 python3 换成本机选出的 3.11 及以上的解释器：集成测试要把命令原样交给 shell 跑，
+// 而 Mac 上 PATH 里的 python3 是 3.9，跑不了控制器（n067）。选不出就跳过。
+func useRealPythonInCommands(t *testing.T) {
+	t.Helper()
+	py, err := projectctl.ResolvePython()
+	if err != nil {
+		t.Skipf("跳过：没有 Python 3.11 及以上（%v）", err)
+	}
+	old := projectctl.PythonInText
+	projectctl.PythonInText = py
+	t.Cleanup(func() { projectctl.PythonInText = old })
+}
+
 // v 给的命令要真的能被控制器接受：在夹具副本上对 submitted 的 f03 原样运行（真实 projectctl）。
 func TestIntegrationVerdictCommandIsAcceptedByTheRealController(t *testing.T) {
 	script, err := projectctl.DefaultScript()
 	if err != nil {
 		t.Skipf("跳过：找不到 projectctl（%v）", err)
 	}
+	useRealPythonInCommands(t)
 	src, _ := filepath.Abs("../../testdata/workdeck-fixture")
 	dst := filepath.Join(t.TempDir(), "workdeck-fixture")
 	if out, err := exec.Command("cp", "-r", src, dst).CombinedOutput(); err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // n049 评审 3 B1-A：deck center 起新 client 之前的栅栏，只有确认没有进行中的操作才返回。
@@ -26,7 +27,7 @@ func shortFence(t *testing.T) {
 // deckd 在、但一时没回应或答非所问：一直等，直到它确认（回了 fence）。
 func TestFenceWaitsUntilDeckdConfirms(t *testing.T) {
 	shortFence(t)
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	sock := filepath.Join(d, "deckd.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -67,7 +68,7 @@ func TestFenceWaitsUntilDeckdConfirms(t *testing.T) {
 // deckd 根本没在运行（socket 不存在、或在但没人听）：不可能有进行中的操作，立刻返回。
 func TestFenceReturnsWhenDeckdIsNotRunning(t *testing.T) {
 	shortFence(t)
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	// deckd 起来过、已经退出：单实例锁文件还在，但没人持有
 	if err := os.WriteFile(filepath.Join(d, "deckd.lock"), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -97,7 +98,7 @@ func TestFenceReturnsWhenDeckdIsNotRunning(t *testing.T) {
 // （deckd 还没起来），都不能放行；锁一放开就放行。
 func TestFenceWaitsWhileDeckdLockIsHeldOrMissing(t *testing.T) {
 	shortFence(t)
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	sock := filepath.Join(d, "deckd.sock") // 不存在：连接失败
 	shown := make(chan string, 64)
 	done := make(chan struct{})

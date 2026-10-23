@@ -16,7 +16,12 @@ import (
 // 表现出来是「直连解析成功，进入时 context canceled」，重试也一样。
 // 所以这里不测超时，测的是**最普通的那条路**：解析完、context 释放、命令照样能跑。
 func TestInteractiveAttachCommandsOutliveTheResolveContext(t *testing.T) {
-	c, err := NewClient("/bin/true", "_test", "", "")
+	// true 在 Linux 是 /bin/true，在 macOS 是 /usr/bin/true：按 PATH 找，不写死路径
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("找不到 true：", err)
+	}
+	c, err := NewClient(truePath, "_test", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +57,8 @@ func TestInteractiveAttachCommandsOutliveTheResolveContext(t *testing.T) {
 			// 行为上也验一遍，不只看字段。
 			// 这里换成一条一定跑得起来的命令，只保留 context 绑定这一个变量。
 			probe := *cmd
-			probe.Path = "/bin/true"
-			probe.Args = []string{"/bin/true"}
+			probe.Path = truePath
+			probe.Args = []string{truePath}
 			if err := probe.Start(); err != nil {
 				if errors.Is(err, context.Canceled) {
 					t.Fatal("命令启动时就是 context canceled：解析用的 deadline 绑错了地方")

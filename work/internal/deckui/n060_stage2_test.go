@@ -60,6 +60,7 @@ var ownerChineseAllow = map[string]string{
 	"up.go · layoutCmd":        "deck layout 子命令的用法，由 tmux 快捷键在后台调用，输出不进窗格",
 	"up.go · socketFlags":      "flag 说明",
 	"main.go · daemon":         "deckd 前台进程的 flag 说明和启动横幅，跑在布局的后台窗口里，等同日志",
+	"main.go · socketProblem":  "deck daemon、deck up 的 socket 路径超长失败说明（stderr，布局建好之前），同 up.go · up（n067）",
 	"main.go · usage":          "deck 命令行用法（stderr）",
 	"main.go · panel":          "deck panel 的 flag 说明和用法（stderr）",
 	"main.go · settings":       "deck settings -check 的命令行输出和 flag 说明（升级前自查用，不需要 deckd）",

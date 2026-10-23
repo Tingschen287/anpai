@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // n049 评审 1 B1：announce 的通知只属于它那个 client。
@@ -27,7 +28,7 @@ type announceWorld struct {
 // 假 tmux：gone 文件不存在时列出 pid 123 的 client。假 deckd：记下请求体。
 func newAnnounceWorld(t *testing.T, status func(n int) int, onRequest func(n int)) *announceWorld {
 	t.Helper()
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	w := &announceWorld{dir: d, gone: filepath.Join(d, "gone"), status: status}
 	script := "#!/bin/sh\nif [ ! -f '" + w.gone + "' ]; then printf '/dev/pts/123\\t123\\tdeck-idle\\t1\\t1\\n'; fi\n"
 	if err := os.WriteFile(filepath.Join(d, "tmux"), []byte(script), 0o700); err != nil {

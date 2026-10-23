@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 
 func TestReview4FenceDoesNotAcceptUnconfirmedJSON(t *testing.T) {
 	shortFence(t)
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	sock := filepath.Join(d, "deckd.sock")
 	ln, e := net.Listen("unix", sock)
 	if e != nil {
@@ -37,7 +38,7 @@ func TestReview4FenceDoesNotAcceptUnconfirmedJSON(t *testing.T) {
 }
 func TestReview4FenceDoesNotPassDuringDeckdShutdown(t *testing.T) {
 	shortFence(t)
-	d := t.TempDir()
+	d := testsock.Dir(t)
 	sock := filepath.Join(d, "deckd.sock")
 	ln, e := net.Listen("unix", sock)
 	if e != nil {

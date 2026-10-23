@@ -3,12 +3,12 @@ package panels
 import (
 	"net"
 	"net/http"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // 段 3：面板进程（deck panel 通知、活动、决策、进度、额度）每 2 秒向 deckd 取一次数；响应头带的语言一变，
@@ -16,7 +16,7 @@ import (
 
 func TestN060S3PanelsFollowDeckdLanguageOnTheNextFetch(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	sock := testsock.Path(t, "d.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
