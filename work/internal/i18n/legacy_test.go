@@ -2,6 +2,7 @@ package i18n
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -77,7 +78,15 @@ func TestN060LegacyCodeRecoversIdentifierArguments(t *testing.T) {
 func TestN060LegacyCodeOnlyAcceptsExactMatches(t *testing.T) {
 	// 任选一个固定句子和一个带标识参数的模板
 	var fixed, tmpl string
-	for key, format := range zh {
+	// 按键排序取样：以前直接遍历 map，每次选中的模板不同；选中 checkcliargs.1（「参数 %s 的取值…」）时，
+	// 「参数里有空格」那一例填出来的句子恰好是两个参数的 checkcliargs.2 的真句子，被正确认出，断言就偶尔失败（约十几分之一）。
+	keys := make([]Key, 0, len(zh))
+	for key := range zh {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, key := range keys {
+		format := zh[key]
 		if !strings.HasPrefix(string(key), "err.") {
 			continue
 		}
@@ -91,8 +100,11 @@ func TestN060LegacyCodeOnlyAcceptsExactMatches(t *testing.T) {
 			}
 		}
 		if len(verbs) == 1 && verbs[0] == 's' && tmpl == "" && countHan(strings.Join(lit, "")) >= 4 && !strings.HasSuffix(format, "%s") && !strings.HasPrefix(format, "%s") {
+			// 填「two words」后的句子不能恰好是另一个模板的真句子（两个参数的模板），否则「参数里有空格」那一例的前提不成立
 			if _, _, hit := LegacyCode(fmt.Sprintf(format, "abc-1")); hit {
-				tmpl = format
+				if _, _, again := LegacyCode(fmt.Sprintf(format, "two words")); !again {
+					tmpl = format
+				}
 			}
 		}
 	}
