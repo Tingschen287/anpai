@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"golang.org/x/sys/unix"
 )
@@ -52,34 +53,61 @@ func nativeCmdline(pid int) ([]byte, error) {
 	return parseProcargs2(buf)
 }
 
+// maxProcArgc 是 argc 的上限：内核给整个参数加环境变量区的上限是 1 MiB（NCARGS），每个参数至少占一个指针 8 字节加一个 NUL，
+// 所以真实的 argc 到不了 1<<17。超过就当数据不可信。
+const maxProcArgc = 1 << 17
+
+// procargs2 里字符串区的对齐：内核让字符串区从 8 字节对齐的地址开始，而缓冲区的前 4 个字节是 argc，
+// 所以第一个参数（argv[0]）的偏移 ≡ 4 (mod 8)，可执行文件路径的结尾 NUL 与它之间补若干个 NUL（0～7 个）。
+const (
+	procargsAlign = 8
+	procargsBase  = 4
+)
+
 // parseProcargs2 解 kern.procargs2 的返回：int32 argc，可执行文件路径（NUL 结尾），若干 NUL 填充，
-// 然后是 argc 个以 NUL 结尾的参数，最后才是环境变量。只取参数。
+// 然后是 argc 个以 NUL 结尾的参数，最后才是环境变量。只取参数，环境变量一个字节都不带出来。
+//
+// 难点是 argv[0] 为空（或前几个参数为空）：空参数就是一个孤零零的 NUL，和填充分不开。把所有 NUL 当填充跳过，
+// 会吞掉空参数，于是 argc 个字符串多读走的是环境变量（审查 1 的反例：环境变量进了命令行）。
+// 做法：填充的长度由对齐决定（见 procargsAlign），超出对齐位置的那些 NUL 才是空参数；
+// 之后严格按 NUL 切，不再跳过空串；最多读 argc 个，不够就停（缓冲区被截断时也不会读进环境变量）。
 func parseProcargs2(buf []byte) ([]byte, error) {
 	if len(buf) < 4 {
 		return nil, errors.New("procargs2 too short")
 	}
 	argc := int(int32(binary.LittleEndian.Uint32(buf[:4])))
-	rest := buf[4:]
+	if argc < 0 || argc > maxProcArgc {
+		return nil, fmt.Errorf("procargs2 argc %d out of range", argc)
+	}
 	// 跳过可执行文件路径
-	i := bytes.IndexByte(rest, 0)
-	if i < 0 {
+	pathEnd := bytes.IndexByte(buf[4:], 0)
+	if pathEnd < 0 {
 		return nil, errors.New("procargs2 has no end of the executable path")
 	}
-	rest = rest[i:]
-	for len(rest) > 0 && rest[0] == 0 {
-		rest = rest[1:]
+	pathEnd += 4 // 路径结尾 NUL 的偏移
+	// 路径之后的这一串 NUL：对齐的填充，加上 argv[0] 起头那些空参数
+	runEnd := pathEnd + 1
+	for runEnd < len(buf) && buf[runEnd] == 0 {
+		runEnd++
 	}
-	var out []byte
-	for n := 0; n < argc && len(rest) > 0; n++ {
+	aligned := pathEnd + 1
+	for aligned%procargsAlign != procargsBase {
+		aligned++
+	}
+	start, empties := runEnd, 0
+	if runEnd > aligned {
+		start, empties = aligned, runEnd-aligned
+	}
+	empties = min(empties, argc)
+	out := bytes.Repeat([]byte{0}, empties)
+	rest := buf[start+empties:]
+	for n := empties; n < argc && len(rest) > 0; n++ {
 		j := bytes.IndexByte(rest, 0)
 		if j < 0 {
-			j = len(rest)
+			return nil, errors.New("procargs2 is truncated in the middle of an argument")
 		}
 		out = append(out, rest[:j]...)
 		out = append(out, 0)
-		if j >= len(rest) {
-			break
-		}
 		rest = rest[j+1:]
 	}
 	return out, nil
