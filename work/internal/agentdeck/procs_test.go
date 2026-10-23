@@ -22,7 +22,8 @@ func TestProcHelperSleep(t *testing.T) {
 // startHelper 用 argv0 作为 argv[0]、extra 作为多出来的参数，起一个会睡 60 秒的测试二进制副本。
 func startHelper(t *testing.T, argv0 string, extra ...string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestProcHelperSleep$"}, extra...)...)
+	// 「--」之后的都是位置参数：测试二进制不会因为不认识 --json 之类的参数而立刻退出
+	cmd := exec.Command(os.Args[0], append([]string{"-test.run=^TestProcHelperSleep$", "--"}, extra...)...)
 	cmd.Args[0] = argv0
 	cmd.Env = append(os.Environ(), "N067_PROC_HELPER=1")
 	if err := cmd.Start(); err != nil {
@@ -65,14 +66,19 @@ func TestNativeProcessTableSeesOurOwnProcess(t *testing.T) {
 	}
 }
 
-// NotifyDaemonRunning 用本平台的进程表找到 `agent-deck … notify-daemon`，没有这样的进程时回答 false。
+// NotifyDaemonRunning 用本平台的进程表找到 `agent-deck … notify-daemon`。本机可能本来就有真的 notify-daemon 在跑，
+// 所以不假设起点是 false：起点是 true 时只跳过「从无到有」那一半。
 func TestNotifyDaemonRunningOnTheNativeProcessTable(t *testing.T) {
 	old := procRoot
 	procRoot = ""
 	defer func() { procRoot = old }()
 	c := &Client{}
-	if running, err := c.NotifyDaemonRunning(context.Background()); err != nil || running {
-		t.Fatalf("没有 notify-daemon 时应回答 false：%v %v", running, err)
+	before, err := c.NotifyDaemonRunning(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before {
+		t.Skip("本机已经有真的 agent-deck notify-daemon 在跑，没法判断「起一个之后才认出来」")
 	}
 	startHelper(t, filepath.Join(t.TempDir(), "agent-deck"), "notify-daemon")
 	deadline := time.Now().Add(2 * time.Second)
@@ -91,14 +97,29 @@ func TestNotifyDaemonRunningOnTheNativeProcessTable(t *testing.T) {
 	}
 }
 
-// 名字像但参数不含 notify-daemon 的，不算。
+// 名字像但参数不含 notify-daemon 的，不算：起这样一个进程不改变答案（本机有没有真的 notify-daemon 都成立）。
 func TestNotifyDaemonRunningIgnoresOtherAgentDeckProcesses(t *testing.T) {
 	old := procRoot
 	procRoot = ""
 	defer func() { procRoot = old }()
-	startHelper(t, filepath.Join(t.TempDir(), "agent-deck"), "list", "--json")
-	time.Sleep(200 * time.Millisecond)
-	if running, err := (&Client{}).NotifyDaemonRunning(context.Background()); err != nil || running {
-		t.Fatalf("agent-deck list 不是 notify-daemon：%v %v", running, err)
+	c := &Client{}
+	before, err := c.NotifyDaemonRunning(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := startHelper(t, filepath.Join(t.TempDir(), "agent-deck"), "list", "--json")
+	deadline := time.Now().Add(2 * time.Second)
+	for { // 先确认进程表里真的有这个 agent-deck list 进程，再断言它不改变答案
+		if argv, ok := procArgv("", h.Process.Pid); ok && len(argv) > 0 && filepath.Base(argv[0]) == "agent-deck" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("进程表里读不到刚起的 agent-deck list 进程")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	after, err := c.NotifyDaemonRunning(context.Background())
+	if err != nil || after != before {
+		t.Fatalf("agent-deck list 不是 notify-daemon，不该改变答案：before=%v after=%v err=%v", before, after, err)
 	}
 }

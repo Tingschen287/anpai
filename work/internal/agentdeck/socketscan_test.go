@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // needTmux 没有 tmux 就跳过，并说清原因。
@@ -18,6 +20,13 @@ func needTmux(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("跳过：本机没有 tmux")
+	}
+	// 这组测试按 -L 名字在 tmux 的 socket 目录里起 server，扫描时还会探测目录里的每一个 socket。
+	// 用测试自己的短目录当 TMUX_TMPDIR，不碰 owner 真实的 /tmp/tmux-<uid>/（里面可能有 owner 自己的 default server）。
+	// 目录里的 tmux-<uid> 先建好并设成 0700（tmux 也是这么建的）：有 tmux 在跑过的机器上它本来就在（n067）
+	t.Setenv("TMUX_TMPDIR", testsock.Dir(t))
+	if err := os.MkdirAll(tmuxSocketDir(), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 
