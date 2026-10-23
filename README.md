@@ -19,7 +19,7 @@
 |---|---|
 | WSL 2 + Windows Terminal | 当前支持 |
 | 其他 Linux 终端 | 没有专门验证 |
-| macOS | 适配中（n067）：在 x86 macOS 15 + tmux 3.4 上编译、测试与隔离端到端都跑通；认调用者用 `LOCAL_PEERCRED`、`LOCAL_PEERPID` 和进程出生时间，比 Linux 的 `SO_PEERPIDFD` 弱一档，差异见 [`work/README.md`](work/README.md) |
+| macOS | 适配中（n067）：在 x86 macOS 15 + tmux 3.4 上编译、测试与隔离端到端都跑通（tmux 要带 `--enable-sixel` 才显示 Sixel logo，见 `work/README.md`）；认调用者用 `LOCAL_PEERCRED`、`LOCAL_PEERPID` 和进程出生时间，比 Linux 的 `SO_PEERPIDFD` 弱一档，差异见 [`work/README.md`](work/README.md) |
 | Windows 原生 | 不支持 |
 
 ## 依赖
