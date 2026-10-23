@@ -2328,6 +2328,7 @@ var enViewKey = map[string]i18n.Key{
 	"settings-1":       "project.tiers",
 	"settings-2":       "agents.add",
 	"settings-3":       "trust.title",
+	"settings-4":       "help.lang", // 通用页（段 3 返工）
 	"sub-agent":        "agent.keys",
 	"sub-add-loading":  "add.loading",
 	"sub-add":          "add.title",
@@ -2423,7 +2424,7 @@ func renderStage1(t *testing.T, english bool) {
 
 	m, api := n057Fixture()
 	m.width, m.height = 100, 40
-	for _, p := range []page{pageProject, pageAgents, pageTrust} {
+	for _, p := range []page{pageProject, pageAgents, pageTrust, pageGeneral} { // 段 3 返工：加了「通用」页
 		if p == pageTrust {
 			m.trust = []deckstore.TrustGrant{{Project: "demo", Tool: "codex"}}
 		}

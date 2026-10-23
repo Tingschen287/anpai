@@ -51,7 +51,7 @@ func TestN060S3ValidLang(t *testing.T) {
 
 // 新增的文字：中英两套都有，英文没有汉字。
 func TestN060S3NewTextsExistInBothLanguages(t *testing.T) {
-	for _, k := range []Key{"settings.lang.label", "settings.lang.zh", "settings.lang.en", "help.lang", "legacy.label", "err.deckstore.settingsvalidate.17"} {
+	for _, k := range []Key{"settings.lang.label", "settings.lang.zh", "settings.lang.en", "help.lang", "legacy.label", "err.deckstore.settingsvalidate.17", "page.general", "keys.general"} {
 		z, zok := TextZH(k)
 		e, eok := TextEN(k)
 		if !zok || !eok || z == "" || e == "" {

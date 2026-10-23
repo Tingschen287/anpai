@@ -107,7 +107,7 @@ const (
 	rowTrust                    // 一条记住的授权
 	rowGlobal                   // 全局可用的一个 agent（⏎ 打开编辑）
 	rowAddAgent                 // 「加入本机的 agent」
-	rowLang                     // 「界面语言」（n060 段 3）：中文 / English，空格或 ⏎ 切换
+	rowLang                     // 「界面语言」（n060 段 3）：在「通用」页，中文 / English，空格或 ⏎ 切换
 )
 
 type row struct {
@@ -124,10 +124,11 @@ const (
 	pageProject page = iota // 这个项目用哪些 agent、主 agent、三档模型
 	pageAgents              // 全局可用的 agent 与它们的模型
 	pageTrust               // 已记住的 Codex 授权
+	pageGeneral             // 通用（n060 段 3 返工：界面语言）。加在最后，前三页的顺序与数字键不变
 	pageCount
 )
 
-var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust"}
+var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust", "page.general"}
 
 // TextKeys 返回页签文字键。tabBar 用下标取，调用处不是字符串字面量。
 func TextKeys() []string {
@@ -255,11 +256,13 @@ func (m *Settings) rows() []row {
 		for _, a := range m.set.Agents {
 			rs = append(rs, row{kind: rowGlobal, agent: a.ID})
 		}
-		rs = append(rs, row{kind: rowAddAgent}, row{kind: rowLang})
+		rs = append(rs, row{kind: rowAddAgent})
 	case pageTrust:
 		for _, g := range m.trust {
 			rs = append(rs, row{kind: rowTrust, trust: g})
 		}
+	case pageGeneral:
+		rs = append(rs, row{kind: rowLang})
 	}
 	return rs
 }
@@ -628,7 +631,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		m.switchPage(m.page + 1)
 	case "shift+tab":
 		m.switchPage(m.page - 1)
-	case "1", "2", "3":
+	case "1", "2", "3", "4":
 		m.switchPage(page(k[0] - '1'))
 	case "up", "k":
 		m.cur = max(0, m.cur-1)
@@ -908,7 +911,7 @@ func (m *Settings) hl(s string) string {
 	return s + reset
 }
 
-// tabBar 是顶部：标题与三个页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
+// tabBar 是顶部：标题与各页页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
 func (m *Settings) tabBar() string {
 	var tabs []string
 	for i := range pageText {
@@ -970,6 +973,8 @@ func (m *Settings) View() string {
 		m.agentsPage(&b, row, cont)
 	case pageTrust:
 		m.trustPage(&b, row, cont)
+	case pageGeneral:
+		m.generalPage(&b, row)
 	}
 	keep := 1
 	if m.page == pageProject && m.project() != nil {
@@ -1070,11 +1075,15 @@ func (m *Settings) agentsPage(b *strings.Builder, row, cont func(string) string)
 			b.WriteString(cont(indent+l) + "\n")
 		}
 	}
-	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n\n")
+	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n")
+}
+
+// generalPage 是「通用」页（n060 段 3 返工，owner 定：界面语言单独一页）：现在只有界面语言一行。
+func (m *Settings) generalPage(b *strings.Builder, row func(string) string) {
 	b.WriteString(row(m.langRow()) + "\n")
 }
 
-// uiLang 是界面语言一行此刻选中的：owner 选过的；没选过就是此刻界面正在用的（第一次按系统语言）。
+// uiLang 是界面语言一行此刻选中的：owner 选过的；没选过（升级的老用户）就是此刻界面正在用的（deckd 说的，老用户是中文）。
 func (m *Settings) uiLang() string {
 	if i18n.ValidLang(m.set.UILang) {
 		return m.set.UILang
@@ -1254,6 +1263,8 @@ func (m *Settings) pageKeys() string {
 		return T("keys.project")
 	case pageAgents:
 		return T("keys.agents")
+	case pageGeneral:
+		return T("keys.general")
 	}
 	return T("keys.trust")
 }

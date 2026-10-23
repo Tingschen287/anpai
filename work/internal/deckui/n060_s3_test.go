@@ -35,20 +35,20 @@ func hanIn(s string) (rune, bool) {
 
 func goLangRow(t *testing.T, m *Settings) {
 	t.Helper()
-	m.switchPage(pageAgents)
+	m.switchPage(pageGeneral)
 	m.cur = rowIdx(t, m, rowLang, "", "")
 }
 
-// 在全局 agent 页最后（加入行之后）；中文界面写「界面语言  ● 中文  ○ English」，亮着的是当前语言。
-func TestN060S3LanguageRowIsOnTheGlobalAgentPage(t *testing.T) {
+// 在单独一页「通用」上（owner 2026-10-20 定）；中文界面写「界面语言  ● 中文  ○ English」，亮着的是当前语言。
+func TestN060S3LanguageRowIsOnTheGeneralPage(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	i18n.SetLang(i18n.ZH)
 	m, _ := n057Fixture()
 	m.width, m.height = 100, 40
 	goLangRow(t, m)
 	rs := m.rows()
-	if rs[len(rs)-1].kind != rowLang || rs[len(rs)-2].kind != rowAddAgent {
-		t.Fatalf("语言行应在加入行之后、是最后一行：%+v", rs)
+	if len(rs) != 1 || rs[0].kind != rowLang || m.page != pageGeneral {
+		t.Fatalf("通用页只有语言一行：%+v", rs)
 	}
 	v := plainView(m)
 	for _, want := range []string{"界面语言", "● 中文", "○ English", "空格或 ⏎ 在中文与 English 之间切换"} {
@@ -64,7 +64,7 @@ func TestN060S3LanguageRowIsOnTheGlobalAgentPage(t *testing.T) {
 		t.Fatalf("英文界面没选过语言：\n%s", v)
 	}
 	// 其他页没有语言行
-	for _, p := range []page{pageProject, pageTrust} {
+	for _, p := range []page{pageProject, pageAgents, pageTrust} {
 		m2.switchPage(p)
 		for _, r := range m2.rows() {
 			if r.kind == rowLang {
@@ -94,13 +94,13 @@ func TestN060S3ToggleSavesAndSwitchesImmediately(t *testing.T) {
 		t.Fatalf("保存状态：dirty=%v err=%q saved=%v", m.dirty, m.saveErr, m.saved)
 	}
 	// 设置页自己整页都是英文，没有汉字；三页都查
-	for _, p := range []page{pageProject, pageAgents, pageTrust} {
+	for _, p := range []page{pageProject, pageAgents, pageTrust, pageGeneral} {
 		m.switchPage(p)
 		if r, bad := hanIn(plainView(m)); bad {
 			t.Errorf("切到英文后，设置页 %d 还有汉字 %q：\n%s", p, r, plainView(m))
 		}
 	}
-	m.switchPage(pageAgents)
+	m.switchPage(pageGeneral)
 	m.cur = rowIdx(t, m, rowLang, "", "")
 	if v := plainView(m); !strings.Contains(v, "Language") || !strings.Contains(v, "● English") || !strings.Contains(v, "✓ Saved") {
 		t.Fatalf("英文页：\n%s", v)
