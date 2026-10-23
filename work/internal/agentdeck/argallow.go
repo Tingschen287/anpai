@@ -305,7 +305,11 @@ func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
 		}
 		return true, nil
 	}
-	if err := checkBypassFlagsGlued(append(argv, strings.Join(argv, " "))...); err != nil {
+	// 逐字的绕过参数：每个元素和连成一串的那份都查；连串只查最后一个元素（checkGluedTail）
+	if err := checkBypassFlags(append(argv[:len(argv):len(argv)], strings.Join(argv, " "))...); err != nil {
+		return false, i18n.E("err.agentdeck.procargsok.2", err)
+	}
+	if err := checkGluedTail(argv); err != nil {
 		return false, i18n.E("err.agentdeck.procargsok.2", err)
 	}
 	return false, nil
@@ -314,43 +318,65 @@ func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
 // glueEnvRe：绕过参数后面紧跟的「环境变量样式文字」：变量名（字母或下划线开头，后接字母数字下划线）加等号，例如 PATH=、XSYNTHETIC_SECRET=。
 var glueEnvRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
-// checkBypassFlagsGlued 是 checkBypassFlags 加上「连串」：目标进程改写自己参数区末尾的 NUL 时，最后一个参数可能连上环境变量
+// checkGluedTail 认「连串」：目标进程改写自己参数区末尾的 NUL 时，最后一个参数会连上紧跟其后的环境变量
 // （--dangerously-skip-permissionsPATH=/usr/bin；Linux 的 /proc/<pid>/cmdline 同样，见 procs_darwin.go 的 parseProcargs2）。
-// 逐字相等认不出这种串，这里再认：以某个已知绕过参数（BypassFlags）开头、后面紧跟 glueEnvRe 的词；
-// 以及「参数 + 取值」形式的绕过（bypassValues）里，取值以被拒的值开头、后面紧跟 glueEnvRe 的词。
+// 逐字相等的 checkBypassFlags 认不出这种串，这里再认。
+//
+// 范围（owner 选定，macOS 与 Linux 相同）：连串只会出现在 argv 的最后一个元素——被改写的是参数区末尾的那个 NUL，
+// 前面的元素各有自己的结尾 NUL。所以只对最后一个 argv 元素做：
+//   - 最后一个元素里的词（按空白切开、转小写，只看词的开头）以某个已知绕过参数（BypassFlags）开头、后面紧跟 glueEnvRe；
+//   - 最后一个元素里的 --flag=badKEY=…（bypassValues：取值以被拒的值开头、后面紧跟 glueEnvRe），以及同一元素里「参数名 空白 badKEY=…」；
+//   - 倒数第二个元素恰好是 bypassValues 里的参数名、最后一个元素的第一个词是 badKEY=…。
+//
+// 原有逐字相等的 checkBypassFlags（含 argv 连成一串的那份）不变，对每个位置都查；本函数不重复它。
 //
 // 判定规则（只放宽匹配，不放宽拒绝）：
-//   - 词按空白切开、转小写，只看词的开头：绕过参数必须是词的开头，/opt/--dangerously-skip-permissionsPATH=x 这样中间出现的不算；
+//   - 绕过参数必须是词的开头，/opt/--dangerously-skip-permissionsPATH=x 这样中间出现的不算；
 //   - 紧跟的必须是「变量名=」：--dangerously-skip-permissions-docs、--dangerously-skip-permissionsfoo（没有等号）、
 //     --dangerously-skip-permissions-x=1（横线不是变量名的字符）、--dangerously-skip-permissions2=1（变量名不能数字开头）都按原语义处理，不拒；
 //   - 只用在非 CLI 进程的检查上（procArgsOK）。CLI 进程仍按参数白名单查，不经过这里；CheckNoBypass 的启动前检查也不经过这里。
-func checkBypassFlagsGlued(fields ...string) error {
-	if err := checkBypassFlags(fields...); err != nil {
-		return err
+//
+// 保守的代价（两个平台相同，owner 接受）：进程没改写过内存、只是最后一个参数字面上就是这样的串
+// （例如 printf '%s\n' --yoloMODEL=demo 的最后一个参数）也会被拒绝；同样的字面串放在非末尾位置则放行。
+// 字节上看，改写过的连串和这种字面串分不开，所以不区分。
+func checkGluedTail(argv []string) error {
+	if len(argv) == 0 {
+		return nil
 	}
-	for _, f := range fields {
-		words := strings.Fields(f)
-		for i, w := range words {
-			lw := strings.ToLower(w)
-			for _, b := range BypassFlags {
-				if rest, ok := strings.CutPrefix(lw, b); ok && glueEnvRe.MatchString(rest) {
-					return i18n.E("err.agentdeck.checkbypassflags.1", w)
-				}
+	words := strings.Fields(argv[len(argv)-1])
+	for i, w := range words {
+		lw := strings.ToLower(w)
+		for _, b := range BypassFlags {
+			if rest, ok := strings.CutPrefix(lw, b); ok && glueEnvRe.MatchString(rest) {
+				return i18n.E("err.agentdeck.checkbypassflags.1", w)
 			}
-			name, value, hasValue := strings.Cut(lw, "=")
-			bad, ok := bypassValues[name]
-			if !ok {
-				continue
-			}
-			if !hasValue && i+1 < len(words) {
-				value, hasValue = strings.ToLower(words[i+1]), true
-			}
-			if hasValue {
-				if rest, ok := strings.CutPrefix(strings.Trim(value, `"'`), bad); ok && glueEnvRe.MatchString(rest) {
-					return i18n.E("err.agentdeck.checkbypassflags.2", w, value)
-				}
+		}
+		name, value, hasValue := strings.Cut(lw, "=")
+		bad, ok := bypassValues[name]
+		if !ok {
+			continue
+		}
+		if !hasValue && i+1 < len(words) {
+			value, hasValue = strings.ToLower(words[i+1]), true
+		}
+		if hasValue && gluedValue(value, bad) {
+			return i18n.E("err.agentdeck.checkbypassflags.2", w, value)
+		}
+	}
+	// 参数名独占倒数第二个元素，取值在最后一个元素里
+	if len(argv) >= 2 && len(words) > 0 {
+		prev := strings.ToLower(strings.TrimSpace(argv[len(argv)-2]))
+		if bad, ok := bypassValues[prev]; ok {
+			if value := strings.ToLower(words[0]); gluedValue(value, bad) {
+				return i18n.E("err.agentdeck.checkbypassflags.2", prev, value)
 			}
 		}
 	}
 	return nil
+}
+
+// gluedValue：取值（去掉成对引号后）以被拒的值开头、后面紧跟 glueEnvRe。
+func gluedValue(value, bad string) bool {
+	rest, ok := strings.CutPrefix(strings.Trim(value, `"'`), bad)
+	return ok && glueEnvRe.MatchString(rest)
 }

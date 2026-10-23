@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// n067 返工 2：非 CLI 进程的绕过参数检查认出「绕过参数连着环境变量样式文字」的串（argallow.go checkBypassFlagsGlued）。
+// n067 返工 2：非 CLI 进程的绕过参数检查认出「绕过参数连着环境变量样式文字」的串（argallow.go checkGluedTail；返工 3 起只查最后一个 argv 元素，见 argallow_fix3_test.go）。
 // 经 procArgsOK 走 /proc 形状的假目录测，两个平台都能跑。
 
 func fakeProcWith(t *testing.T, argv ...string) string {
