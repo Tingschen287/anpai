@@ -3,7 +3,6 @@ package agentdeck
 import (
 	"context"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -269,7 +268,7 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 	if len(queue) == 0 {
 		return false, i18n.E("err.agentdeck.checksessiononce.1", tmuxSession)
 	}
-	children := procChildren("/proc")
+	children := procChildren("")
 	seen := map[int]bool{}
 	found := false
 	for len(queue) > 0 {
@@ -279,7 +278,7 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 			continue
 		}
 		seen[pid] = true
-		ok, err := procArgsOK("/proc", pid, want)
+		ok, err := procArgsOK("", pid, want)
 		if err != nil {
 			return false, i18n.E("err.agentdeck.checksessiononce.2", tmuxSession, pid, err)
 		}
@@ -290,12 +289,12 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 }
 
 // procArgsOK 核对一个进程；返回它是不是 CLI 进程。进程已经退出（读不到）不算错。
+// proc 为空用本平台的进程表（Linux /proc，macOS sysctl kern.procargs2），否则读那个 /proc 形状的目录（测试用）。
 func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
-	data, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(pid), "cmdline"))
-	if err != nil || len(data) == 0 {
+	argv, ok := procArgv(proc, pid)
+	if !ok {
 		return false, nil
 	}
-	argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(data)), "\x00"), "\x00") // 进程命令行是外部原文（返工 4）
 	if args, ok := cliArgs(argv, want); ok {
 		if err := CheckCLIArgs(args, want); err != nil {
 			return true, i18n.E("err.agentdeck.procargsok.1", filepath.Base(argv[0]), err)

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 type fakeSource []Pane
@@ -93,7 +95,7 @@ func TestPaneListingFailureIsAnError(t *testing.T) {
 
 // SO_PEERCRED：同进程拨号，对端 pid 就是自己。
 func TestPeerPIDOverRealUnixSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "s.sock")
+	sock := testsock.Path(t, "s.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

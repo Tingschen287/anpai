@@ -1,36 +1,13 @@
 package termprobe
 
 import (
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"golang.org/x/sys/unix"
 )
-
-// openPty 开一对 pty（主端、从端），不引新依赖。
-func openPty() (*os.File, *os.File, error) {
-	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := unix.IoctlSetPointerInt(int(m.Fd()), unix.TIOCSPTLCK, 0); err != nil {
-		m.Close()
-		return nil, nil, err
-	}
-	n, err := unix.IoctlGetInt(int(m.Fd()), unix.TIOCGPTN)
-	if err != nil {
-		m.Close()
-		return nil, nil, err
-	}
-	s, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		m.Close()
-		return nil, nil, err
-	}
-	return m, s, nil
-}
 
 // Windows Terminal 的真实回答（n052 探针，owner 机器上记录）。
 const wtAnswer = "\x1b[6;20;10t\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c"
@@ -140,5 +117,36 @@ func TestQueryOverPty(t *testing.T) {
 	f, _ := os.CreateTemp(t.TempDir(), "x")
 	if r := Query(f, 100*time.Millisecond); r.DA1 {
 		t.Fatal("文件不是终端")
+	}
+}
+
+// flushInput 真的清掉终端输入缓冲：迟到的回答不能留着被 tmux 当成按键（n056 自查；n067 起 macOS 用 TIOCFLUSH）。
+func TestFlushInputDropsPendingBytes(t *testing.T) {
+	ptmx, tty, err := openPty()
+	if err != nil {
+		t.Skip("开不了 pty：", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	fd := int(tty.Fd())
+	old, err := term.MakeRaw(uintptr(fd)) // 原始模式：写进去的字节立刻可读，不等换行
+	if err != nil {
+		t.Skip("设不了原始模式：", err)
+	}
+	defer term.Restore(uintptr(fd), old)
+	if _, err := ptmx.Write([]byte("late-answer")); err != nil {
+		t.Fatal(err)
+	}
+	readable := func() bool {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, _ := unix.Poll(fds, 200)
+		return n > 0 && fds[0].Revents&unix.POLLIN != 0
+	}
+	if !readable() {
+		t.Fatal("前提不成立：写进主端的字节在从端读不到")
+	}
+	flushInput(fd)
+	if readable() {
+		t.Fatal("flushInput 之后输入缓冲里还有字节")
 	}
 }

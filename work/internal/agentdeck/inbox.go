@@ -5,9 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -137,32 +135,29 @@ func (c *Client) DeliverAnswer(ctx context.Context, p lease.Permit, rec InboxRec
 	return c.SendMessage(ctx, p, rec.ChildSessionID, message)
 }
 
-// procRoot 是进程表的位置，测试里换成假目录。
-var procRoot = "/proc"
+// procRoot 是进程表的位置：空表示本平台的进程表（Linux /proc，macOS sysctl），测试里换成假的 /proc 目录。
+var procRoot = ""
 
 // NotifyDaemonRunning 看本机进程表里有没有 upstream agent-deck 的 notify-daemon 在跑。
 //
 // 为什么光有 writer-status 不够：上游只看心跳文件新旧，90 秒内都算在跑
 // （internal/session/notify_heartbeat.go:31），daemon 刚退出的那 90 秒里它照样答 running。
-// 这里读 /proc 下每个进程的 cmdline，找「程序名含 agent-deck、参数里有 notify-daemon」的进程。
-// 只读文件，不执行任何命令。读不了进程表时返回错误，调用方据此告警，不当作在跑。
+// 这里读进程表里每个进程的命令行（Linux 读 /proc/<pid>/cmdline，macOS 读 sysctl kern.procargs2），
+// 找「程序名含 agent-deck、参数里有 notify-daemon」的进程。
+// 只读，不执行任何命令。读不了进程表时返回错误，调用方据此告警，不当作在跑。
 func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procPIDs(procRoot)
 	if err != nil {
-		return false, i18n.E("err.agentdeck.clientnotifydaemonrunning.1", procRoot, err)
+		return false, i18n.E("err.agentdeck.clientnotifydaemonrunning.1", procTableName(procRoot), err)
 	}
-	for _, e := range entries {
+	for _, pid := range pids {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		if _, err := strconv.Atoi(e.Name()); err != nil {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
-		if err != nil || len(raw) == 0 {
+		argv, ok := procArgv(procRoot, pid)
+		if !ok {
 			continue // 进程已经没了，或是内核线程
 		}
-		argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(raw)), "\x00"), "\x00")
 		if !strings.Contains(filepath.Base(argv[0]), "agent-deck") {
 			continue
 		}
