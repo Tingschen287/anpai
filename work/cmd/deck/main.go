@@ -68,7 +68,7 @@ func main() {
 		projectCmd(dirs, os.Args[2:])
 	case "whoami":
 		var out map[string]any
-		if err := deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/whoami", &out); err != nil {
+		if err := deckclient.New(socketOrFail(dirs)).Get(context.Background(), "/v1/whoami", &out); err != nil {
 			fail("%v", err)
 		}
 		json.NewEncoder(os.Stdout).Encode(out)
@@ -93,6 +93,19 @@ func defaultLayoutSocket() string {
 	if fit, err := sockpath.Fit(p); err == nil {
 		return fit
 	}
+	return p // 退路走不通：原因由 socketProblem 重新问一次 Fit 说出来
+}
+
+// socketOf 是 deckd 的 socket 路径；超长而退路又走不通时把拒绝的原因原样返回（目录被别人占着、不是本用户的、标记对不上……），
+// 不退回超长路径去连然后只看到一句 invalid argument（n067）。
+func socketOf(dirs deckstore.Dirs) (string, error) { return deckd.SocketPathE(dirs) }
+
+// socketOrFail：命令行入口用，拿不到就带着原因退出。
+func socketOrFail(dirs deckstore.Dirs) string {
+	p, err := socketOf(dirs)
+	if err != nil {
+		fail("%v", err)
+	}
 	return p
 }
 
@@ -100,6 +113,12 @@ func defaultLayoutSocket() string {
 func socketProblem(layoutSock, agentSock string) error {
 	for _, s := range [][2]string{{"layout-socket", layoutSock}, {"agent-socket", agentSock}} {
 		if err := sockpath.Check(s[1]); err != nil {
+			// 布局 tmux 的 socket 能退到短路径：退不成时，拒绝的原因（目录被占、属主不对、标记对不上……）原样带出来
+			if s[0] == "layout-socket" {
+				if _, ferr := sockpath.Fit(s[1]); ferr != nil {
+					return fmt.Errorf("-%s：%w", s[0], ferr)
+				}
+			}
 			return fmt.Errorf("-%s：%v。请把 TMUX_TMPDIR 设成更短的目录（tmux 的 socket 放在 $TMUX_TMPDIR/tmux-<uid>/ 下）", s[0], err)
 		}
 	}
@@ -135,7 +154,7 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	defer stop()
 	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc,
 		UpstreamAddr: *upstream, UpstreamToken: config.Token(), SystemLang: daemonSystemLang(*sysLang, os.Getenv)}
-	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", deckd.SocketPath(dirs), *profile)
+	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", socketOrFail(dirs), *profile)
 	if err := deckd.Run(ctx, cfg, deckd.NewTmuxCenter(*layout, *agent)); err != nil {
 		fail("%v", err)
 	}
@@ -182,7 +201,7 @@ func fail(format string, a ...any) {
 // uiClient 建界面进程用的 deckd 客户端，并先对一次界面语言。
 func uiClient(dirs deckstore.Dirs) *deckclient.Client {
 	i18n.SetLang(i18n.SystemLang(os.Getenv))
-	c := deckclient.NewUI(deckd.SocketPath(dirs)).FollowLang()
+	c := deckclient.NewUI(socketOrFail(dirs)).FollowLang()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	c.SyncLang(ctx) // 连不上就保持按环境变量猜的；循环里每次请求还会再对

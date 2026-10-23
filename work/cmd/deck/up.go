@@ -193,7 +193,11 @@ func buildLayout(dirs deckstore.Dirs, spec layout.Spec) error {
 // 接管中的会话按 n050 的重启恢复处理（保持接管、自动派送暂停，等 owner 交还）。
 func ensureDeckd(dirs deckstore.Dirs, spec layout.Spec, upstream string) error {
 	var health map[string]any
-	if deckclient.New(deckd.SocketPath(dirs)).Get(context.Background(), "/v1/health", &health) != nil {
+	sock, err := socketOf(dirs)
+	if err != nil {
+		return err
+	}
+	if deckclient.New(sock).Get(context.Background(), "/v1/health", &health) != nil {
 		if err := agentdeck.LayoutBackgroundWindow(context.Background(), spec.LayoutSocket, "deck", "deckd", deckdCommand(spec, upstream, os.Getenv)); err != nil {
 			return fmt.Errorf("起 deckd 失败：%w", err)
 		}

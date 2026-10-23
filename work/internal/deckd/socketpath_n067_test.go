@@ -90,3 +90,20 @@ func TestRealDaemonWithTooLongStateDirListensOnTheFallbackSocket(t *testing.T) {
 		t.Errorf("deckd 退出出错：%v", err)
 	}
 }
+
+// 退路目录被别人占着：SocketPathE 与 Run 都带着原因报错，不起服务、不拿超长路径去 bind。
+func TestSocketPathEAndRunReportWhyTheFallbackWasRefused(t *testing.T) {
+	root := testsock.Dir(t)
+	defer sockpath.SetFallbackRoot(root)()
+	if err := os.Symlink(testsock.Dir(t), sockpath.FallbackDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "xdgstate"))
+	cfg := Config{Dirs: deckstore.Dirs{Config: filepath.Join(root, "cfg"), State: filepath.Join(root, strings.Repeat("s", sockpath.Max), "state")}}
+	if p, err := SocketPathE(cfg.Dirs); err == nil || !strings.Contains(err.Error(), "不是目录") {
+		t.Fatalf("SocketPathE 应带着原因报错：%q %v", p, err)
+	}
+	if err := Run(context.Background(), cfg, nil); err == nil || !strings.Contains(err.Error(), "不是目录") {
+		t.Fatalf("Run 应把原因原样传出来：%v", err)
+	}
+}

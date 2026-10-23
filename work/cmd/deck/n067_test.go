@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 	"github.com/Tingschen287/terminal-deck/work/internal/sockpath"
@@ -53,5 +54,29 @@ func TestDeckdCommandCarriesTheProjectctlPython(t *testing.T) {
 	}
 	if !strings.HasPrefix(with, plain) {
 		t.Fatalf("其余部分不变：\n%s\n%s", plain, with)
+	}
+}
+
+// 退路目录被别人占着（这里是一条软链）：拒绝的原因要原样传到 owner 面前，不能退回超长路径去连、只看到 invalid argument。
+func TestSocketRefusalReasonReachesTheOwner(t *testing.T) {
+	root := testsock.Dir(t)
+	defer sockpath.SetFallbackRoot(root)()
+	if err := os.Symlink(testsock.Dir(t), sockpath.FallbackDir()); err != nil {
+		t.Fatal(err)
+	}
+	// deckd 的 socket：状态目录超长
+	dirs := deckstore.Dirs{State: filepath.Join(root, strings.Repeat("s", sockpath.Max))}
+	if p, err := socketOf(dirs); err == nil || !strings.Contains(err.Error(), "不是目录") {
+		t.Fatalf("deckd 的 socket：退路被占应带着原因报错：%q %v", p, err)
+	}
+	spec := layout.Spec{Deck: "/opt/deck", LayoutSocket: "/tmp/l", AgentSocket: "/tmp/a"}
+	if err := ensureDeckd(dirs, spec, ""); err == nil || !strings.Contains(err.Error(), "不是目录") {
+		t.Fatalf("ensureDeckd 应把原因传出来：%v", err)
+	}
+	// 布局 tmux 的 socket：TMUX_TMPDIR 超长
+	t.Setenv("TMUX_TMPDIR", filepath.Join(root, strings.Repeat("t", sockpath.Max)))
+	err := socketProblem(defaultLayoutSocket(), tmuxSocket("default"))
+	if err == nil || !strings.Contains(err.Error(), "-layout-socket") || !strings.Contains(err.Error(), "不是目录") {
+		t.Fatalf("布局 socket 的退路被占应带着原因：%v", err)
 	}
 }

@@ -24,7 +24,7 @@ import (
 
 // SocketPath 是 deckd 的 socket 路径：状态目录下的 deckd.sock；放不下（macOS 上限 104 字节）就退到
 // /tmp/deck-<uid>/<路径哈希>/deckd.sock，同一个状态目录永远得到同一个路径（n067）。
-// 退路也走不通时返回原路径，由 SocketPathE 或后面的 bind 报错。
+// 退路也走不通时返回原路径，丢掉拒绝的原因（只有 bind 时那句 invalid argument）——要把原因告诉 owner 的地方用 SocketPathE。
 func SocketPath(d deckstore.Dirs) string {
 	p, err := SocketPathE(d)
 	if err != nil {

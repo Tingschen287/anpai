@@ -36,7 +36,7 @@ func agentCmd(dirs deckstore.Dirs, args []string) {
 	if len(args) < 1 {
 		agentUsage()
 	}
-	c := deckclient.New(deckd.SocketPath(dirs))
+	c := deckclient.New(socketOrFail(dirs))
 	ctx := context.Background()
 	sub, rest := args[0], args[1:]
 	var out any
@@ -279,7 +279,7 @@ func reportsCmd(dirs deckstore.Dirs, args []string) {
 	project := fs.String("project", "", "只送这个项目的（默认全部）")
 	fs.Parse(args[1:])
 	var out any
-	c := deckclient.New(deckd.SocketPath(dirs)).WithTimeout(deckclient.LongTimeout)
+	c := deckclient.New(socketOrFail(dirs)).WithTimeout(deckclient.LongTimeout)
 	if err := c.Do(context.Background(), "POST", "/v1/reports/deliver-now", map[string]string{"project": *project}, &out); err != nil {
 		fail("%v", err)
 	}
@@ -300,7 +300,7 @@ func projectCmd(dirs deckstore.Dirs, args []string) {
 	agents := fs.String("agents", "", "选用的 agent，逗号分隔（默认只有主 agent）")
 	models := fs.String("model", "", "档位=模型，逗号分隔（默认取主 agent 在该档位的第一个模型）")
 	fs.Parse(args[1:])
-	c := deckclient.New(deckd.SocketPath(dirs))
+	c := deckclient.New(socketOrFail(dirs))
 	ctx := context.Background()
 	var set deckstore.Settings
 	if err := c.Get(ctx, "/v1/settings", &set); err != nil {
