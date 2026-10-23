@@ -25,13 +25,14 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
+	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
 	"github.com/Tingschen287/terminal-deck/work/internal/termprobe"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
 // socketFlags 是布局与 agent-deck 两个 tmux server 的 socket 参数（deck up 传给每个窗格里的子命令）。
 func socketFlags(fs *flag.FlagSet) (layoutSock, agentSock *string) {
-	return fs.String("layout-socket", tmuxSocket("deck"), "布局 tmux server 的 socket"),
+	return fs.String("layout-socket", defaultLayoutSocket(), "布局 tmux server 的 socket"),
 		fs.String("agent-socket", tmuxSocket("default"), "agent-deck tmux server 的 socket")
 }
 
@@ -55,7 +56,7 @@ func keepPixels(layoutSock string, cellW, cellH int) func() {
 		return func() {}
 	}
 	fd := int(os.Stdin.Fd())
-	tty, _ := os.Readlink("/proc/self/fd/0")
+	tty := stdinTTY()
 	winch := make(chan os.Signal, 4)
 	signal.Notify(winch, syscall.SIGWINCH)
 	done := make(chan struct{})
@@ -93,6 +94,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	graphics := fs.String("graphics", os.Getenv("DECK_GRAPHICS"), "logo 画法：sixel、blocks、none；留空自动判断（问终端：支持 sixel 且知道格子像素用 sixel，否则用字母徽章）")
 	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（会话运行状态）；留空则 deckd 用 agent-deck list --json 读（n055，默认）")
 	fs.Parse(args)
+	checkSockets(*layoutSock, *agentSock)
 	self, err := os.Executable()
 	if err != nil {
 		fail("找不到 deck 自己的路径：%v", err)
@@ -207,6 +209,10 @@ func deckdCommand(spec layout.Spec, upstream string, getenv func(string) string)
 		"-system-lang", i18n.SystemLang(getenv)}
 	if upstream != "" {
 		d = append(d, "-upstream", layout.Quote(upstream))
+	}
+	// 同系统语言：布局 tmux 后台窗口里的环境可能比 owner 现在的旧，指定的 Python 解释器要显式带过去（n067）
+	if py := getenv(projectctl.EnvPython); py != "" {
+		d = append(d, "-projectctl-python", layout.Quote(py))
 	}
 	return strings.Join(d, " ")
 }

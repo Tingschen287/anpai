@@ -32,6 +32,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/sockpath"
 )
 
 func main() {
@@ -85,16 +86,47 @@ func tmuxSocket(name string) string {
 	return filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()), name)
 }
 
+// defaultLayoutSocket 是布局 tmux server 的默认 socket：tmux 约定的位置；放不下 sun_path（macOS 104 字节）
+// 就退到 /tmp/deck-<uid>/ 下的短路径（n067）。布局 server 是 deck 自己起的，用 -S 指定路径，所以可以挪。
+func defaultLayoutSocket() string {
+	p := tmuxSocket("deck")
+	if fit, err := sockpath.Fit(p); err == nil {
+		return fit
+	}
+	return p
+}
+
+// socketProblem 核对两个 tmux socket 放得下，放不下返回说清楚的错误；放得下返回 nil。
+func socketProblem(layoutSock, agentSock string) error {
+	for _, s := range [][2]string{{"layout-socket", layoutSock}, {"agent-socket", agentSock}} {
+		if err := sockpath.Check(s[1]); err != nil {
+			return fmt.Errorf("-%s：%v。请把 TMUX_TMPDIR 设成更短的目录（tmux 的 socket 放在 $TMUX_TMPDIR/tmux-<uid>/ 下）", s[0], err)
+		}
+	}
+	return nil
+}
+
+// checkSockets 在起服务之前核对两个 tmux socket 放得下：放不下 bind 只会报 invalid argument。
+// agent-deck 的 tmux server 用 tmux 自己的默认位置，deck 挪不了它，只能请 owner 把 TMUX_TMPDIR 设短。
+func checkSockets(layoutSock, agentSock string) {
+	if err := socketProblem(layoutSock, agentSock); err != nil {
+		fail("%v", err)
+	}
+}
+
 func daemon(dirs deckstore.Dirs, args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	profile := fs.String("profile", "deck", "deck 使用的 agent-deck profile")
-	layout := fs.String("layout-socket", tmuxSocket("deck"), "布局 tmux server 的 socket")
+	layout := fs.String("layout-socket", defaultLayoutSocket(), "布局 tmux server 的 socket")
 	agent := fs.String("agent-socket", tmuxSocket("default"), "agent-deck tmux server 的 socket")
 	dash := fs.String("dashboard", "http://127.0.0.1:8899", "Token 看板地址")
 	script := fs.String("projectctl", "", "Graph 控制器脚本路径，留空按工作区布局查找")
 	upstream := fs.String("upstream", os.Getenv("DECK_AGENTDECK_ADDR"), "agent-deck headless 服务地址（读会话运行状态）；留空则用 agent-deck list --json 读（n055，默认）")
+	pyFlag := fs.String("projectctl-python", os.Getenv(projectctl.EnvPython), "跑 projectctl 用的 Python 解释器（要 3.11 及以上）；留空则取 PATH 上第一个 3.11 及以上的 python3，环境变量 "+projectctl.EnvPython+" 同效（n067）")
 	sysLang := fs.String("system-lang", "", "owner 没选过界面语言时用的系统语言（zh 或 en）；deck up 按自己的环境变量算好传进来，留空则按 deckd 自己的环境变量")
 	fs.Parse(args)
+	checkSockets(*layout, *agent)
+	projectctl.SetPythonOverride(*pyFlag)
 	pc := *script
 	if pc == "" {
 		pc, _ = projectctl.DefaultScript() // 找不到时进度面板会说明

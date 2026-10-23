@@ -57,7 +57,7 @@ func FromGraph(snap projectctl.Snapshot, b Bindings, script string, now time.Tim
 				it.BlockingSessions = append(it.BlockingSessions, bd.SessionID)
 			}
 		}
-		ctl := "python3 " + script
+		ctl := projectctl.PythonForText() + " " + script
 		switch cat {
 		case CatGraphHumanGate:
 			it.Options = []Option{

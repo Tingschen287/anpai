@@ -23,7 +23,7 @@ func executorBrief(node projectctl.Node, attempt int, root, script, actor string
 		}
 		return shq(v)
 	}
-	ctl := "cd " + or(root, "<项目根>") + " && python3 " + or(script, "<控制器脚本路径>")
+	ctl := "cd " + or(root, "<项目根>") + " && " + projectctl.PythonForText() + " " + or(script, "<控制器脚本路径>")
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "你是 %s 的执行者，这是第 %d 次 attempt。\n", node.ID, attempt)

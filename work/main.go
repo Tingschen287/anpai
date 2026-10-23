@@ -66,6 +66,10 @@ func main() {
 		}
 	}
 
+	// 命令文字（brief、评审命令、队列选项）里的解释器：选得出 3.11 及以上的就写它的路径，选不出照旧写 python3（n067）
+	if py, err := projectctl.ResolvePython(); err == nil {
+		projectctl.PythonInText = py
+	}
 	reader := projectctl.NewReader(root, pc)
 	// 终态问过一次就记到盘上：真实项目首次要问近两分钟，第二次开就该是秒出。
 	if cacheDir, err := config.DefaultPath(); err == nil {

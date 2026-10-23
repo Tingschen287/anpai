@@ -17,14 +17,29 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
+	"github.com/Tingschen287/terminal-deck/work/internal/sockpath"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 	"github.com/Tingschen287/terminal-deck/work/internal/writerlock"
 )
 
-// SocketPath 是 deckd 的 socket 路径。
-func SocketPath(d deckstore.Dirs) string { return filepath.Join(d.State, "deckd.sock") }
+// SocketPath 是 deckd 的 socket 路径：状态目录下的 deckd.sock；放不下（macOS 上限 104 字节）就退到
+// /tmp/deck-<uid>/<路径哈希>/deckd.sock，同一个状态目录永远得到同一个路径（n067）。
+// 退路也走不通时返回原路径，由 SocketPathE 或后面的 bind 报错。
+func SocketPath(d deckstore.Dirs) string {
+	p, err := SocketPathE(d)
+	if err != nil {
+		return filepath.Join(d.State, "deckd.sock")
+	}
+	return p
+}
 
-// LockPathForSocket 是 deckd 的单实例锁文件：与 socket 同目录。
+// SocketPathE 同 SocketPath，退路走不通时返回清楚的错误。
+func SocketPathE(d deckstore.Dirs) (string, error) {
+	return sockpath.Fit(filepath.Join(d.State, "deckd.sock"))
+}
+
+// LockPathForSocket 是 deckd 的单实例锁文件：与 socket 同目录。状态目录里是 deckd.lock；socket 退到短目录时
+// 目录名里有原路径的哈希（sockpath.Fit），锁跟着 socket 走，不同的状态目录互不干扰。
 func LockPathForSocket(sock string) string { return filepath.Join(filepath.Dir(sock), "deckd.lock") }
 
 // LockState 是探测 deckd 单实例锁的结果。
@@ -82,7 +97,12 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		return err
 	}
 	os.Chmod(cfg.Dirs.State, 0o700)
-	lockPath := filepath.Join(cfg.Dirs.State, "deckd.lock")
+	// 变量名不与后面的 err 共用：路径超长的错误是本地中文，不能让扫描器以为它流进了别的 i18n.E 的参数
+	sock, sockErr := SocketPathE(cfg.Dirs)
+	if sockErr != nil {
+		return sockErr
+	}
+	lockPath := LockPathForSocket(sock)
 	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
@@ -173,7 +193,6 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		store.NotifyCoded("", "deckd", i18n.E("err.deckd.run.4", err), "deckd")
 	}
 
-	sock := SocketPath(cfg.Dirs)
 	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return i18n.E("err.deckd.run.3", err)
 	}
