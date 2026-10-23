@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"path/filepath"
 	"strings"
@@ -154,9 +155,13 @@ func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		argv, ok := procArgv(procRoot, pid)
+		argv, ok, err := procArgvChecked(procRoot, pid)
+		if errors.Is(err, errProcArgsSelfCheck) {
+			// 读命令行的办法本身在这台机器上不可信（macOS 运行时自检没过）：不当作「没在跑」
+			return false, i18n.E("err.agentdeck.clientnotifydaemonrunning.1", procTableName(procRoot), err)
+		}
 		if !ok {
-			continue // 进程已经没了，或是内核线程
+			continue // 进程已经没了、是内核线程，或这一个进程的命令行确认不了（不是我们要找的 notify-daemon 的样子，跳过）
 		}
 		if !strings.Contains(filepath.Base(argv[0]), "agent-deck") {
 			continue

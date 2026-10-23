@@ -288,10 +288,14 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 	return found, nil
 }
 
-// procArgsOK 核对一个进程；返回它是不是 CLI 进程。进程已经退出（读不到）不算错。
+// procArgsOK 核对一个进程；返回它是不是 CLI 进程。进程已经退出（读不到）不算错；命令行确认不了（errProcArgsUnconfirmable）算错。
 // proc 为空用本平台的进程表（Linux /proc，macOS sysctl kern.procargs2），否则读那个 /proc 形状的目录（测试用）。
 func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
-	argv, ok := procArgv(proc, pid)
+	argv, ok, err := procArgvChecked(proc, pid)
+	if err != nil {
+		// 读到了命令行数据但确认不了（macOS：截断、读不足 argc 个参数、自检没过）：不能当作「没有这个进程」，按确认不了拒绝
+		return false, err
+	}
 	if !ok {
 		return false, nil
 	}
@@ -301,8 +305,52 @@ func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
 		}
 		return true, nil
 	}
-	if err := checkBypassFlags(append(argv, strings.Join(argv, " "))...); err != nil {
+	if err := checkBypassFlagsGlued(append(argv, strings.Join(argv, " "))...); err != nil {
 		return false, i18n.E("err.agentdeck.procargsok.2", err)
 	}
 	return false, nil
+}
+
+// glueEnvRe：绕过参数后面紧跟的「环境变量样式文字」：变量名（字母或下划线开头，后接字母数字下划线）加等号，例如 PATH=、XSYNTHETIC_SECRET=。
+var glueEnvRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// checkBypassFlagsGlued 是 checkBypassFlags 加上「连串」：目标进程改写自己参数区末尾的 NUL 时，最后一个参数可能连上环境变量
+// （--dangerously-skip-permissionsPATH=/usr/bin；Linux 的 /proc/<pid>/cmdline 同样，见 procs_darwin.go 的 parseProcargs2）。
+// 逐字相等认不出这种串，这里再认：以某个已知绕过参数（BypassFlags）开头、后面紧跟 glueEnvRe 的词；
+// 以及「参数 + 取值」形式的绕过（bypassValues）里，取值以被拒的值开头、后面紧跟 glueEnvRe 的词。
+//
+// 判定规则（只放宽匹配，不放宽拒绝）：
+//   - 词按空白切开、转小写，只看词的开头：绕过参数必须是词的开头，/opt/--dangerously-skip-permissionsPATH=x 这样中间出现的不算；
+//   - 紧跟的必须是「变量名=」：--dangerously-skip-permissions-docs、--dangerously-skip-permissionsfoo（没有等号）、
+//     --dangerously-skip-permissions-x=1（横线不是变量名的字符）、--dangerously-skip-permissions2=1（变量名不能数字开头）都按原语义处理，不拒；
+//   - 只用在非 CLI 进程的检查上（procArgsOK）。CLI 进程仍按参数白名单查，不经过这里；CheckNoBypass 的启动前检查也不经过这里。
+func checkBypassFlagsGlued(fields ...string) error {
+	if err := checkBypassFlags(fields...); err != nil {
+		return err
+	}
+	for _, f := range fields {
+		words := strings.Fields(f)
+		for i, w := range words {
+			lw := strings.ToLower(w)
+			for _, b := range BypassFlags {
+				if rest, ok := strings.CutPrefix(lw, b); ok && glueEnvRe.MatchString(rest) {
+					return i18n.E("err.agentdeck.checkbypassflags.1", w)
+				}
+			}
+			name, value, hasValue := strings.Cut(lw, "=")
+			bad, ok := bypassValues[name]
+			if !ok {
+				continue
+			}
+			if !hasValue && i+1 < len(words) {
+				value, hasValue = strings.ToLower(words[i+1]), true
+			}
+			if hasValue {
+				if rest, ok := strings.CutPrefix(strings.Trim(value, `"'`), bad); ok && glueEnvRe.MatchString(rest) {
+					return i18n.E("err.agentdeck.checkbypassflags.2", w, value)
+				}
+			}
+		}
+	}
+	return nil
 }

@@ -28,7 +28,7 @@ func procargs2(argc int32, execPath string, pad int, args []string, env []string
 	return b.Bytes()
 }
 
-// kern.procargs2 的格式：argc、可执行文件路径、NUL 填充、argc 个参数、环境变量。只取参数，环境变量（可能含凭据）一个字节都不带出来。
+// kern.procargs2 的格式：argc、可执行文件路径、NUL 填充、argc 个参数、环境变量。只取 argc 个参数，环境变量区不会被整段读进来（返工 2 把保证收窄到与 Linux 一致：目标进程改写自己参数区末尾的 NUL 时，最后一个参数可能连上环境变量，见 parseProcargs2 的注释与 procs_fix2_darwin_test.go）。读不足 argc 个参数是错误。
 func TestParseProcargs2(t *testing.T) {
 	cases := []struct {
 		name string
@@ -38,7 +38,8 @@ func TestParseProcargs2(t *testing.T) {
 	}{
 		{"常规", procargs2(3, "/usr/local/bin/agent-deck", 3, []string{"agent-deck", "notify-daemon", "--x y"}, []string{"SECRET=abc", "A=b"}), "agent-deck\x00notify-daemon\x00--x y\x00", true},
 		{"空参数在中间", procargs2(3, "/bin/x", 1, []string{"x", "", "z"}, []string{"SECRET=abc"}), "x\x00\x00z\x00", true},
-		{"argc 比实际参数多时只取到实际有的", procargs2(5, "/bin/x", 1, []string{"x", "y"}, nil), "x\x00y\x00", true},
+		// 返工 2（方案 A）：读不足 argc 个参数是错误，不再「只取到实际有的」（Codex 复审 1 R2-1：旧期望把截断缺陷固化成了成功）
+		{"argc 比实际参数多时报错（读不足 argc 个）", procargs2(5, "/bin/x", 1, []string{"x", "y"}, nil), "", false},
 		{"没有环境变量", procargs2(1, "/bin/x", 0, []string{"x"}, nil), "x\x00", true},
 		{"太短", []byte{1, 0}, "", false},
 		{"路径没有结尾", append(binary.LittleEndian.AppendUint32(nil, 1), []byte("/bin/x")...), "", false},
@@ -93,7 +94,7 @@ func TestParseProcargs2EmptyArgv0NeverLeaksEnvironment(t *testing.T) {
 	}
 }
 
-// 真实版式：空参数（在开头、连着几个、在中间、全是空的）原样保留，环境变量和苹果追加的串一个字节都不进来。
+// 真实版式（进程没改写过自己的参数区）：空参数（在开头、连着几个、在中间、全是空的）原样保留，环境变量和苹果追加的串不进来。
 // 可执行文件路径从 0 到 17 个字符，把 8 种对齐填充（0～7 个 NUL）各走几遍。
 func TestParseProcargs2KeepsEmptyArgumentsAndNeverReadsTheEnvironment(t *testing.T) {
 	env := []string{"SYNTHETIC_SECRET=review-only", "A=b"}
@@ -193,7 +194,7 @@ func waitCmdline(t *testing.T, pid int) []byte {
 	return nil
 }
 
-// 真实子进程：argv[0] 为空、前几个参数为空、空参数在中间——命令行原样读出，环境变量（含人造的 SYNTHETIC_SECRET）不出来。
+// 真实子进程：argv[0] 为空、前几个参数为空、空参数在中间——命令行原样读出，环境变量（含人造的 SYNTHETIC_SECRET）不出来（进程没改写过自己的参数区时）。
 func TestNativeCmdlineKeepsEmptyArgumentsOfARealProcess(t *testing.T) {
 	for name, tail := range map[string][]string{
 		"空 argv0":          {"-test.run=^TestProcHelperSleep$", "--", "review-marker"},
