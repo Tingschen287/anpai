@@ -172,7 +172,7 @@ deck reports deliver-now [--project <id>]
 
 `R` 重新读取。改动自动保存，对之后起的会话生效，已在跑的会话不变；存不上时 `s` 重试。档位在界面里叫最强、日常、便宜，
 文件、命令行 `--tier` 与 deckd 接口仍用 `frontier`、`balanced`、`economy`。
-界面语言在「通用」页切换（中文 / English）；全新安装第一次运行跟随系统语言（`LC_ALL`、`LC_MESSAGES`、`LANG` 里第一个非空值以 `zh` 开头用中文，`C`、`POSIX`、`C.UTF-8` 用英文），并把它写进 `agents.yaml` 的 `ui_lang`；升级的老用户（`agents.yaml` 已存在、没有 `ui_lang`）保持中文，文件不改。
+界面语言在「通用」页切换（中文 / English）；全新安装第一次运行跟随系统语言（`LC_ALL`、`LC_MESSAGES`、`LANG` 里第一个非空值以 `zh` 开头用中文，`C`、`POSIX`、`C.UTF-8` 用英文），并把它写进 `agents.yaml` 的 `ui_lang`；升级的老用户（`agents.yaml` 已存在、没有 `ui_lang`）保持中文，文件不改。升级二进制后要先关掉布局再重新 `deck up`：旧的 deckd 不认 `ui_lang`，语言切换要等新 deckd 起来才生效。
 
 ### 配置文件
 

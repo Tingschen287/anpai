@@ -105,6 +105,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if c.neutral {
 		req.Header.Set(i18n.MarkHeader, i18n.MarkNeutral)
 	}
+	seq := i18n.LangSeq() // 发出前的语言代次：回来时变了，响应头里的语言是更早的状态（见下）
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		var ne net.Error
@@ -118,7 +119,10 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	}
 	defer resp.Body.Close()
 	if c.follow {
-		if l := resp.Header.Get(i18n.LangHeader); i18n.ValidLang(l) && l != i18n.Lang() {
+		// 采用 deckd 的界面语言——但只在发出这个请求之后本进程没有换过语言时才采用（返工 2，M2）：
+		// 慢请求（取工具版本、起 agent）可能在 owner 刚存上新语言之前就被 deckd 处理了，它的语言头是那一刻的旧语言，
+		// 回来时不能把已经生效的新语言改回去。没采用的不要紧：下一次请求或设置进程的定时对时（Settings 每 2 秒）会对上。
+		if l := resp.Header.Get(i18n.LangHeader); i18n.ValidLang(l) && l != i18n.Lang() && i18n.LangSeq() == seq {
 			i18n.SetLang(l)
 		}
 	}

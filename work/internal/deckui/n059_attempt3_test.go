@@ -192,7 +192,7 @@ func TestCandidateAndInputBothVisible(t *testing.T) {
 func TestLongTypedTextCaretVisible(t *testing.T) {
 	m, _ := n057Fixture()
 	m.width, m.height = 80, 24
-	m.saveErr = strings.Repeat("存不上；", 140)
+	m.saveErr = lit(strings.Repeat("存不上；", 140))
 	goRow(t, m, rowGlobal, "claude", "")
 	review2Key(m, "enter")
 	review2Key(m, "+")
@@ -315,7 +315,7 @@ func TestNoZeroCandidatesAtStandardSizes(t *testing.T) {
 				goRow(t, m, rowGlobal, "claude", "")
 				review2Key(m, "enter")
 				review2Key(m, "+")
-				m.saveErr = strings.Repeat("存", n)
+				m.saveErr = lit(strings.Repeat("存", n))
 				v := review2Key(m, "down")
 				review2Bounds(t, m, v)
 				if m.sub.input.cur != 0 || !strings.Contains(v, "› claude-model-00") || !strings.Contains(v, "▏") {
@@ -412,10 +412,10 @@ func TestLateModelListKeepsNotesAndSkipsRename(t *testing.T) {
 		review2Key(m, string(c))
 	}
 	review2Key(m, "enter") // 有空格：被拒
-	reason := m.sub.input.note
+	reason := m.sub.input.note.String()
 	run(m, slow)
-	if v := plainView(m); m.sub.input.note != reason || reason == "" {
-		t.Fatalf("候选回来后拒绝原因没了（原来 %q，现在 %q）：\n%s", reason, m.sub.input.note, v)
+	if v := plainView(m); m.sub.input.note.String() != reason || reason == "" {
+		t.Fatalf("候选回来后拒绝原因没了（原来 %q，现在 %q）：\n%s", reason, m.sub.input.note.String(), v)
 	}
 
 	m, api = n057Fixture()
@@ -523,7 +523,7 @@ func TestComposedMessagesKeepTheirTail(t *testing.T) {
 	flat := func(v string) string { return strings.ReplaceAll(strings.ReplaceAll(v, "\n", ""), " ", "") }
 	m, _ := n057Fixture()
 	m.width, m.height = 80, 24
-	m.msg = T("model.inuse.tier", "claude-opus-5-5", uniqueName(1024))
+	m.msg = lit(T("model.inuse.tier", "claude-opus-5-5", uniqueName(1024)))
 	if v := flat(seenAll(t, m, nil)); !strings.Contains(v, "先在项目里拿掉它，再改档位") {
 		t.Fatal("页面底部的提示后半句被截掉")
 	}
@@ -538,7 +538,7 @@ func TestComposedMessagesKeepTheirTail(t *testing.T) {
 	api.modelsErr = errors.New(strings.Repeat("误", 1000))
 	run(m, slow)
 	if v := flat(seenAll(t, m, nil)); !strings.Contains(v, "：手填id") {
-		t.Fatalf("「列不出模型…：手填 id」后半句被截掉（note 结尾 %q）", string([]rune(m.sub.input.note)[len([]rune(m.sub.input.note))-8:]))
+		t.Fatalf("「列不出模型…：手填 id」后半句被截掉（note 结尾 %q）", string([]rune(m.sub.input.note.String())[len([]rune(m.sub.input.note.String()))-8:]))
 	}
 }
 
@@ -563,7 +563,7 @@ func TestModelListAnswersOnlyItsOwnInput(t *testing.T) {
 	m.Update(secondMsg)
 	v := plainView(m)
 	if len(m.sub.input.all) != 1 || strings.Contains(v, "列不出") || !strings.Contains(v, "claude-from-second") {
-		t.Fatalf("新输入框被上一次的结果占掉：all=%v note=%q\n%s", m.sub.input.all, m.sub.input.note, v)
+		t.Fatalf("新输入框被上一次的结果占掉：all=%v note=%q\n%s", m.sub.input.all, m.sub.input.note.String(), v)
 	}
 }
 

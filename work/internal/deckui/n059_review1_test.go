@@ -117,14 +117,14 @@ func TestReview1CASInterleavings(t *testing.T) {
 		if second == nil || len(api.saved[0].Projects) != 1 || picked(&api.saved[0].Projects[0], "codex") {
 			t.Fatal("first snapshot was mutated, or pending save was lost")
 		}
-		if strings.Contains(m.msg, "按 m 起主 agent") {
+		if strings.Contains(m.msg.String(), "按 m 起主 agent") {
 			t.Fatal("new-project hint arrived before its own commit")
 		}
 		run(m, second)
 		if len(api.saved) != 2 || len(api.set.Projects) != 2 || api.set.Projects[1].ID != id || !picked(&api.set.Projects[0], "codex") || m.dirty {
 			t.Fatal("latest edits and the new project must both persist, in order")
 		}
-		if !strings.Contains(m.msg, "按 m 起主 agent") {
+		if !strings.Contains(m.msg.String(), "按 m 起主 agent") {
 			t.Fatal("missing post-commit hint")
 		}
 	})
@@ -196,7 +196,7 @@ func TestReview1LongModelListFailureNote(t *testing.T) {
 	press(m, "a", "down", "enter", "+") // Add grok, then ask its CLI for models.
 	// attempt 3：只有还在等候选时回来的结果才算数（迟到的不覆盖），这里先回到「正在问」的状态再让它报错
 	gt, _ := m.toolInfo("grok")
-	m.sub.input.loading, m.sub.input.note = true, T("input.asking", gt.Binary)
+	m.sub.input.loading, m.sub.input.note = true, lit(T("input.asking", gt.Binary))
 	m.Update(toolModelsMsg{tool: "grok", req: m.sub.input.req, err: errors.New(strings.Repeat("无法连接模型服务；", 80) + "请重试")})
 	v := plainView(m)
 	if n := len(strings.Split(v, "\n")); n > m.height {
@@ -233,8 +233,8 @@ func TestReview1MainMovedText(t *testing.T) {
 	m, _ := n057Fixture()
 	goRow(t, m, rowTier, "", deckstore.Frontier)
 	press(m, "enter", "enter")
-	if strings.Contains(m.msg, "%!") {
-		t.Fatalf("normal removal of the main model produces broken hint: %q", m.msg)
+	if strings.Contains(m.msg.String(), "%!") {
+		t.Fatalf("normal removal of the main model produces broken hint: %q", m.msg.String())
 	}
 }
 
@@ -469,7 +469,7 @@ func TestCandidatesKeptWhenFootOverflows(t *testing.T) {
 		cands = append(cands, fmt.Sprintf("cand-%02d", i))
 	}
 	m.sub.input.all = cands
-	m.saveErr = strings.Repeat("一时存不上的原因；", 70) + "到此为止"
+	m.saveErr = lit(strings.Repeat("一时存不上的原因；", 70) + "到此为止")
 	seen := ""
 	for i := 0; i < 14; i++ {
 		v := plainView(m)

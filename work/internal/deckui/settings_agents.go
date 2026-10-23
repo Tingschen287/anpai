@@ -40,10 +40,10 @@ type modelInput struct {
 	text    string
 	all     []string // 候选（toolModelsMsg 填）
 	loading bool
-	note    string
-	cur     int // 候选里的光标；-1 = 用输入的文字
-	limit   int // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
-	req     int // 这个输入框发出的那次「问 CLI 有哪些模型」
+	note    lazyText // 输入框里的提示：存怎么取文字（返工 2，M1）
+	cur     int      // 候选里的光标；-1 = 用输入的文字
+	limit   int      // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
+	req     int      // 这个输入框发出的那次「问 CLI 有哪些模型」
 }
 
 type toolsMsg struct {
@@ -68,12 +68,12 @@ func (m *Settings) fetchTools() tea.Cmd {
 }
 
 func (m *Settings) openAgent(id string) tea.Cmd {
-	m.sub, m.msg = &subView{kind: subAgent, agent: id}, ""
+	m.sub, m.msg = &subView{kind: subAgent, agent: id}, nil
 	return m.fetchTools()
 }
 
 func (m *Settings) openAdd() tea.Cmd {
-	m.sub, m.msg = &subView{kind: subAdd}, T("add.loading")
+	m.sub, m.msg = &subView{kind: subAdd}, later(func() string { return T("add.loading") })
 	return m.fetchTools()
 }
 
@@ -81,7 +81,7 @@ func (m *Settings) openTier(t deckstore.Tier) tea.Cmd {
 	if m.project() == nil {
 		return nil
 	}
-	m.sub, m.msg = &subView{kind: subTier, tier: t}, ""
+	m.sub, m.msg = &subView{kind: subTier, tier: t}, nil
 	return nil
 }
 
@@ -89,12 +89,13 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case toolsMsg:
 		if msg.err != nil {
-			m.msg = T("tools.fail", errLong(msg.err))
+			err := msg.err
+			m.msg = later(func() string { return T("tools.fail", errLong(err)) })
 			return nil
 		}
 		m.tools = msg.tools
 		if m.sub != nil && m.sub.kind == subAdd {
-			m.msg = ""
+			m.msg = nil
 		}
 	case toolModelsMsg:
 		if m.sub == nil || m.sub.input == nil {
@@ -111,19 +112,20 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		// 只替换「正在问」：等候选时按 ⏎ 被拒的原因不抹掉（attempt 3 自查）
 		asking := false
 		if t, ok := m.toolInfo(msg.tool); ok {
-			asking = in.note == T("input.asking", t.Binary)
+			asking = in.note.String() == T("input.asking", t.Binary)
 		}
 		if msg.err != nil {
 			if asking {
-				in.note = T("input.listfail", oneLine(deckstore.Display(errLong(msg.err), textCap)))
+				err := msg.err
+				in.note = later(func() string { return T("input.listfail", oneLine(deckstore.Display(errLong(err), textCap))) })
 			}
 			return nil
 		}
 		in.all = msg.models
 		if asking {
-			in.note = "" // 候选回来了就不再说「正在问」（attempt 3 自查）
+			in.note = nil // 候选回来了就不再说「正在问」（attempt 3 自查）
 			if len(msg.models) == 0 {
-				in.note = T("input.nolist")
+				in.note = later(func() string { return T("input.nolist") })
 			}
 		}
 	}
@@ -221,11 +223,13 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	}
 	t := opts[m.sub.cur]
 	if !t.Installed {
-		m.msg = T("add.missing", t.Name, t.Binary)
+		name, binary := t.Name, t.Binary
+		m.msg = later(func() string { return T("add.missing", name, binary) })
 		return nil
 	}
 	if !deckstore.ValidID(t.Tool) || m.agentPtr(t.Tool) != nil {
-		m.msg = T("add.taken", t.Tool)
+		tool := t.Tool
+		m.msg = later(func() string { return T("add.taken", tool) })
 		return nil
 	}
 	a := deckstore.AgentDef{ID: t.Tool, Name: t.Name, Tool: t.Tool, Binary: t.Binary, Agent: t.Agent,
@@ -233,7 +237,8 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	m.set.Agents = append(m.set.Agents, a)
 	m.touch()
 	m.sub = &subView{kind: subAgent, agent: a.ID}
-	m.msg = T("add.done", t.Name)
+	name := t.Name
+	m.msg = later(func() string { return T("add.done", name) })
 	return nil
 }
 
@@ -241,7 +246,7 @@ func (m *Settings) addView() (string, []string) {
 	var b strings.Builder
 	b.WriteString(m.titleLine(" "+T("add.title"), T("add.keys")))
 	if m.tools == nil {
-		b.WriteString("  " + m.msg + "\n")
+		b.WriteString("  " + m.msg.String() + "\n")
 		return b.String(), nil
 	}
 	opts := m.addable()
@@ -288,7 +293,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		md := &a.Models[m.sub.cur]
 		next := nextTier(md.Tier)
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			m.msg = T("model.inuse.tier", md.ID, strings.Join(users, T("sep.list")))
+			id := md.ID
+			m.msg = later(func() string { return T("model.inuse.tier", id, strings.Join(users, T("sep.list"))) })
 			return nil
 		}
 		md.Tier = next
@@ -298,7 +304,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		m.sub.input = in
 		if t, ok := m.toolInfo(a.Tool); ok && t.CanList {
 			m.modelReq++
-			in.loading, in.note, in.req = true, T("input.asking", t.Binary), m.modelReq
+			binary := t.Binary
+			in.loading, in.note, in.req = true, later(func() string { return T("input.asking", binary) }), m.modelReq
 			tool, req := a.Tool, m.modelReq
 			return func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -307,33 +314,35 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 				return toolModelsMsg{tool: tool, req: req, models: ms, err: err}
 			}
 		}
-		in.note = T("input.manual")
+		in.note = later(func() string { return T("input.manual") })
 	case "e":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
-		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: T("input.renamenote")}
+		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: later(func() string { return T("input.renamenote") })}
 	case "x", "delete":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
 		if users := m.projectsWithModel(id); len(users) > 0 {
-			m.msg = T("model.inuse.del", id, strings.Join(users, T("sep.list")))
+			m.msg = later(func() string { return T("model.inuse.del", id, strings.Join(users, T("sep.list"))) })
 			return nil
 		}
 		a.Models = append(a.Models[:m.sub.cur], a.Models[m.sub.cur+1:]...)
 		m.touch()
-		m.msg = T("model.deleted", id)
+		m.msg = later(func() string { return T("model.deleted", id) })
 	case "r":
 		if users := m.projectsUsing(a.ID); len(users) > 0 {
-			m.msg = T("agent.inuse", strings.Join(users, T("sep.list")), a.Name)
+			aname := a.Name
+			m.msg = later(func() string { return T("agent.inuse", strings.Join(users, T("sep.list")), aname) })
 			return nil
 		}
 		if len(a.ExtraArgs) > 0 && !m.sub.confirm {
 			m.sub.confirm = true
-			m.msg = T("agent.remove.confirm", a.Name)
+			aname := a.Name
+			m.msg = later(func() string { return T("agent.remove.confirm", aname) })
 			return nil
 		}
 		name := a.Name
@@ -345,7 +354,7 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		}
 		m.set.Agents = keep
 		m.touch()
-		m.sub, m.msg = nil, T("agent.removed", name)
+		m.sub, m.msg = nil, later(func() string { return T("agent.removed", name) })
 	}
 	return nil
 }
@@ -448,16 +457,16 @@ func (m *Settings) msgFoot() []string {
 	var out []string
 	switch { // 与页面底部（foot）同一顺序：正在重试时说「保存中」，不再说「没存上」（n059 自查 2）
 	case m.conflict:
-		out = append(out, orange+" "+m.saveErr+reset)
-	case m.saving || (m.dirty && m.saveErr == ""):
+		out = append(out, orange+" "+m.saveErr.String()+reset)
+	case m.saving || (m.dirty && m.saveErr.empty()):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
-	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr, msgCap)))+reset)
+	case !m.saveErr.empty():
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr.String(), msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
-	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Display(m.msg, msgCap)))
+	if !m.msg.empty() {
+		out = append(out, " "+oneLine(deckstore.Display(m.msg.String(), msgCap)))
 	}
 	return m.wrapFoot(out)
 }
@@ -525,7 +534,7 @@ func (m *Settings) inputKey(msg tea.KeyMsg) tea.Cmd {
 		if ms := in.matches(); in.cur >= 0 && in.cur < len(ms) {
 			id = ms[in.cur]
 		}
-		if err := m.applyModelInput(a, in.rename, id); err != "" {
+		if err := m.applyModelInput(a, in.rename, id); err != nil {
 			in.note = err
 			return nil
 		}
@@ -540,15 +549,15 @@ func (m *Settings) inputKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // applyModelInput 加一个模型（档位按光标所在模型的档位，没有就日常），或改一个模型的 id（项目档位清单里的一并改）。
-func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) string {
+func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) lazyText {
 	if a == nil {
-		return T("input.gone")
+		return later(func() string { return T("input.gone") })
 	}
 	if !deckstore.ValidModelID(id) {
-		return T("input.badid")
+		return later(func() string { return T("input.badid") })
 	}
 	if owner := m.ownerOf(id); owner != "" && !(rename == id) {
-		return T("input.taken", id, owner)
+		return later(func() string { return T("input.taken", id, owner) })
 	}
 	if rename != "" {
 		for i := range a.Models {
@@ -567,8 +576,8 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 			}
 		}
 		m.touch()
-		m.msg = T("model.renamed", rename, id)
-		return ""
+		m.msg = later(func() string { return T("model.renamed", rename, id) })
+		return nil
 	}
 	tier := deckstore.Balanced
 	if len(a.Models) > 0 {
@@ -577,8 +586,8 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 	a.Models = append(a.Models, deckstore.ModelDef{ID: id, Tier: tier})
 	m.sub.cur = len(a.Models) - 1
 	m.touch()
-	m.msg = T("model.added", id, tierName(tier))
-	return ""
+	m.msg = later(func() string { return T("model.added", id, tierName(tier)) })
+	return nil
 }
 
 func (m *Settings) inputView() string {
@@ -589,8 +598,8 @@ func (m *Settings) inputView() string {
 		title = T("input.rename", sanitizeFull(in.rename))
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + caretMark + "\n")
-	if in.note != "" {
-		b.WriteString(m.note(oneLine(deckstore.Display(in.note, msgCap))))
+	if !in.note.empty() {
+		b.WriteString(m.note(oneLine(deckstore.Display(in.note.String(), msgCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {

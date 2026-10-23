@@ -142,6 +142,8 @@ func TestN060S3LegacyDecisionSummaries(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	trust := legacyDecision("dec-1", deckstore.KindCodexTrust, fmt.Sprintf(i18n.MustTextZH("err.deckd.serverrunspawn.2"), "Codex", "/tmp/alpha"))
 	cost := legacyDecision("dec-2", deckstore.KindCost, fmt.Sprintf(i18n.MustTextZH("err.deckd.serverrunspawn.7"), "Claude Code", "frontier", "claude-opus-5-5", "写测试"))
+	// 真正的旧系统 cost 决定是 deckd 开子 agent 时造的，一直带 SpawnScope（action=spawn）；返工 2（M5）起这就是「系统写的」的证据
+	cost.Scope = map[string]string{"action": "spawn"}
 	byMain := legacyDecision("dec-3", deckstore.KindPush, "推送 main 分支到 origin")
 	st := legacyStore(t, nil, []deckstore.Decision{trust, cost, byMain})
 	ds := st.Decisions("alpha")

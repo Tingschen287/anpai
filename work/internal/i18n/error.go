@@ -197,7 +197,7 @@ func (e *Error) Error() string {
 	if len(e.Args) == 0 {
 		return s
 	}
-	return revealRedactZH(fmt.Errorf(s, e.Args...).Error())
+	return revealRedactZH(fmt.Errorf(s, safeArgs(e.Args)...).Error()) // safeArgs：不带码的 error 和兜底值的文字先中和（display_args.go）
 }
 
 // AsCoded 取出错误自己带的码。没有码就返回 nil。
@@ -347,18 +347,18 @@ func wireArg(a any) any {
 			}
 			return ListOf("sep.nl", items...)
 		}
-		return err.Error()
+		return ErrText(err) // 不带码的 error 是外部原文：伪造的打码标记在这里中和（返工 2，M4）
 	}
 	rv := reflect.ValueOf(a)
 	if !rv.IsValid() {
 		return ""
 	}
 	if rv.Kind() == reflect.String {
-		return rv.String()
+		return Neutralize(rv.String()) // 具名字符串类型（档位、状态等）：不是 Clean 出来的字段，当外部原文（返工 2，M4）
 	}
 	// 具名类型（time.Duration、档位等）按 fmt 的原文来，不拆成底层数字。
 	if rv.Type().PkgPath() != "" {
-		return fmt.Sprint(a)
+		return Neutralize(fmt.Sprint(a))
 	}
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -368,7 +368,7 @@ func wireArg(a any) any {
 	case reflect.Float32, reflect.Float64:
 		return rv.Float()
 	}
-	return fmt.Sprint(a)
+	return Neutralize(fmt.Sprint(a))
 }
 
 // joinedErrors 取 errors.Join 结果里的各条。别的多重包装（fmt.Errorf 带多个 %w）的 Error() 里有拼接文字，不当列表。

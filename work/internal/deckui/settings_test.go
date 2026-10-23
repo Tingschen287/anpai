@@ -194,8 +194,8 @@ func TestSettingsPickCycleAndSave(t *testing.T) {
 		t.Fatalf("取消 kimi 后应清掉引用：%+v", *m.project())
 	}
 	// n059：每改一处就自动保存，最后存下的就是界面上的这份，能通过校验，底部显示已保存
-	if len(api.saved) == 0 || m.dirty || m.saveErr != "" {
-		t.Fatalf("应自动保存：%d 次，dirty=%v，%q", len(api.saved), m.dirty, m.saveErr)
+	if len(api.saved) == 0 || m.dirty || !m.saveErr.empty() {
+		t.Fatalf("应自动保存：%d 次，dirty=%v，%q", len(api.saved), m.dirty, m.saveErr.String())
 	}
 	last := api.saved[len(api.saved)-1]
 	if last.Validate() != nil || last.Projects[0].MainAgent != m.project().MainAgent || len(last.Projects[0].Agents) != len(m.project().Agents) {
@@ -210,8 +210,8 @@ func TestSettingsRevokeTrustAndQuitGuard(t *testing.T) {
 	m, api := settingsFixture()
 	press(m, "3") // 授权页
 	press(m, "d")
-	if len(api.revoked) != 0 || !strings.Contains(m.msg, "再按一次 d") {
-		t.Fatalf("第一次 d 只提醒（n059：撤销要确认）：%v %q", api.revoked, m.msg)
+	if len(api.revoked) != 0 || !strings.Contains(m.msg.String(), "再按一次 d") {
+		t.Fatalf("第一次 d 只提醒（n059：撤销要确认）：%v %q", api.revoked, m.msg.String())
 	}
 	press(m, "d")
 	if len(api.revoked) != 1 || api.revoked[0] != "deck/codex" {

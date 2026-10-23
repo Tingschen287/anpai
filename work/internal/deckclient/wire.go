@@ -32,6 +32,9 @@ func show(err error) string {
 		}
 		return de.Error()
 	}
+	// 注意：这里不中和 err.Error()。最外层不带码的错误可以带着真标记——例如中间窗格的 tmux 退出说明，
+	// 测试里（layout.TestN060CenterPauseReasonTranslatesTheMark）就用不带码的错误装一个 Clean 过的文字，这里要把它翻成当前语言的记号。
+	// 外部文字变成「参数」的出口（Wire、(*Error).Error()、T、Errorf）在 i18n 里统一中和了，进不了这里（返工 2，M4，见 i18n/display_args.go）
 	if code, args, ok := i18n.Wire(err); ok {
 		return Text(code, args, err.Error())
 	}

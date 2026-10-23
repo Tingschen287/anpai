@@ -29,12 +29,10 @@ func (m markFilter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = io.NopCloser(bytes.NewReader(b))
 		}
 	}
-	if m.lang != nil {
-		w.Header().Set(i18n.LangHeader, m.lang())
-	}
 	fw := &filterWriter{ResponseWriter: w, neutral: r.Header.Get(i18n.MarkHeader) == i18n.MarkNeutral,
-		kind: r.Method + " " + r.URL.Path, status: http.StatusOK}
+		kind: r.Method + " " + r.URL.Path, status: http.StatusOK, lang: m.lang}
 	m.next.ServeHTTP(fw, r)
+	fw.stampLang() // 没写过响应体的（空 200）在处理器返回后补上
 }
 
 type filterWriter struct {
@@ -42,14 +40,28 @@ type filterWriter struct {
 	neutral bool
 	kind    string
 	status  int
+	lang    func() string
+	stamped bool
+}
+
+// stampLang 在响应头写出去之前的最后一刻，把此刻的界面语言写进 i18n.LangHeader（只写一次）。
+// 不在请求一进来就取：PUT /v1/settings 保存了 ui_lang 之后，这次响应必须带新语言，不能带请求进来那一刻的旧语言（返工 2，M2）。
+func (f *filterWriter) stampLang() {
+	if f.stamped || f.lang == nil {
+		return
+	}
+	f.stamped = true
+	f.ResponseWriter.Header().Set(i18n.LangHeader, f.lang())
 }
 
 func (f *filterWriter) WriteHeader(code int) {
 	f.status = code
+	f.stampLang()
 	f.ResponseWriter.WriteHeader(code)
 }
 
 func (f *filterWriter) Write(p []byte) (int, error) {
+	f.stampLang()
 	if h := i18n.WireHook; h != nil {
 		h(f.kind+" "+http.StatusText(f.status), p)
 	}
@@ -63,6 +75,7 @@ func (f *filterWriter) Write(p []byte) (int, error) {
 }
 
 func (f *filterWriter) Flush() {
+	f.stampLang()
 	if fl, ok := f.ResponseWriter.(http.Flusher); ok {
 		fl.Flush()
 	}

@@ -31,8 +31,8 @@ func TestStaleSaveAfterReloadIsIgnored(t *testing.T) {
 	api.fail = &deckclient.Error{Status: 409, Message: "changed"}
 	m.Update(save()) // 旧的那次 409 回来
 	api.fail = nil
-	if m.conflict || m.saveErr != "" {
-		t.Fatalf("重读之前发出的保存失败不算数：conflict=%v %q", m.conflict, m.saveErr)
+	if m.conflict || !m.saveErr.empty() {
+		t.Fatalf("重读之前发出的保存失败不算数：conflict=%v %q", m.conflict, m.saveErr.String())
 	}
 	press(m, "enter")
 	if len(api.saved) != 1 || m.dirty {
@@ -45,13 +45,13 @@ func TestRevokeConfirmIsForThatGrant(t *testing.T) {
 	m, api := settingsFixture()
 	m.trust = append(m.trust, deckstore.TrustGrant{Project: "other", Tool: "codex", Dir: "/tmp/other", ApprovedAt: time.Now()})
 	press(m, "3", "d")
-	if !strings.Contains(m.msg, "撤销 deck 的 codex") {
-		t.Fatalf("第一次 d 提醒撤销 deck 的：%q", m.msg)
+	if !strings.Contains(m.msg.String(), "撤销 deck 的 codex") {
+		t.Fatalf("第一次 d 提醒撤销 deck 的：%q", m.msg.String())
 	}
 	m.trust = m.trust[1:] // 列表变了：光标所在的那一条已是 other
 	press(m, "d")
-	if len(api.revoked) != 0 || !strings.Contains(m.msg, "撤销 other 的 codex") {
-		t.Fatalf("换了一条要重新确认：%v %q", api.revoked, m.msg)
+	if len(api.revoked) != 0 || !strings.Contains(m.msg.String(), "撤销 other 的 codex") {
+		t.Fatalf("换了一条要重新确认：%v %q", api.revoked, m.msg.String())
 	}
 	press(m, "d")
 	if len(api.revoked) != 1 || api.revoked[0] != "other/codex" {
@@ -77,12 +77,12 @@ func TestReloadFromSubViewAfterConflict(t *testing.T) {
 		t.Fatalf("子视图里也看得见冲突提示：\n%s", plainView(m))
 	}
 	press(m, "R")
-	if m.sub != nil || !strings.Contains(m.msg, "再按一次 R") {
-		t.Fatalf("子视图里按 R：回到页面、要再按一次：%q", m.msg)
+	if m.sub != nil || !strings.Contains(m.msg.String(), "再按一次 R") {
+		t.Fatalf("子视图里按 R：回到页面、要再按一次：%q", m.msg.String())
 	}
 	press(m, "R")
-	if m.conflict || m.dirty || !strings.Contains(m.msg, "已重新读取") {
-		t.Fatalf("重读后恢复：%v %q", m.conflict, m.msg)
+	if m.conflict || m.dirty || !strings.Contains(m.msg.String(), "已重新读取") {
+		t.Fatalf("重读后恢复：%v %q", m.conflict, m.msg.String())
 	}
 }
 
@@ -94,24 +94,24 @@ func TestNewProjectHintFollowsItsOwnSave(t *testing.T) {
 	api.fail = &deckclient.Error{Status: 409, Message: "changed"}
 	press(m, "down", "enter") // 先冲突
 	press(m, "n", "down", "right", "enter", "enter")
-	if strings.Contains(m.msg, "正在保存") || m.hint == "" {
-		t.Fatalf("建好时不说正在保存：%q", m.msg)
+	if strings.Contains(m.msg.String(), "正在保存") || m.hint.empty() {
+		t.Fatalf("建好时不说正在保存：%q", m.msg.String())
 	}
 	api.fail = nil
 	press(m, "R", "R")
-	if m.hint != "" {
+	if !m.hint.empty() {
 		t.Fatal("重读丢掉新项目时提示也清掉")
 	}
 	press(m, "down", "enter")
-	if strings.Contains(m.msg, "按 m 起主 agent") {
-		t.Fatalf("新项目没存上就不该提示去侧栏：%q", m.msg)
+	if strings.Contains(m.msg.String(), "按 m 起主 agent") {
+		t.Fatalf("新项目没存上就不该提示去侧栏：%q", m.msg.String())
 	}
 	// 正常建：含新项目的那次存上了才提示
 	m2, _ := settingsFixture()
 	m2.Start = filepath.Join(root, "ai")
 	press(m2, "n", "down", "right", "enter", "enter")
-	if !strings.Contains(m2.msg, "按 m 起主 agent") {
-		t.Fatalf("新项目存上后提示去侧栏：%q", m2.msg)
+	if !strings.Contains(m2.msg.String(), "按 m 起主 agent") {
+		t.Fatalf("新项目存上后提示去侧栏：%q", m2.msg.String())
 	}
 	// 建项目时前一次保存还在路上：前一次（不含新项目）回来时不提示，含新项目的那次回来才提示
 	m3, _ := settingsFixture()
@@ -120,12 +120,12 @@ func TestNewProjectHintFollowsItsOwnSave(t *testing.T) {
 	_, first := m3.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 勾 codex：保存发出，先不让它回来
 	press(m3, "n", "down", "right", "enter", "enter")     // 建项目：保存在路上，记下回来再存
 	_, second := m3.Update(first())
-	if strings.Contains(m3.msg, "按 m 起主 agent") || second == nil {
-		t.Fatalf("不含新项目的那次保存回来时不该提示：%q", m3.msg)
+	if strings.Contains(m3.msg.String(), "按 m 起主 agent") || second == nil {
+		t.Fatalf("不含新项目的那次保存回来时不该提示：%q", m3.msg.String())
 	}
 	m3.Update(second())
-	if !strings.Contains(m3.msg, "按 m 起主 agent") {
-		t.Fatalf("含新项目的那次存上后提示：%q", m3.msg)
+	if !strings.Contains(m3.msg.String(), "按 m 起主 agent") {
+		t.Fatalf("含新项目的那次存上后提示：%q", m3.msg.String())
 	}
 }
 
@@ -172,7 +172,7 @@ func TestNarrowWindowNothingOverflows(t *testing.T) {
 	m.project().Agents = []string{"claude", "codex", "opencode"}
 	m.project().Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gpt-6.1-sol", "opencode/muse-spark-1.3-contributor-free"}
 	m.trust = []deckstore.TrustGrant{{Project: "deck", Tool: "codex", Dir: "/home/linux/ai/05.code/github/Tingschen287/terminal-deck/work", ApprovedAt: time.Now()}}
-	m.conflict, m.saveErr = true, T("save.conflict")
+	m.conflict, m.saveErr = true, lit(T("save.conflict"))
 	check := func(what string, must ...string) {
 		t.Helper()
 		v := plainView(m)
@@ -307,8 +307,8 @@ func TestSubViewRetryAndSavingStatus(t *testing.T) {
 		t.Fatalf("重试在路上：子视图说保存中，不再说没存上：\n%s", v)
 	}
 	m.Update(retry())
-	if len(api.saved) != n+1 || m.dirty || m.saveErr != "" || !strings.Contains(plainView(m), "✓ 已保存") {
-		t.Fatalf("重试存上：%d dirty=%v %q", len(api.saved)-n, m.dirty, m.saveErr)
+	if len(api.saved) != n+1 || m.dirty || !m.saveErr.empty() || !strings.Contains(plainView(m), "✓ 已保存") {
+		t.Fatalf("重试存上：%d dirty=%v %q", len(api.saved)-n, m.dirty, m.saveErr.String())
 	}
 }
 
@@ -342,13 +342,13 @@ func TestNewProjectHintSurvivesTransientFailure(t *testing.T) {
 	m.Start = filepath.Join(root, "ai")
 	api.fail = errors.New("deckd down")
 	press(m, "n", "down", "right", "enter", "enter")
-	if m.hint == "" || strings.Contains(m.msg, "按 m 起主 agent") {
-		t.Fatalf("没存上：不提示去侧栏、提示留着：%q %q", m.msg, m.hint)
+	if m.hint.empty() || strings.Contains(m.msg.String(), "按 m 起主 agent") {
+		t.Fatalf("没存上：不提示去侧栏、提示留着：%q %q", m.msg.String(), m.hint.String())
 	}
 	api.fail = nil
 	press(m, "s")
-	if !strings.Contains(m.msg, "按 m 起主 agent") {
-		t.Fatalf("重试存上后提示去侧栏：%q", m.msg)
+	if !strings.Contains(m.msg.String(), "按 m 起主 agent") {
+		t.Fatalf("重试存上后提示去侧栏：%q", m.msg.String())
 	}
 }
 
@@ -424,9 +424,9 @@ func TestLongContentSweepNothingTruncated(t *testing.T) {
 		check("新建项目 · 选目录（滚到下面）", "新建项目", "subdirectory-with-a-long-name-17/")
 		press(m, "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "enter")
 		check("新建项目 · 已是项目", "新建项目", newDir, "infra-visible-agent-orchestration")
-		m.form.err = "读不了 " + newDir + "/subdirectory-with-a-long-name-03：open " + newDir + "/subdirectory-with-a-long-name-03: permission denied"
+		m.form.err = lit("读不了 " + newDir + "/subdirectory-with-a-long-name-03：open " + newDir + "/subdirectory-with-a-long-name-03: permission denied")
 		check("新建项目 · 读不了", "新建项目", "permission denied")
-		m.form.err = ""
+		m.form.err = nil
 		press(m, "esc")
 	}
 }

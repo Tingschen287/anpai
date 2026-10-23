@@ -90,8 +90,8 @@ func TestN060S3ToggleSavesAndSwitchesImmediately(t *testing.T) {
 	if i18n.Lang() != i18n.EN {
 		t.Fatalf("存上之后立刻换语言：%s", i18n.Lang())
 	}
-	if m.dirty || m.saveErr != "" || !m.saved {
-		t.Fatalf("保存状态：dirty=%v err=%q saved=%v", m.dirty, m.saveErr, m.saved)
+	if m.dirty || !m.saveErr.empty() || !m.saved {
+		t.Fatalf("保存状态：dirty=%v err=%q saved=%v", m.dirty, m.saveErr.String(), m.saved)
 	}
 	// 设置页自己整页都是英文，没有汉字；三页都查
 	for _, p := range []page{pageProject, pageAgents, pageTrust, pageGeneral} {
@@ -140,8 +140,8 @@ func TestN060S3FailedOrConflictedSaveDoesNotSwitch(t *testing.T) {
 	if i18n.Lang() != i18n.ZH {
 		t.Fatalf("没存上不该换语言：%s", i18n.Lang())
 	}
-	if m.saveErr == "" || !m.dirty {
-		t.Fatalf("应记下没存上：err=%q dirty=%v", m.saveErr, m.dirty)
+	if m.saveErr.empty() || !m.dirty {
+		t.Fatalf("应记下没存上：err=%q dirty=%v", m.saveErr.String(), m.dirty)
 	}
 	// 手动重试（s）：这回存上了，换语言
 	api.fail = nil

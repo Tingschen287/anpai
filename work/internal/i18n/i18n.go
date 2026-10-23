@@ -34,6 +34,14 @@ const (
 
 var lang atomic.Value
 
+// langSeq 是语言代次：本进程的界面语言每真正变一次加一（SetLang 设成同一个语言不算）。
+// 向 deckd 发请求的客户端发出前记下它，回来时代次变了，说明发出之后本进程已经换过语言（例如设置里刚存上新语言），
+// 这个响应带的语言头是发出那一刻的旧状态，不能再拿来覆盖（段 3 返工 2，M2；见 deckclient.Client.Do）。
+var (
+	langMu  sync.Mutex
+	langSeq atomic.Uint64
+)
+
 // 缺键记录默认关。depth 用原子读，生产路径上 T 只多一次加载。
 // 真正追加时再拿 missMu。测试用 RecordMisses 打开。
 var (
@@ -87,12 +95,21 @@ func noteMiss(key Key) {
 
 // SetLang 切换本进程的界面语言。只认 zh 与 en，其他值都回到中文。
 func SetLang(code string) {
+	next := ZH
 	if code == EN {
-		lang.Store(EN)
+		next = EN
+	}
+	langMu.Lock()
+	defer langMu.Unlock()
+	if lang.Load().(string) == next {
 		return
 	}
-	lang.Store(ZH)
+	lang.Store(next)
+	langSeq.Add(1)
 }
+
+// LangSeq 返回语言代次（见 langSeq）。
+func LangSeq() uint64 { return langSeq.Load() }
 
 // Lang 返回当前语言代码（zh 或 en）。
 func Lang() string { return lang.Load().(string) }
@@ -125,14 +142,14 @@ func T(key Key, args ...any) string {
 		return string(key)
 	}
 	if len(args) > 0 {
-		return fmt.Sprintf(s, args...)
+		return fmt.Sprintf(s, safeArgs(args)...) // 不带码的 error 和兜底值的文字先中和（display_args.go）
 	}
 	return s
 }
 
 // Errorf 用文字表里的格式串构造错误。格式串可以带 %w，这样能包住下层错误。
 func Errorf(key Key, args ...any) error {
-	return fmt.Errorf(Format(key), args...)
+	return fmt.Errorf(Format(key), safeArgs(args)...)
 }
 
 // TextZH 返回中文原文。测试用来核对键在不在。

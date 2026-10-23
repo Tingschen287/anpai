@@ -189,9 +189,10 @@ func backfillNotificationCode(n *Notification) {
 }
 
 // backfillDecisionSummaryCode 同上，给老决定的摘要补 summary_code/summary_args。
-// 只补系统自己生成的那几类（花额度、Codex 授权）：其余类别的摘要是主 agent 写的外部原文，本来就不该有码。
+// 只补能证实是系统生成的（SystemSummary：花额度、Codex 授权，且范围里有只有 deckd 才写得出的 action）：
+// 主 agent 经 POST /v1/decisions 提交的 cost 决定也是 cost 类，但摘要是它写的外部原文，不能补码（段 3 返工 2，M5）。
 func backfillDecisionSummaryCode(d *Decision) bool {
-	if d.SummaryCode != "" || d.Summary == "" || !SystemSummaryKind(d.Kind) {
+	if d.SummaryCode != "" || d.Summary == "" || !SystemSummary(*d) {
 		return false
 	}
 	code, args, ok := i18n.LegacyCode(d.Summary)
@@ -202,9 +203,28 @@ func backfillDecisionSummaryCode(d *Decision) bool {
 	return true
 }
 
-// SystemSummaryKind 说明这一类决定的摘要是系统生成的（deckd 用码造的），而不是主 agent 写的外部原文。
-// 界面据此决定：没有码的旧摘要要不要按「旧记录」显示。
+// SystemSummaryKind 说明这一类决定「可能」有系统生成的摘要（deckd 用码造的）。只看种类不够：
+// cost 同时是主 agent 能提交的种类（deckd agentKinds），所以认摘要是不是系统写的要用 SystemSummary，不能只用它（段 3 返工 2，M5）。
 func SystemSummaryKind(kind string) bool { return kind == KindCost || kind == KindCodexTrust }
+
+// SystemSummary 说明这条决定的摘要是 deckd 自己生成的，能证实才返回 true。
+//
+//   - codex_trust：这一类主 agent 提交不了（deckd 的 agentKinds 不含它，POST /v1/decisions 直接拒绝），只有 deckd 开子 agent 时会造，
+//     种类本身就是证据。
+//   - cost：主 agent 可以提交这一类（agentKinds 含它），种类证明不了什么。证据是范围（Scope）里的 action=spawn：
+//     deckd 开子 agent 超出包络、额度不明时造的 cost 决定带 SpawnScope，而主 agent 带 action=spawn 的请求被 deckd 在入口拒绝
+//     （deckd.postDecision），所以外部写不出来。
+//
+// 没有这个证据的（主 agent 提交的 cost 决定，或者字节上分不出来源的旧记录）一律不算：不补码、不加「旧记录」标签，显示原文。
+func SystemSummary(d Decision) bool {
+	switch d.Kind {
+	case KindCost:
+		return d.Scope["action"] == "spawn"
+	case KindCodexTrust:
+		return true
+	}
+	return false
+}
 
 // OnChange 设置变化回调（在锁外调用）。
 func (s *Store) OnChange(f func(Event)) { s.mu.Lock(); s.hook = f; s.mu.Unlock() }

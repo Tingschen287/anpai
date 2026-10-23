@@ -84,8 +84,8 @@ func TestAddAgentEditModelsAndMultiSelect(t *testing.T) {
 		t.Fatalf("加入列表：\n%s", v)
 	}
 	press(m, "down", "down", "enter") // 第三项是没装的 gemini
-	if len(m.set.Agents) != 2 || !strings.Contains(m.msg, "没装") {
-		t.Fatalf("没装的不能加：%q", m.msg)
+	if len(m.set.Agents) != 2 || !strings.Contains(m.msg.String(), "没装") {
+		t.Fatalf("没装的不能加：%q", m.msg.String())
 	}
 	press(m, "up", "enter") // grok
 	g, ok := m.agent("grok")
@@ -106,7 +106,7 @@ func TestAddAgentEditModelsAndMultiSelect(t *testing.T) {
 	}
 	// 手填 id、空格不收
 	press(m, "+", "b", "a", "d", " ", "i", "d", "enter")
-	if g, _ = m.agent("grok"); len(g.Models) != 3 || m.sub.input == nil || !strings.Contains(m.sub.input.note, "空格") {
+	if g, _ = m.agent("grok"); len(g.Models) != 3 || m.sub.input == nil || !strings.Contains(m.sub.input.note.String(), "空格") {
 		t.Fatalf("带空格的 id 不收：%+v", m.sub.input)
 	}
 	press(m, "esc", "esc") // 关输入框、回主界面
@@ -157,8 +157,8 @@ func TestRenameRemoveAndGuards(t *testing.T) {
 	press(m, "enter")
 	// 项目在用的模型：不能删、不能改档位
 	press(m, "x")
-	if a, _ := m.agent("claude"); len(a.Models) != 4 || !strings.Contains(m.msg, "项目「ai」") {
-		t.Fatalf("在用的模型不能删：%q", m.msg)
+	if a, _ := m.agent("claude"); len(a.Models) != 4 || !strings.Contains(m.msg.String(), "项目「ai」") {
+		t.Fatalf("在用的模型不能删：%q", m.msg.String())
 	}
 	press(m, "enter")
 	if a, _ := m.agent("claude"); a.Models[0].Tier != deckstore.Frontier {
@@ -175,8 +175,8 @@ func TestRenameRemoveAndGuards(t *testing.T) {
 	}
 	// 移出：项目勾选着就不让
 	press(m, "r")
-	if _, ok := m.agent("claude"); !ok || !strings.Contains(m.msg, "先在这些项目里取消勾选") {
-		t.Fatalf("项目在用的 agent 不能移出：%q", m.msg)
+	if _, ok := m.agent("claude"); !ok || !strings.Contains(m.msg.String(), "先在这些项目里取消勾选") {
+		t.Fatalf("项目在用的 agent 不能移出：%q", m.msg.String())
 	}
 	press(m, "esc")
 	// 取消勾选 codex 后可以移出 codex
@@ -185,7 +185,7 @@ func TestRenameRemoveAndGuards(t *testing.T) {
 	goRow(t, m, rowGlobal, "codex", "")
 	press(m, "enter", "r")
 	if _, ok := m.agent("codex"); ok || m.sub != nil {
-		t.Fatalf("没人用的 agent 可以移出：%q", m.msg)
+		t.Fatalf("没人用的 agent 可以移出：%q", m.msg.String())
 	}
 	// 启动额外参数只读显示
 	m.set.Agents[0].ExtraArgs = [][]string{{"--allowedTools", "Read"}}
@@ -213,8 +213,8 @@ func TestMainAgentFollowsTierLists(t *testing.T) {
 	// 把 balanced 清单清空：主 agent 落空，自动换到还能选的
 	goRow(t, m, rowTier, "", deckstore.Balanced)
 	press(m, "enter", "enter", "esc")
-	if p.MainAgent != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || !strings.Contains(m.msg, "主 agent 改为") {
-		t.Fatalf("主 agent 应自动换并说明：%v %q", p.MainAgent, m.msg)
+	if p.MainAgent != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || !strings.Contains(m.msg.String(), "主 agent 改为") {
+		t.Fatalf("主 agent 应自动换并说明：%v %q", p.MainAgent, m.msg.String())
 	}
 }
 
@@ -292,8 +292,8 @@ func TestSettingsSelfCheckFixes(t *testing.T) {
 	}
 	goRow(t, m, rowGlobal, "codex", "")
 	press(m, "enter", "r")
-	if _, ok := m.agent("codex"); !ok || !strings.Contains(m.msg, "再按一次 r") {
-		t.Fatalf("第一次 r 只提醒：%q", m.msg)
+	if _, ok := m.agent("codex"); !ok || !strings.Contains(m.msg.String(), "再按一次 r") {
+		t.Fatalf("第一次 r 只提醒：%q", m.msg.String())
 	}
 	press(m, "r")
 	if _, ok := m.agent("codex"); ok {

@@ -332,8 +332,8 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 func decisionText(d deckstore.Decision) string {
 	if d.SummaryCode == "" {
 		// 没有码的旧摘要。系统生成的那几类（花额度、Codex 授权）里能逐字认出的，deckstore.Open 已经补了码；
-		// 剩下的混有外部原文、反解不确定，英文界面整条显示原文并加「旧记录」标签；中文界面照旧。主 agent 写的摘要本来就是外部原文，不加（段 3）
-		return legacyPrefix(d.Summary, deckstore.SystemSummaryKind(d.Kind)) + deckstore.Display(d.Summary, 800)
+		// 剩下的混有外部原文、反解不确定，英文界面整条显示原文并加「旧记录」标签；中文界面照旧。主 agent 写的摘要（包括它提交的 cost 决定）本来就是外部原文，不加（段 3；返工 2 起按 SystemSummary 的来源证据判断，不再凭种类）
+		return legacyPrefix(d.Summary, deckstore.SystemSummary(d)) + deckstore.Display(d.Summary, 800)
 	}
 	return deckstore.Clip(deckclient.Text(d.SummaryCode, []any(d.SummaryArgs), d.Summary), 800)
 }

@@ -32,7 +32,7 @@ type model struct {
 	err     error
 	decs    []deckstore.Decision
 	sel     int
-	note    string
+	note    func() string // 答复后的提示。存的是怎么画，不是画好的字：语言在显示中途换了，下一帧就是新语言（返工 2，M1）
 	width   int
 	height  int
 }
@@ -80,6 +80,9 @@ func (m *model) fetch() tea.Cmd {
 			return dataMsg{decs: ds}
 		case "progress":
 			if m.project == "" {
+				// 没指定项目：提示照旧，但这条路径不会向 deckd 取任何东西，所以每轮自己对一次界面语言，
+				// 否则别处换了语言，这个面板永远收不到新的语言头（返工 2，M3）。先对语言再造错误，提示就是新语言
+				m.syncLang(ctx)
 				return dataMsg{err: i18n.Errorf("panel.err.project")}
 			}
 			var p deckd.Progress
@@ -100,7 +103,15 @@ func (m *model) fetch() tea.Cmd {
 			}
 			return dataMsg{view: RenderActivity(ss, time.Now())}
 		}
+		m.syncLang(ctx) // 同上：本地直接返回的分支也要对语言
 		return dataMsg{err: i18n.Errorf("panel.err.missing", m.name)}
+	}
+}
+
+// syncLang 向 deckd 对一次界面语言（GET /v1/lang）。连不上就保持现有语言。
+func (m *model) syncLang(ctx context.Context) {
+	if m.c != nil {
+		m.c.SyncLang(ctx)
 	}
 }
 
@@ -147,7 +158,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-type answeredMsg struct{ note string }
+type answeredMsg struct{ note func() string }
 
 func (m *model) answer(i int) tea.Cmd {
 	open := OpenDecisions(m.decs)
@@ -160,10 +171,13 @@ func (m *model) answer(i int) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := m.c.Do(ctx, "POST", "/v1/decisions/"+d.ID+"/answer", map[string]any{"option": opt, "version": d.Version}, nil)
+		// 提示不在这里翻译成字存起来：存下的是怎么画，每一帧按当前语言重画（错误本身带码，Show 取当前语言）
 		if err != nil {
-			return answeredMsg{note: bad.Render(i18n.T("panel.err.answer") + deckstore.Display(deckclient.Show(err), 300))}
+			return answeredMsg{note: func() string {
+				return bad.Render(i18n.T("panel.err.answer") + deckstore.Display(deckclient.Show(err), 300))
+			}}
 		}
-		return answeredMsg{note: good.Render(i18n.T("panel.err.answered") + label(opt))}
+		return answeredMsg{note: func() string { return good.Render(i18n.T("panel.err.answered") + label(opt)) }}
 	}
 }
 
@@ -173,7 +187,11 @@ func (m *model) View() string {
 		return title.Render(m.name) + "\n" + bad.Render(i18n.T("ui.loadfail")+deckstore.Display(deckclient.Show(m.err), 300)) + "\n"
 	}
 	if m.name == "decisions" {
-		return RenderDecisions(m.decs, m.sel, m.note)
+		note := ""
+		if m.note != nil {
+			note = m.note()
+		}
+		return RenderDecisions(m.decs, m.sel, note)
 	}
 	return m.view
 }
