@@ -1,6 +1,9 @@
 package sockpath
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"os"
 	"path/filepath"
@@ -140,5 +143,149 @@ func TestCheckReportsLengthAndLimit(t *testing.T) {
 	err := Check(longPath("/x"))
 	if err == nil || !strings.Contains(err.Error(), "太长") {
 		t.Fatalf("超长应报错：%v", err)
+	}
+}
+
+// 审查 1 的反例：这两条原始路径的 sha256 前 5 个字节（40 位）相同，旧做法把它们退到同一个目录，共用 socket 和单实例锁。
+// 现在哈希至少 128 位，各得各的目录。
+const (
+	collidingA = "/tmp/n067-review-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss/779990/deckd.sock"
+	collidingB = "/tmp/n067-review-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss/1667899/deckd.sock"
+)
+
+func TestReviewCollidingSocketPaths(t *testing.T) {
+	withTmp(t)
+	sa, sb := sha256.Sum256([]byte(collidingA)), sha256.Sum256([]byte(collidingB))
+	if !bytes.Equal(sa[:5], sb[:5]) || sa == sb {
+		t.Fatal("测试前提：两条路径 sha256 的前 5 个字节相同、整体不同")
+	}
+	a, ea := Fit(collidingA)
+	b, eb := Fit(collidingB)
+	if ea != nil || eb != nil {
+		t.Fatalf("Fit 出错：%v %v", ea, eb)
+	}
+	if a == b || filepath.Dir(a) == filepath.Dir(b) {
+		t.Fatalf("不同的状态目录共用了 socket 或 deckd.lock 所在目录：%s", a)
+	}
+}
+
+// 哈希目录名是原路径 sha256 的十六进制前缀，不少于 32 个字符（128 位）；能放得下完整的 64 个字符就用完整的。
+func TestFitHashIsAtLeast128Bits(t *testing.T) {
+	withTmp(t)
+	p := longPath("/x/a")
+	got, err := Fit(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(filepath.Dir(got))
+	sum := sha256.Sum256([]byte(p))
+	if len(name) < MinHashChars || !strings.HasPrefix(hex.EncodeToString(sum[:]), name) {
+		t.Fatalf("哈希目录名应是 sha256 十六进制的前缀且不少于 %d 个字符：%q", MinHashChars, name)
+	}
+	if len(name) != 64 {
+		t.Fatalf("放得下时应用完整的 sha256（64 个字符）：%q（%d 字节的路径）", name, len(got))
+	}
+	if len(got) > Max {
+		t.Fatalf("放不下：%d > %d", len(got), Max)
+	}
+}
+
+// 退路目录或文件名长到放不下完整哈希时截短，但不少于 32 个字符；再长就报错，不把超长路径交给 bind。
+func TestFitTruncatesTheHashButNeverBelow128Bits(t *testing.T) {
+	root := withTmp(t)
+	fb := FallbackDir()
+	// 文件名占掉一些，留给哈希的恰好 40 个字符
+	room := Max - len(fb) - 1 - 1 - 40
+	got, err := Fit(filepath.Join("/x", strings.Repeat("d", Max), strings.Repeat("n", room)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := filepath.Base(filepath.Dir(got)); len(name) != 40 || len(got) > Max {
+		t.Fatalf("应截到 40 个字符、路径放得下：%q %d", name, len(got))
+	}
+	// 只剩 31 个字符：放弃
+	room = Max - len(fb) - 1 - 1 - (MinHashChars - 1)
+	if got, err := Fit(filepath.Join("/x", strings.Repeat("d", Max), strings.Repeat("n", room))); err == nil {
+		t.Fatalf("哈希不足 128 位的路径应被拒绝：%q（%s）", got, root)
+	}
+}
+
+// 标记文件记下原始路径；同一原路径再来核对一致、不改标记。
+func TestFitWritesAndReusesTheOriginMarker(t *testing.T) {
+	withTmp(t)
+	p := longPath("/x/a")
+	got, err := Fit(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(filepath.Dir(got), OriginFile)
+	b, err := os.ReadFile(marker)
+	if err != nil || string(b) != p {
+		t.Fatalf("标记应记下原始路径：%q %v", b, err)
+	}
+	if fi, _ := os.Stat(marker); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("标记权限应是 0600：%v", fi.Mode().Perm())
+	}
+	again, err := Fit(p)
+	if err != nil || again != got {
+		t.Fatalf("同一原路径应得到同一个结果：%q %q %v", again, got, err)
+	}
+	// 目录里只有标记，没有临时文件的残留
+	ents, _ := os.ReadDir(filepath.Dir(got))
+	if len(ents) != 1 || ents[0].Name() != OriginFile {
+		t.Fatalf("目录里应只有标记文件：%v", ents)
+	}
+}
+
+// 标记对不上（哈希撞了，或目录被别人动过）：报错，不共用这个目录。
+func TestFitRefusesAHashDirectoryMarkedForAnotherPath(t *testing.T) {
+	withTmp(t)
+	p := longPath("/x/a")
+	got, err := Fit(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(filepath.Dir(got), OriginFile)
+	if err := os.WriteFile(marker, []byte("/some/other/path/deckd.sock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := Fit(p)
+	if err == nil || !strings.Contains(err.Error(), "不共用") {
+		t.Fatalf("标记是另一条路径时应拒绝：%q %v", g, err)
+	}
+	// 标记是空的（写到一半）也不能当成「还没有」去覆盖
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := Fit(p); err == nil {
+		t.Fatalf("空标记应拒绝：%q", g)
+	}
+	// 标记被换成软链
+	os.Remove(marker)
+	target := filepath.Join(testsock.Dir(t), "t")
+	os.WriteFile(target, []byte(p), 0o600)
+	if err := os.Symlink(target, marker); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := Fit(p); err == nil {
+		t.Fatalf("软链标记应拒绝：%q", g)
+	}
+}
+
+// 哈希目录已存在但还没有标记（上次在写标记之前就中断了）：补上标记再用。
+func TestFitAdoptsAnExistingHashDirectoryWithoutMarker(t *testing.T) {
+	withTmp(t)
+	p := longPath("/x/a")
+	got, err := Fit(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(filepath.Dir(got), OriginFile))
+	again, err := Fit(p)
+	if err != nil || again != got {
+		t.Fatalf("没有标记的本用户目录应补上标记后复用：%q %v", again, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(filepath.Dir(got), OriginFile)); string(b) != p {
+		t.Fatalf("标记应补上：%q", b)
 	}
 }
