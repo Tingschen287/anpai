@@ -7,6 +7,27 @@
 
 仓库里另有两个 Python 写的早先启动器 `ai` 与 `host`，与本目录互不影响，见根 README 最后一节。
 
+支持 macOS 和 Linux；本机前提是装好 tmux 和 upstream agent-deck，两个平台的差异见本文「macOS 与 Linux 的差异」一节。
+
+## macOS 与 Linux 的差异（n067）
+
+平台专有的代码按构建标签分文件（`_linux.go`、`_darwin.go`），Linux 的行为没变。
+
+| 事情 | Linux | macOS |
+|---|---|---|
+| 认调用者（`internal/identity`） | `SO_PEERCRED` 取 pid，`SO_PEERPIDFD` 的 pidfd 绑定到进程，读 `/proc` 走进程链 | `LOCAL_PEERCRED` 核对对端 uid 是本用户，`LOCAL_PEERPID` 取 pid，`sysctl kern.proc.pid` 走进程链；进程绑定改成记下出生时间、之后每次核对重读（弱一档：记下出生时间之前那几毫秒里 pid 被复用，发现不了；macOS 的 pid 顺序分配，实际不可达）。任何一步取不到都拒绝，不授予角色 |
+| 进程命令行（启动参数核对、notify-daemon 探测） | 读 `/proc/<pid>/cmdline` | `sysctl kern.procargs2`，只取参数、不碰环境变量 |
+| 清终端输入缓冲 | `TCFLSH` | `TIOCFLUSH` |
+| Unix socket 路径上限 | 107 字节 | 103 字节 |
+
+socket 路径超过上限时，`deckd` 的 socket（及同目录的单实例锁）和布局 tmux 的 socket 退到 `/tmp/deck-<uid>/<原路径哈希>/`（目录 0700、核对属主）。
+agent-deck 那台 tmux 的 socket 在 tmux 自己的位置，deck 挪不了，`deck up`、`deck daemon` 起服务前会核对，超长就提示把 `TMUX_TMPDIR` 设短。
+
+projectctl 要 Python 3.11 及以上。选解释器的顺序：`deck daemon -projectctl-python` 或环境变量 `DECK_PROJECTCTL_PYTHON`
+（指定了就只认它，不行就报错）→ `PATH` 上第一个 3.11 及以上的 `python3` / `python3.N`（用 `-c` 问版本，3.9 的被跳过；macOS 不探测 `/usr/bin`，那是 Xcode 命令行工具的壳）→ 报清楚的错。
+
+tmux 3.4 要带 `--enable-sixel` 编译才会显示 Sixel logo（macOS 上自己编译的 tmux 容易漏掉）。没带的话 tmux 不显示图（侧栏标题处是空的），其余功能不受影响；这时设 `DECK_GRAPHICS=none` 用字母徽章。
+
 ## 名字
 
 本产品公开名是「安排 Anpai」（窄处只写「Anpai」；字标 Anpai 用 Geist SemiBold，「安排」用思源黑体，logo 仍是 A4）。

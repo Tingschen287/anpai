@@ -13,18 +13,21 @@
 
 ## 平台状态
 
+支持 macOS 和 Linux；本机前提是装好 tmux 和 upstream agent-deck（用 Graph 项目时还要 Python 3.11 及以上来跑 projectctl，`PATH` 上有就自动找，也可以用环境变量 `DECK_PROJECTCTL_PYTHON` 指定解释器）。
+
 | 平台 | 状态 |
 |---|---|
 | WSL 2 + Windows Terminal | 当前支持 |
 | 其他 Linux 终端 | 没有专门验证 |
-| Windows 原生、macOS | 不支持：`deckd` 用 Linux 的 `SO_PEERCRED` 与 `/proc` 认调用者 |
+| macOS | 适配中（n067）：在 x86 macOS 15 + tmux 3.4 上编译、测试与隔离端到端都跑通；认调用者用 `LOCAL_PEERCRED`、`LOCAL_PEERPID` 和进程出生时间，比 Linux 的 `SO_PEERPIDFD` 弱一档，差异见 [`work/README.md`](work/README.md) |
+| Windows 原生 | 不支持 |
 
 ## 依赖
 
 | 要什么 | 说明 |
 |---|---|
 | Go 1.27.1 或更新 | 只用来编译，版本以 [`work/go.mod`](work/go.mod) 为准 |
-| Linux 内核 6.5 或更新 | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程。内核不支持时 `deckd` 不给任何调用者身份：未知调用者只能读健康状态、`whoami` 与额度，侧栏、设置、决策与通知面板都会被拒，布局基本用不了（不是只读模式）。用 `uname -r` 看内核版本；较新的 WSL 2 内核通常已经满足 |
+| Linux 内核 6.5 或更新（仅 Linux；macOS 不需要） | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程。内核不支持时 `deckd` 不给任何调用者身份：未知调用者只能读健康状态、`whoami` 与额度，侧栏、设置、决策与通知面板都会被拒，布局基本用不了（不是只读模式）。用 `uname -r` 看内核版本；较新的 WSL 2 内核通常已经满足 |
 | tmux | 开发与实测用 3.4；代码里没有版本检查 |
 | upstream agent-deck | 命令名 `agent-deck`，要在 `PATH` 里（或用环境变量 `WORKDECK_AGENTDECK_BIN` 指路）。对接并逐条核对过的是 v1.15.0（提交 `01c011b`），按上游项目自己的说明安装 |
 | 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`gemini`；在 F9 设置里按本机装了的加入。`grok` 与 `agy` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），写法见 [`work/README.md`](work/README.md) |
