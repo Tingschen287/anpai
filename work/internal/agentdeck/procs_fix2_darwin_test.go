@@ -2,10 +2,12 @@ package agentdeck
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -86,16 +88,39 @@ func TestNativeCmdlineMutatedTerminatorMayJoinEnvironmentButGluedBypassIsStillCa
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-	for i := 0; i < 300; i++ {
+	for i := 0; i < 500; i++ {
 		if _, err := os.Stat(ready); err == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	got, err := nativeCmdline(cmd.Process.Pid)
+	// 返工 3（S2）：ready 必须出现。以前这里不断言，子进程没起来时下面的分支都不执行，测试照样绿。
+	if _, err := os.Stat(ready); err != nil {
+		t.Fatalf("改写参数区的子进程没有就绪（ready 文件没出现），这个测试没有测到东西：%v", err)
+	}
+	want := LaunchArgs{Tool: "claude", Binary: "claude"}
+	pid := cmd.Process.Pid
+	got, err := nativeCmdline(pid)
+	_, procErr := procArgsOK("", pid, want)
 	if err != nil {
-		// 读不出来也是允许的结果（fail closed）；要紧的是读出来时的样子
-		t.Logf("改写后读命令行报错（可接受）：%v", err)
+		// 读不出来。返工 3（S2、M1）：区分「确认不了」和「普通读不到」，经 procArgsOK 的最终结果都要符合 M1 的规则：
+		//   - 确认不了（errProcArgsUnconfirmable）：procArgsOK 也报确认不了，整体拒绝（fail closed）；
+		//   - 普通读不到（只有 ESRCH、EINVAL、EPERM）：procArgsOK 跳过这个进程，不当错误；
+		//   - 其他读错误：同 UID 的子进程不该出现；若出现，nativeCmdline 必须已把它归为确认不了（上一条），走到这里就是缺陷。
+		switch {
+		case errors.Is(err, errProcArgsUnconfirmable):
+			t.Logf("改写后读命令行确认不了（fail closed，可接受）：%v", err)
+			if !errors.Is(procErr, errProcArgsUnconfirmable) {
+				t.Fatalf("nativeCmdline 报确认不了（%v），procArgsOK 却是：%v", err, procErr)
+			}
+		case errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EPERM):
+			t.Logf("改写后读命令行读不到（%v）：procArgsOK 应跳过", err)
+			if procErr != nil {
+				t.Fatalf("nativeCmdline 读不到（%v）应跳过，procArgsOK 却报错：%v", err, procErr)
+			}
+		default:
+			t.Fatalf("读错误既不是确认不了、也不是读不到（M1 要求其他一切读错误都归为确认不了）：%v", err)
+		}
 		return
 	}
 	argv := strings.Split(strings.TrimRight(string(got), "\x00"), "\x00")
@@ -112,8 +137,8 @@ func TestNativeCmdlineMutatedTerminatorMayJoinEnvironmentButGluedBypassIsStillCa
 				t.Fatalf("环境变量成了独立的参数：%q", argv)
 			}
 		}
-		// 连串里的绕过参数仍被非 CLI 进程那条路径认出来
-		if _, err := procArgsOK("", cmd.Process.Pid, LaunchArgs{Tool: "claude", Binary: "claude"}); err == nil {
+		// 连串里的绕过参数仍被非 CLI 进程那条路径认出来（连串在最后一个元素里，返工 3 的规则也认）
+		if procErr == nil {
 			t.Fatalf("被连成一串的绕过参数应被拦住：%q", last)
 		}
 	}

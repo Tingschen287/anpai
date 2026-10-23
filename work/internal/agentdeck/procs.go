@@ -18,13 +18,17 @@ import (
 //
 // 命令行是外部原文：进来这里就过一遍 Neutralize（返工 4）。
 
-// errProcArgsUnconfirmable：读到了进程的命令行数据，但确认不了它是完整可信的（macOS 上：缓冲区截断、读不足 argc 个参数、
-// 版式不对、运行时自检没过）。和「读不到」（进程已退出、没权限）是两回事：后者跳过，前者让 CheckSessionArgs 拒绝，
-// 不拿半截命令行去核对。Linux 的 /proc/<pid>/cmdline 不产生这个错误。
-var errProcArgsUnconfirmable = errors.New("process arguments cannot be confirmed")
+// errProcArgsUnconfirmable：确认不了这个进程的命令行是完整可信的（macOS 上：缓冲区截断、读不足 argc 个参数、版式不对、
+// 运行时自检没过，以及 ENOMEM、EIO 等不能说明「进程不在」的读错误）。和「读不到」（进程已退出、没权限：ESRCH、EINVAL、EPERM）
+// 是两回事：后者跳过，前者让 CheckSessionArgs 拒绝，不拿半截命令行去核对。Linux 的 /proc/<pid>/cmdline 不产生这个错误。
+//
+// 它和下面的 errProcArgsSelfCheck 是带 n060 错误码的包内哨兵：各个具体原因（太短、argc 越界、只读到 n/argc 个参数……）都是
+// 带码错误，把哨兵作为 %w 参数嵌进去，所以 errors.Is 的分类不变，而 owner 看到的整条错误按界面语言翻译
+// （i18n.Error 实现了 Is，会顺着多个 %w 找）。系统 errno 文本、路径、argv 原文作为参数原样带出。
+var errProcArgsUnconfirmable = i18n.E("err.agentdeck.procargs.unconfirmable")
 
 // errProcArgsSelfCheck：确认不了的原因是运行时自检没过，对每个进程都一样（macOS，procs_darwin.go）。
-var errProcArgsSelfCheck = errors.New("procargs2 self check failed")
+var errProcArgsSelfCheck = i18n.E("err.agentdeck.procargs.selfcheck")
 
 // procTableName 是进程表的名字，写进错误里给人看。
 func procTableName(proc string) string {
