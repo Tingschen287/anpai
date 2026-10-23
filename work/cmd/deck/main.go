@@ -143,17 +143,18 @@ func fail(format string, a ...any) {
 // 界面语言（n060 段 3）。
 //
 // 选择存在设置里（agents.yaml 的 ui_lang），deckd 是唯一的真相，每个响应带 X-Deck-Lang。界面进程（panel、sidebar、tabs、settings、
-// center、idle）用 uiClient 建客户端：先按自己的环境变量猜一个（deckd 连不上时用），再向 deckd 对一次，之后每次请求的响应都带语言，
+// center、idle）用 uiClient 建客户端：先按首次语言规则猜一个（deckstore.ResolveUILang：设置里有就用，老用户文件没有就中文，全新安装按自己的环境变量；
+// deckd 连不上时用），再向 deckd 对一次，之后每次请求的响应都带语言，
 // 变了就换（侧栏、标签条每秒取一次，面板每 2 秒，所以改完语言后 1～2 秒内各进程都换过去，不用重启）。
 // deck agent、deck project、deck reports、whoami 这些命令行（给模型和 owner 的 shell）和 deckd、deck up 不跟：永远是中文。
 
 // uiClient 建界面进程用的 deckd 客户端，并先对一次界面语言。
 func uiClient(dirs deckstore.Dirs) *deckclient.Client {
-	i18n.SetLang(i18n.SystemLang(os.Getenv))
+	i18n.SetLang(deckstore.ResolveUILang(dirs.Config, os.Getenv))
 	c := deckclient.NewUI(deckd.SocketPath(dirs)).FollowLang()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	c.SyncLang(ctx) // 连不上就保持按环境变量猜的；循环里每次请求还会再对
+	c.SyncLang(ctx) // 连不上就保持先猜的；循环里每次请求还会再对
 	return c
 }
 

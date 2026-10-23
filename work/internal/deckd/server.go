@@ -34,9 +34,10 @@ type Config struct {
 	// UpstreamAddr 是 agent-deck headless 服务地址（例如 127.0.0.1:8420），用来读会话运行状态；留空则状态一律 unknown。
 	UpstreamAddr  string
 	UpstreamToken string
-	// SystemLang 是系统语言（zh 或 en）：owner 没在设置里选过界面语言时，界面用它（n060 段 3）。
+	// SystemLang 是系统语言（zh 或 en）：只在全新安装、deckd 第一次创建 agents.yaml 时写进 ui_lang（n060 段 3 返工，owner 定：
+	// 升级的老用户保持中文，全新安装才跟系统）。已有 agents.yaml 时它不起作用。
 	// 由 deck up 按它自己（owner 的 shell）的环境变量算好，经 deck daemon 的 -system-lang 传进来；
-	// 空（测试、没传）按中文。deckd 自己不换语言：给模型、落盘、日志的文字一直是中文，这个值只经 LangHeader 告诉界面。
+	// 空（测试、没传）时全新安装也不记语言（界面按中文）。deckd 自己不换语言：给模型、落盘、日志的文字一直是中文，界面语言只经 LangHeader 告诉界面。
 	SystemLang string
 }
 
@@ -123,19 +124,18 @@ func (s *Server) Handler() http.Handler {
 	return markFilter{next: mux, lang: s.uiLang}
 }
 
-// uiLang 是此刻的界面语言：owner 在设置里选的；没选过就是系统语言（Config.SystemLang）；再没有就是中文。
+// uiLang 是此刻的界面语言：设置里的 ui_lang；没有就是中文。
+// 没有 ui_lang 只会是升级的老用户（agents.yaml 在这次启动前就存在，且没有这个字段），和升级前一样用中文；
+// 全新安装在第一次创建 agents.yaml 时已经把系统语言（Config.SystemLang）写进了 ui_lang（deckstore.LoadSettingsFor），所以不再有「没选过就按系统」这一档。
 // 每个响应都带它（markFilter 写 i18n.LangHeader），界面进程据此换语言。
 func (s *Server) uiLang() string {
 	if l := s.store.UILang(); i18n.ValidLang(l) {
 		return l
 	}
-	if i18n.ValidLang(s.cfg.SystemLang) {
-		return s.cfg.SystemLang
-	}
 	return i18n.ZH
 }
 
-// getLang 回此刻的界面语言，以及它是 owner 选的（saved）还是跟随系统的。界面进程启动时用它先对一次语言，不必等第一个业务请求。
+// getLang 回此刻的界面语言，以及设置里有没有 ui_lang（saved：全新安装第一次创建文件时写进去的也算；没有的是升级的老用户，中文）。界面进程启动时用它先对一次语言，不必等第一个业务请求。
 func (s *Server) getLang(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"lang": s.uiLang(), "saved": i18n.ValidLang(s.store.UILang())})
 }
@@ -613,7 +613,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		Agents     *[]deckstore.AgentDef   `json:"agents"`
 		Projects   *[]deckstore.ProjectDef `json:"projects"`
 		Generation *int                    `json:"generation"`
-		// UILang：界面语言。不带这个字段（旧客户端、deck project add）表示不动已存的语言，不是「清空」；带 "" 才是清回跟随系统
+		// UILang：界面语言。不带这个字段（旧客户端、deck project add）表示不动已存的语言，不是「清空」；带 "" 才是清掉已存的选择（之后和老用户一样是中文）
 		UILang *string `json:"ui_lang"`
 	}
 	if err := readBody(r, &body); err != nil {

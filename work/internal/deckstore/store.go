@@ -48,6 +48,7 @@ type Store struct {
 	filesHash string
 	now       func() time.Time
 	broken    error
+	sysLang   string // 全新安装时写进 ui_lang 的系统语言（OpenWithLang 给的；空表示不记）
 	settings  Settings
 	sessions  map[string]*Session
 	trust     []TrustGrant
@@ -61,9 +62,13 @@ type Store struct {
 
 // Open 读回全部状态。executing 中的决定、launching 中的会话在重启后一律标为 uncertain：
 // 不知道它们执行到了哪一步，不能当成没发生，也不能自动重做。
-func Open(dirs Dirs) (*Store, error) {
-	s := &Store{dirs: dirs, now: time.Now, sessions: map[string]*Session{}, decs: map[string]*Decision{}}
-	set, err := LoadSettings(dirs.Config)
+func Open(dirs Dirs) (*Store, error) { return OpenWithLang(dirs, "") }
+
+// OpenWithLang 同 Open；systemLang（zh 或 en）只在全新安装、第一次创建 agents.yaml 时写进 ui_lang（见 LoadSettingsFor）。
+// 已存在的 agents.yaml 一概不动。
+func OpenWithLang(dirs Dirs, systemLang string) (*Store, error) {
+	s := &Store{dirs: dirs, now: time.Now, sessions: map[string]*Session{}, decs: map[string]*Decision{}, sysLang: systemLang}
+	set, err := LoadSettingsFor(dirs.Config, systemLang)
 	if err != nil {
 		return nil, i18n.E("err.deckstore.open.1", err)
 	}
@@ -296,7 +301,7 @@ func (s *Store) replaceSettings(next Settings, generation int) (int, error) {
 			// -1 只给 deckd 内部与测试用（ReplaceSettings）；界面带来的负数不当「不核对」（n057 自查）
 		} else if h := settingsFilesHash(s.dirs.Config); h != s.filesHash {
 			// 两份文件在 deckd 之外被改过（手改，n057 自查：以前会被界面保存悄悄盖掉）：不保存，读入改过的那份
-			disk, err := LoadSettings(s.dirs.Config)
+			disk, err := LoadSettingsFor(s.dirs.Config, s.sysLang)
 			if err != nil {
 				return nil, nil, i18n.E("err.deckstore.storereplacesettings.1", err)
 			}

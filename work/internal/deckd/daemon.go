@@ -97,7 +97,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	}
 	defer wl.Release()
 
-	store, err := deckstore.Open(cfg.Dirs)
+	store, err := deckstore.OpenWithLang(cfg.Dirs, cfg.SystemLang)
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,8 @@ import (
 )
 
 // 段 3：界面语言。deckd 是唯一的真相：每个响应带 X-Deck-Lang，GET /v1/lang 回此刻的语言；
-// 选择存在设置里（PUT /v1/settings 的 ui_lang），没选过按系统语言（deck up 传给 deckd 的 Config.SystemLang）。
+// 选择存在设置里（PUT /v1/settings 的 ui_lang）；没有 ui_lang 是升级的老用户，中文。全新安装在第一次创建 agents.yaml 时
+// 把系统语言（deck up 传给 deckd 的 Config.SystemLang）写进 ui_lang（返工：owner 定，老用户中文、新装跟系统）。
 // deckd 自己不换语言：给模型、落盘、日志的文字仍是中文。
 
 func langOf(t *testing.T, f *fixture) (lang string, saved bool, hdr string) {
@@ -51,12 +52,13 @@ func TestN060S3LangEndpointHeaderAndSystemFallback(t *testing.T) {
 	if l, saved, h := langOf(t, f); l != "zh" || saved || h != "zh" {
 		t.Fatalf("默认：%q saved=%v header=%q", l, saved, h)
 	}
-	// 没选过：跟随 deck up 传来的系统语言
+	// 返工：设置里没有 ui_lang（这份设置文件在这次启动前就有）就是升级的老用户，中文。
+	// 原来这里断言「没选过就跟随系统语言：en」，改成「系统语言是 en 也仍是 zh」：系统语言只在全新安装创建文件时起作用
 	f.srv.cfg.SystemLang = i18n.EN
-	if l, saved, h := langOf(t, f); l != "en" || saved || h != "en" {
-		t.Fatalf("跟随系统：%q saved=%v header=%q", l, saved, h)
+	if l, saved, h := langOf(t, f); l != "zh" || saved || h != "zh" {
+		t.Fatalf("老用户（没有 ui_lang）即使系统是英文也保持中文：%q saved=%v header=%q", l, saved, h)
 	}
-	// 系统语言不认识：当没传
+	// 系统语言不认识：同样不起作用
 	f.srv.cfg.SystemLang = "fr"
 	if l, _, _ := langOf(t, f); l != "zh" {
 		t.Fatalf("不认识的系统语言：%q", l)
@@ -111,16 +113,12 @@ func TestN060S3PutSettingsSavesLangAndItSticks(t *testing.T) {
 	if code != 200 {
 		t.Fatal(code)
 	}
-	// 清回跟随系统（带 ""）：回到系统语言
+	// 清掉已存的选择（带 ""）：和没选过的老用户一样是中文（返工：原来是「回到系统语言」，断言从 en 改成 zh；系统是 en 也一样）
 	if code, b := putS3Settings(t, f, func(m map[string]any) { m["ui_lang"] = "" }); code != 200 {
 		t.Fatalf("%d %s", code, b)
 	}
-	if l, saved, _ := langOf(t, f); l != "en" || saved {
-		t.Fatalf("清回跟随系统：%q saved=%v（系统是 en）", l, saved)
-	}
-	f.srv.cfg.SystemLang = i18n.ZH
-	if l, _, _ := langOf(t, f); l != "zh" {
-		t.Fatalf("系统换成中文：%q", l)
+	if l, saved, _ := langOf(t, f); l != "zh" || saved {
+		t.Fatalf("清掉选择：%q saved=%v（系统是 en，仍应是中文）", l, saved)
 	}
 }
 

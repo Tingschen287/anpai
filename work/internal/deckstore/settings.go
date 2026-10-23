@@ -149,7 +149,7 @@ type Settings struct {
 	Projects []ProjectDef `yaml:"projects" json:"projects"`
 	// Generation 是两份设置文件当前的代数（n057）：整份保存时要带上读到的代数，对不上就拒绝（别处在这期间改过）。
 	Generation int `yaml:"-" json:"generation"`
-	// UILang 是 owner 在设置里选的界面语言（n060 段 3）：zh、en，或空（没选过：第一次按系统语言，见 deckd.Config.SystemLang）。
+	// UILang 是 owner 在设置里选的界面语言（n060 段 3）：zh、en，或空（没选过，即升级的老用户：界面中文；全新安装第一次创建文件时已按系统语言写进来，见 LoadSettingsFor）。
 	// 存在 agents.yaml 的可选字段 ui_lang 里；空时不写这个字段，没有这个字段的旧文件照常读取，也不会因为别的保存被补上。
 	UILang string `yaml:"-" json:"ui_lang,omitempty"`
 }
@@ -512,7 +512,21 @@ func readSettings(cfgDir string) (agentsFile, projectsFile, bool, error) {
 	return a, p, haveAgents, nil
 }
 
-func LoadSettings(cfgDir string) (Settings, error) {
+// LoadSettings 同 LoadSettingsFor(cfgDir, "")：全新安装时不记语言（没有人告诉它系统语言）。deckd 走 LoadSettingsFor。
+func LoadSettings(cfgDir string) (Settings, error) { return LoadSettingsFor(cfgDir, "") }
+
+// LoadSettingsFor 读设置；agents.yaml 不存在（全新安装）时生成默认清单并写出来。
+//
+// 首次语言规则（n060 段 3 返工，owner 2026-10-20 定）：
+//   - agents.yaml 里有 ui_lang：用它。
+//   - agents.yaml 已存在但没有 ui_lang：升级的老用户，界面保持中文（deckd 的 uiLang 兜底），**不改写这个文件**（读取不写任何东西）。
+//   - agents.yaml 不存在：全新安装，按系统语言（systemLang，zh 或 en；C、POSIX、C.UTF-8 算 en）。第一次创建文件时就把它写进 ui_lang：
+//     否则第二次启动看到文件已存在、没有 ui_lang，会按老用户处理成中文，前后不一致。
+//
+// 「这次启动前文件已经存在」的判断点就是这里的 readSettings：它在本函数写任何东西之前读 agents.yaml，haveAgents 为 false 才是全新安装。
+// 创建 agents.yaml 的路径只有两条：这里（首次运行；deckd 启动的 Store.Open，以及运行中 agents.yaml 被删后保存时的重读），
+// 和 saveSettings（owner 在界面里保存，文件此时已存在，ui_lang 原样带着）。deck project add、deck up、deck settings -check 都不创建它。
+func LoadSettingsFor(cfgDir, systemLang string) (Settings, error) {
 	a, p, haveAgents, err := readSettings(cfgDir)
 	if err != nil {
 		return Settings{}, err
@@ -520,7 +534,10 @@ func LoadSettings(cfgDir string) (Settings, error) {
 	s := Settings{Agents: a.Agents, Projects: p.Projects, Generation: p.Generation, UILang: a.UILang}
 	if !haveAgents {
 		s.Agents = DefaultAgents()
-		if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: p.Generation, Agents: s.Agents}); err != nil {
+		if i18n.ValidLang(systemLang) {
+			s.UILang = systemLang
+		}
+		if err := saveYAML(filepath.Join(cfgDir, "agents.yaml"), agentsFile{Generation: p.Generation, Agents: s.Agents, UILang: s.UILang}); err != nil {
 			return Settings{}, err
 		}
 	}
@@ -529,6 +546,23 @@ func LoadSettings(cfgDir string) (Settings, error) {
 		return Settings{}, i18n.E("err.deckstore.loadsettings.1", cfgDir, err)
 	}
 	return s, nil
+}
+
+// ResolveUILang 是界面进程在连上 deckd 之前先猜的语言（deckd 连上后以它的为准）：与 LoadSettingsFor 的首次语言规则一致，但只读。
+// agents.yaml 有合法的 ui_lang：用它；文件存在但没有（升级的老用户）：中文；文件不存在（全新安装）：按环境变量判断的系统语言。
+func ResolveUILang(cfgDir string, getenv func(string) string) string {
+	data, err := os.ReadFile(filepath.Join(cfgDir, "agents.yaml"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return i18n.SystemLang(getenv)
+		}
+		return i18n.ZH
+	}
+	var a agentsFile
+	if yaml.Unmarshal(data, &a) == nil && i18n.ValidLang(a.UILang) {
+		return a.UILang
+	}
+	return i18n.ZH
 }
 
 // CheckSettings 只读检查设置文件，不写任何东西（升级前自查用：deck settings -check）。

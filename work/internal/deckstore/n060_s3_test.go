@@ -65,7 +65,7 @@ func TestN060S3UILangRoundTrip(t *testing.T) {
 		}
 		s = again
 	}
-	// 清回「跟随系统」：字段不再写出
+	// 清回「没选过」：字段不再写出
 	s.UILang = ""
 	if err := SaveSettings(d.Config, s); err != nil {
 		t.Fatal(err)

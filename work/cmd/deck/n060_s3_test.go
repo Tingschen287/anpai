@@ -159,7 +159,7 @@ func TestN060S3PauseScreenFollowsTheLanguage(t *testing.T) {
 	}
 }
 
-// 第一次运行（deckd 还没有、也没保存过语言）：界面进程按真实环境变量判断，LC_ALL → LC_MESSAGES → LANG → LANGUAGE。
+// 全新安装第一次运行（没有 agents.yaml、deckd 还没有）：界面进程按真实环境变量判断，LC_ALL → LC_MESSAGES → LANG → LANGUAGE。
 // 用 t.Setenv 注入各种组合，包括 C、POSIX、C.UTF-8、空；deckd 手动起（没传 -system-lang）时同一套判断。
 func TestN060S3FirstRunFollowsTheSystemLanguage(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })

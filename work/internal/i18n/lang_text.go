@@ -9,7 +9,7 @@ var langTextZH = map[Key]string{
 	"settings.lang.en":                  "English",
 	"help.lang":                         "空格或 ⏎ 在中文与 English 之间切换，保存后立刻生效，不用重启",
 	"legacy.label":                      "旧记录",
-	"err.deckstore.settingsvalidate.17": "界面语言 %s 不认识：只能是 zh 或 en（留空表示跟随系统）",
+	"err.deckstore.settingsvalidate.17": "界面语言 %s 不认识：只能是 zh 或 en（留空表示没选过）",
 }
 
 var langTextEN = map[Key]string{
@@ -18,7 +18,7 @@ var langTextEN = map[Key]string{
 	"settings.lang.en":                  "English",
 	"help.lang":                         "Space or Enter switches between Chinese and English. It applies as soon as it is saved, no restart",
 	"legacy.label":                      "Earlier record",
-	"err.deckstore.settingsvalidate.17": "UI language %s is not known: use zh or en (leave it empty to follow the system)",
+	"err.deckstore.settingsvalidate.17": "UI language %s is not known: use zh or en (leave it empty for no choice)",
 }
 
 func init() {
