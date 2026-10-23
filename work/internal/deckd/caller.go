@@ -38,7 +38,7 @@ func withConn(ctx context.Context, c net.Conn) context.Context {
 }
 
 // peerOf 取连接的对端：pid、连接建立时间，以及（系统支持时）绑定对端进程本身的生命周期检查
-// （Linux 是 pidfd，macOS 是出生时间，见 identity.PeerLifetime）——
+// （Linux 是 pidfd，macOS 是连接 audit token 里的 pidversion，见 identity.PeerLifetime）——
 // 连接身份绑定到进程，而不只是一个会被复用的整数 pid（n050 评审 R4）。内核不支持 SO_PEERPIDFD 时
 // 返回没有 Same 的 Peer，由 classify 降为未知调用者（评审 A3-1）；其他错误按身份查询失败处理（不能写）。
 // done 必须调用。
