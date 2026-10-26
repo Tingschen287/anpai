@@ -320,7 +320,7 @@ func checkFormatArgs(t *testing.T) {
 // prodDirs 是第 2 段要核对「键有人用、参数个数对」的包。不把它们放进 coveredDirs：那里禁中文字面量。
 // viewstate 在这份名单里，这样哨兵的字面量调用才算「有人用」。
 func prodDirs() []string {
-	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock", "projectctl"), cmdDeckDir())
+	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "lease", "writerlock", "projectctl", "sessionenv"), cmdDeckDir())
 }
 
 // cmdDeckDir 是 cmd/deck：deck center 自己往中间窗格画字（fence、Pause），也在「键有人用、参数个数对」和中文字面量的核对之内（返工 4）。
@@ -335,7 +335,7 @@ func cmdDeckDir() string {
 // ownerScanDirs 是「函数里不能再留中文字面量」的包。
 // viewstate 也在里面，按函数登记哨兵正文，不整包排除。
 func ownerScanDirs() []string {
-	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate"), cmdDeckDir())
+	return append(pkgDirs("deckd", "deckstore", "agentdeck", "deckclient", "viewstate", "sessionenv"), cmdDeckDir()) // sessionenv：段 4 新包，同样禁中文字面量
 }
 
 func pkgDirs(names ...string) []string {

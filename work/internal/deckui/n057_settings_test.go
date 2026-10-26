@@ -200,7 +200,7 @@ func TestRenameRemoveAndGuards(t *testing.T) {
 func TestMainAgentFollowsTierLists(t *testing.T) {
 	m, _ := n057Fixture()
 	p := m.project()
-	p.Models[deckstore.Balanced] = deckstore.ModelList{"gpt-5.6-terra"}
+	p.Models[deckstore.Balanced] = deckstore.ModelList{"gpt-6.1-sol"} // n060 段 4：codex 默认的日常档换成 gpt-6.1-sol
 	opts := m.mainOptions(p)
 	if len(opts) != 2 || opts[0] != (deckstore.MainAgent{Agent: "claude", Tier: deckstore.Frontier}) || opts[1] != (deckstore.MainAgent{Agent: "codex", Tier: deckstore.Balanced}) {
 		t.Fatalf("可选的主 agent：%v", opts)

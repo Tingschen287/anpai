@@ -27,7 +27,7 @@
 | Linux 内核 6.5 或更新 | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程。内核不支持时 `deckd` 不给任何调用者身份：未知调用者只能读健康状态、`whoami` 与额度，侧栏、设置、决策与通知面板都会被拒，布局基本用不了（不是只读模式）。用 `uname -r` 看内核版本；较新的 WSL 2 内核通常已经满足 |
 | tmux | 开发与实测用 3.4；代码里没有版本检查 |
 | upstream agent-deck | 命令名 `agent-deck`，要在 `PATH` 里（或用环境变量 `WORKDECK_AGENTDECK_BIN` 指路）。对接并逐条核对过的是 v1.15.0（提交 `01c011b`），按上游项目自己的说明安装 |
-| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`gemini`；在 F9 设置里按本机装了的加入。`grok` 与 `agy` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），写法见 [`work/README.md`](work/README.md) |
+| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`kimi`（Kimi Code）、`gemini`；在 F9 设置里按本机装了的加入。`grok`、`agy`、`kimi` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`）、`[tools.kimi]`（`command = "kimi"`），写法见 [`work/README.md`](work/README.md)。deck 找这些 CLI 用的 PATH 与 agent-deck 起会话用的是同一份（登录 shell 里 deckd 没有的目录加在最前面，deckd 自己的 PATH 顺序不变），所以装在 `~/.kimi-code/bin`、`~/.local/bin` 这类只有登录 shell 才有的目录里也认得到 |
 
 deck 起会话前会检查 upstream agent-deck 的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck/config.toml`，
 没设 `XDG_CONFIG_HOME` 就是 `~/.config/agent-deck/config.toml`；没有时回退 `~/.agent-deck/config.toml`），

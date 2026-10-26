@@ -49,9 +49,12 @@ var ToolsAcceptingModel = []string{"claude", "codex", "gemini", "opencode"}
 
 // ToolsModelViaCommand 是在上游配置里登记成自定义工具、CLI 自己有模型参数的工具 → 那个参数（n057）。
 //
+// kimi（n060 段 4 加入）：Kimi Code 2.3.2 的 `-m, --model <别名>` 仍在；上游配置里要有 [tools.kimi]（只写 command 与 icon），
+// 隔离环境实测 `-c "kimi --model <模型>"` 把 `--model <模型>` 原样接在 kimi 的 argv 上（见 stage-4/kimi/）。
+//
 // 上游 launch 对自定义工具不接受 --model（internal/session/instance.go:9358 ApplyLaunchModel，launch 直接退出 1），
 // 但 -c "<工具> 参数…" 会把工具名后面的参数接在命令末尾（cmd/agent-deck/cli_utils.go:271-279），模型就这样传给 CLI。
-var ToolsModelViaCommand = map[string]string{"grok": "--model", "antigravity": "--model"}
+var ToolsModelViaCommand = map[string]string{"grok": "--model", "antigravity": "--model", "kimi": "--model"}
 
 // ToolsWithoutModel 是上游内置、根本没有模型可选的工具：给它传 --model，上游 launch 直接失败（n040 终审断点 3）。
 var ToolsWithoutModel = []string{"shell"}

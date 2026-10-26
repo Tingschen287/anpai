@@ -274,6 +274,8 @@ func creatorOf(c Caller) string {
 // runSpawn 过两道门、预留、启动。plan.x.Role 决定是开子 agent 还是主 agent。
 func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, plan spawnPlan, exception, graphNode string) {
 	x, p := plan.x, plan.project
+	// 这次派工只取一份会话 PATH：trust 门查可执行文件与版本、agent-deck launch 起会话都用它（n060 段 4）
+	ctx, _, _ = s.sessionScope(ctx, false)
 	// Codex trust 门（§14.3）
 	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !(trust == agentdeck.CodexTrustMaybe && s.notCodex(x.Tool)) {
 		path, version, err := s.agents.toolInfo(ctx, plan.agent.Binary)
@@ -395,7 +397,7 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		writeJSON(w, code, map[string]any{"error": failErr.Error(), "code": wcode, "args": wargs, "session": key, "uncertain": uncertain})
 		return
 	}
-	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
+	// 模型经命令传的自定义工具（grok、antigravity、kimi）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
 	// 那样起的不是 owner 选的 agent，停掉、不送任务
 	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
 		why := i18n.E("err.deckd.serverrunspawn.15", x.Tool, out.Tool, x.Tool)

@@ -121,10 +121,10 @@ func TestPutSettingsKeepsLaunchFieldsOutOfUI(t *testing.T) {
 		s.Agents = append(s.Agents, deckstore.AgentDef{ID: "gemini", Name: "Gemini CLI", Tool: "gemini", Binary: "gemini",
 			Models: []deckstore.ModelDef{{ID: "gemini-3.8-pro", Tier: deckstore.Frontier}}})
 		s.Projects[0].Agents = []string{"claude", "codex", "gemini"}
-		s.Projects[0].Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gemini-3.8-pro", "gpt-6.1-sol"}
+		s.Projects[0].Models[deckstore.Frontier] = deckstore.ModelList{"claude-opus-5-5", "gemini-3.8-pro", "gpt-6-astra"}
 	}, 200, "")
 	got := getSettings(t, f)
-	if strings.Join(got.Projects[0].Models[deckstore.Frontier], ",") != "claude-opus-5-5,gemini-3.8-pro,gpt-6.1-sol" {
+	if strings.Join(got.Projects[0].Models[deckstore.Frontier], ",") != "claude-opus-5-5,gemini-3.8-pro,gpt-6-astra" {
 		t.Fatalf("多选清单按顺序存下：%v", got.Projects[0].Models)
 	}
 }
@@ -134,7 +134,7 @@ func TestTierListSkipsExhaustedAgent(t *testing.T) {
 	w := newAgentWorld(t)
 	set := w.store.Settings()
 	for i := range set.Projects {
-		set.Projects[i].Models[deckstore.Balanced] = deckstore.ModelList{"gpt-5.6-terra", "claude-sonnet-5-5"}
+		set.Projects[i].Models[deckstore.Balanced] = deckstore.ModelList{"gpt-6.1-sol", "claude-sonnet-5-5"}
 	}
 	if err := w.store.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
@@ -297,10 +297,10 @@ func TestN057SelfCheckGuards(t *testing.T) {
 	if code != 502 || !strings.Contains(b, "[tools.grok]") || !strings.Contains(strings.Join(w.up.stops, ","), "ad-shell") {
 		t.Fatalf("没登记时上游起成 shell：也停掉：%d %s stops=%v", code, b, w.up.stops)
 	}
-	for _, e := range Catalog {
-		if e.Tool == "kimi" {
-			t.Fatal("kimi 不在可加入的目录里（模型参数没核实）")
-		}
+	// n060 段 4 起 kimi 在目录里了（Kimi Code 2.3.2 的 --model 已核实，模型经命令传，同 grok）；这一条原先断言「kimi 不在目录里」，
+	// 现在改成断言它在、而且走和 grok 同一条路（见 TestN060S4CatalogDefaults、TestN060S4KimiSpawnPassesTheModelAndChecksTheTool）
+	if _, ok := CatalogTool("kimi"); !ok {
+		t.Fatal("kimi 应在可加入的目录里（n060 段 4）")
 	}
 }
 

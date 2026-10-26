@@ -187,11 +187,18 @@ deck reports deliver-now [--project <id>]
   只说档位派活时按顺序取第一个额度没显示用尽的（看板确知用尽才跳过，未知照常用）；frontier 全都用尽时照用第一个、交给额度门上报 owner，其他档位说明原因、不派。
   点名某个模型时不看清单：勾选的 agent 的模型都能点名用。主 agent 用它那一档清单里它自己的第一个模型。`deck agent` 起子 agent 前问 deckd（`GET /v1/resolve`）这一档现在会派哪个。
 - 模型 id 只能是字母数字和 `. _ / : @ + -`（它会进 CLI 的命令行），保存时与派工时都查。
-- 默认 `agents.yaml` 含 claude、codex、grok、antigravity（`agy`）、opencode、kimi 六项。设置里「加入」认识的 CLI 是 claude、codex、opencode、grok、`agy`、gemini
-  （kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（20 秒为限），claude、codex、gemini 没有列模型的命令，手填。
+- 默认 `agents.yaml`（只有这个文件不存在时才生成，已有的设置文件一个字节都不改）含 claude、codex、grok、antigravity（`agy`）、opencode、kimi 六项；
+  codex 的默认三档是 `gpt-6-astra`（最强）、`gpt-6.1-sol`（日常）、`gpt-6-luna`（便宜），kimi 是 `kimi-code/k3`（日常）与 `kimi-for-coding`（便宜）。
+  设置里「加入」认识的 CLI 是 claude、codex、opencode、grok、`agy`、kimi、gemini。加模型时 codex 会跑一次 `codex debug models` 列出候选（只列 `visibility` 为 `list` 的），
+  grok、agy、opencode 会跑一次它们自己的 `models`（都是 20 秒为限；列不出来就退回手填并说明原因），claude、kimi、gemini 没有列模型的命令，手填。
   命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
-- **grok、Antigravity** 不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），
-  只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。
+- **找 CLI 用的 PATH（会话 PATH）**：agent-deck 起的会话用的是启动它的进程（deckd）的 PATH，不读 rc 文件、也不读 tmux server 的环境。
+  `deck daemon` 因此在启动时解析一次登录交互 shell 的 PATH（`$SHELL -l -i -c`，5 秒超时，超时杀掉整个进程组，rc 里的杂音不会被当成结果），与自己进程的 PATH 合并（登录 shell 里 deckd 没有的目录加在最前面，deckd 自己的目录保持原来的顺序跟在后面），
+  设置里显示的「已装」「路径」「版本」、Codex trust 门记下的可执行文件与版本、列模型都按这份 PATH 查，起会话时也把同一份交给 `agent-deck launch`，
+  所以 trust 门记下的就是会话里实际跑的那个 CLI。取不到时（没有可用的 shell、超时、输出不对）退回 deckd 自己的 PATH，设置的「加入」页与 agent 页会给出一行原因。
+  不改你的 shell 配置；rc 里要避开 deck 的解析，可以判断环境变量 `ANPAI_PATH_PROBE`。
+- **grok、Antigravity、Kimi Code** 不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`）、`[tools.kimi]`（`command = "kimi"`），
+  只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。模型经 `-c "<工具> --model <模型>"` 传给 CLI（上游 `launch` 不接受自定义工具的 `--model`）。
 - **升级前自查**：项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等控制字符。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`。
 
 ## 与 upstream agent-deck 的对接

@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
@@ -49,6 +50,21 @@ type modelInput struct {
 type toolsMsg struct {
 	tools []ToolInfo
 	err   error
+}
+
+// toolsBgMsg 是后台取工具目录的结果（只用来判断「没装」标记）：失败不出声，照旧在本进程的 PATH 里找。
+type toolsBgMsg struct {
+	tools []ToolInfo
+	err   error
+}
+
+func (m *Settings) fetchToolsBg() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		t, err := m.API.Tools(ctx)
+		return toolsBgMsg{tools: t, err: err}
+	}
 }
 
 type toolModelsMsg struct {
@@ -93,7 +109,7 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 			m.msg = later(func() string { return T("tools.fail", errLong(err)) })
 			return nil
 		}
-		m.tools = msg.tools
+		m.tools, m.deckTools = msg.tools, msg.tools
 		if m.sub != nil && m.sub.kind == subAdd {
 			m.msg = nil
 		}
@@ -130,6 +146,34 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// pathNote 是「没取到会话 PATH、退回 deckd 自己的 PATH 找 CLI」的提示（n060 段 4）：deckd 回的是码与参数，这里按当前语言翻译。没有这回事就空。
+func (m *Settings) pathNote() string {
+	for _, t := range m.tools {
+		if t.NoteCode == "" && t.Note == "" {
+			continue
+		}
+		note := t.Note
+		if t.NoteCode != "" {
+			note = deckclient.Text(t.NoteCode, t.NoteArgs, t.Note)
+		}
+		return oneLine(deckstore.Display(note, textCap))
+	}
+	return ""
+}
+
+// pathNoteLines 把 pathNote 折成几行（橙色，行首留两格）；没有提示就没有行。
+func (m *Settings) pathNoteLines() string {
+	n := m.pathNote()
+	if n == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, l := range m.wrap(n, 2) {
+		b.WriteString(orange + "  " + l + reset + "\n")
+	}
+	return b.String()
 }
 
 func (m *Settings) toolInfo(tool string) (ToolInfo, bool) {
@@ -272,6 +316,7 @@ func (m *Settings) addView() (string, []string) {
 		}
 	}
 	b.WriteString("\n" + m.note(T("add.about")))
+	b.WriteString(m.pathNoteLines())
 	return b.String(), m.msgFoot()
 }
 
@@ -386,6 +431,7 @@ func (m *Settings) agentView() (string, []string) {
 		}
 	}
 	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitizeFull(a.Tool)) + reset + "\n")
+	b.WriteString(m.pathNoteLines())
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {

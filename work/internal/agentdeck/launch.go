@@ -61,7 +61,7 @@ func (r LaunchRequest) Validate() error {
 }
 
 // toolArg 是 launch -c 的取值：工具名；codex 带声明的额外参数时接在后面（逐个 shell 转义）；
-// 模型经命令传的自定义工具（grok、antigravity）把模型参数接在后面（n057）。
+// 模型经命令传的自定义工具（grok、antigravity、kimi）把模型参数接在后面（n057）。
 func (r LaunchRequest) toolArg() string {
 	if flag := ToolsModelViaCommand[r.Tool]; flag != "" && !r.ModelNotApplicable {
 		return r.Tool + " " + flag + " " + shQuote(r.Model)

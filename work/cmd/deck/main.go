@@ -101,7 +101,9 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc,
+	// SessionPath：找 agent CLI 与起会话用同一份 PATH（登录 shell 的 PATH 与 deckd 自己的合并，n060 段 4，见 internal/sessionenv）。
+	// 只在 deck daemon 里开；解析会运行 owner 的 shell 启动文件，测试里的 deckd.Run 不开
+	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc, SessionPath: true,
 		UpstreamAddr: *upstream, UpstreamToken: config.Token(), SystemLang: daemonSystemLang(*sysLang, os.Getenv)}
 	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", deckd.SocketPath(dirs), *profile)
 	if err := deckd.Run(ctx, cfg, deckd.NewTmuxCenter(*layout, *agent)); err != nil {

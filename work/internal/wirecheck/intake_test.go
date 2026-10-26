@@ -54,6 +54,7 @@ var intakeFiles = map[string]intake{
 	"internal/writerlock/writerlock.go": {exempt, "读 deck 自己写的锁文件，只有进程号和时间"},
 	"internal/identity/identity.go":     {exempt, "读 /proc 里的数字字段（进程号、起始时间），没有文字"},
 	"internal/agentdeck/procbypass.go":  {exempt, "读 /proc/<pid>/stat 里的数字字段，没有文字"},
+	"internal/agentdeck/loginshell.go":  {exempt, "登录 shell 的输出（只返回给 sessionenv，它只取随机边界之间的 PATH，逐项只留绝对路径、无控制字符、不含打码标记字符、不过长的目录）；输出本身不显示、不进错误参数，错误只带 shell 路径、等待时长与退出状态"},
 	"internal/agentdeck/clients.go":     {exempt, "tmux list-clients 的输出只数行数，输出文字不进任何参数"},
 	"internal/agentdeck/attach.go":      {exempt, "只构造 tmux attach 命令，不读它的输出"},
 	"internal/binding/store.go":         {exempt, "读 deck 自己写的节点绑定文件，只有节点号和会话号"},

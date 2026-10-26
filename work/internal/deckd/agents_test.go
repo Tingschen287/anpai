@@ -158,7 +158,7 @@ func newAgentWorld(t *testing.T) *agentWorld {
 	set := f.store.Settings()
 	for i := range set.Projects {
 		set.Projects[i].Agents = []string{"claude", "codex"}
-		set.Projects[i].Models = map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}, deckstore.Balanced: {"claude-sonnet-5-5"}, deckstore.Economy: {"gpt-5.6-luna"}}
+		set.Projects[i].Models = map[deckstore.Tier]deckstore.ModelList{deckstore.Frontier: {"claude-opus-5-5"}, deckstore.Balanced: {"claude-sonnet-5-5"}, deckstore.Economy: {"gpt-6-luna"}}
 	}
 	if err := f.store.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestSpawnOverEnvelopeNeedsApprovedExceptionOnce(t *testing.T) {
 func TestSpawnCodexTrustRememberedPerToolVersion(t *testing.T) {
 	w := newAgentWorld(t)
 	codex := func(req string) string {
-		return spawnJSON("economy", "codex 任务", "t", req, "/tmp/alpha", "", "codex", "gpt-5.6-luna")
+		return spawnJSON("economy", "codex 任务", "t", req, "/tmp/alpha", "", "codex", "gpt-6-luna")
 	}
 	code, b := w.do("main", "POST", "/v1/agents", codex("c1"))
 	if code != 202 {

@@ -160,12 +160,14 @@ func DefaultEnvelope(projectID string) Envelope {
 }
 
 // DefaultAgents 是首次运行时生成的全局清单。档位初值取 1.design/model-routing.md，owner 可改。
+// Codex 的三档是 owner 2026-10-16 定的 gpt-6-astra（最强）、gpt-6.1-sol（日常）、gpt-6-luna（便宜）；只有 agents.yaml 不存在时才用这份，
+// 已有的设置文件一个字节都不改（n060 段 4，TestN060S4ExistingSettingsFilesAreNotChanged）。
 func DefaultAgents() []AgentDef {
 	return []AgentDef{
 		{ID: "claude", Name: "Claude Code", Tool: "claude", Binary: "claude", Models: []ModelDef{
 			{"claude-opus-5-5", Frontier}, {"claude-fable-5-1", Frontier}, {"claude-sonnet-5-5", Balanced}, {"claude-haiku-5-5", Economy}}},
 		{ID: "codex", Name: "Codex", Tool: "codex", Binary: "codex", Models: []ModelDef{
-			{"gpt-6.1-sol", Frontier}, {"gpt-5.6-terra", Balanced}, {"gpt-5.6-luna", Economy}}},
+			{"gpt-6-astra", Frontier}, {"gpt-6.1-sol", Balanced}, {"gpt-6-luna", Economy}}},
 		{ID: "grok", Name: "Grok Build", Tool: "grok", Binary: "grok", Agent: true, Models: []ModelDef{
 			{"grok-4.7", Frontier}, {"grok-4.7-build-fast", Balanced}, {"grok-4.5", Economy}}},
 		{ID: "antigravity", Name: "Antigravity", Tool: "antigravity", Binary: "agy", Agent: true, Models: []ModelDef{

@@ -20,6 +20,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
+	"github.com/Tingschen287/terminal-deck/work/internal/sessionenv"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
@@ -39,6 +40,13 @@ type Config struct {
 	// 由 deck up 按它自己（owner 的 shell）的环境变量算好，经 deck daemon 的 -system-lang 传进来；
 	// 空（测试、没传）时全新安装也不记语言（界面按中文）。deckd 自己不换语言：给模型、落盘、日志的文字一直是中文，界面语言只经 LangHeader 告诉界面。
 	SystemLang string
+	// SessionEnv 解析「会话 PATH」（n060 段 4，见 internal/sessionenv）：deckd 找 agent CLI 的已装与版本、Codex trust 门记下的可执行文件、
+	// 列模型、以及交给 agent-deck launch 的 PATH 都用它。nil（测试、没开）= 按 deckd 自己进程的 PATH，行为与以前一样。
+	// deck daemon 在生产里开它；解析登录 shell 会运行 owner 的 shell 启动文件，所以测试默认不开。
+	SessionEnv *sessionenv.Resolver
+	// SessionPath 为真时 Run 自己建一个解析登录 shell 的 Resolver（SessionEnv 为 nil 才建）并在后台先解析一次，第一次打开设置时就不用等。
+	// 只有 deck daemon 设它。
+	SessionPath bool
 }
 
 type paneResolver interface {

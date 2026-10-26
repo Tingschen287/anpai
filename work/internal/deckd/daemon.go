@@ -97,6 +97,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	}
 	defer wl.Release()
 
+	cfg.startSessionEnv(ctx) // n060 段 4：会话 PATH（deck daemon 才开）
 	store, err := deckstore.OpenWithLang(cfg.Dirs, cfg.SystemLang)
 	if err != nil {
 		return err
@@ -143,7 +144,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		if cfg.Projectctl != "" {
 			gs = projectctlGraphStart(cfg.Projectctl)
 		}
-		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		srv.WithAgents(up, leases, scopedToolInfo, gs)
 		if cfg.Projectctl != "" {
 			script := cfg.Projectctl
 			srv.agents.graphState = func(ctx context.Context, p deckstore.ProjectDef, node string) (projectctl.State, error) {

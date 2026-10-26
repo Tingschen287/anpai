@@ -70,7 +70,7 @@ projects:
 func multiSettings() Settings {
 	return Settings{Agents: DefaultAgents(), Projects: []ProjectDef{{ID: "p", Name: "P", Path: "/tmp/p",
 		Agents:    []string{"claude", "codex", "grok"},
-		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5", "gpt-6.1-sol", "grok-4.7"}, Balanced: {"claude-sonnet-5-5"}},
+		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5", "gpt-6-astra", "grok-4.7"}, Balanced: {"claude-sonnet-5-5"}},
 		MainAgent: MainAgent{Agent: "codex", Tier: Frontier}, Envelope: DefaultEnvelope("p")}}}
 }
 
@@ -83,12 +83,12 @@ func TestResolveTierOrderAgentAndExhausted(t *testing.T) {
 	if r, _ := s.ResolveTierFor("p", Frontier, "", none); r.Model != "claude-opus-5-5" {
 		t.Fatalf("按清单顺序取第一个：%+v", r)
 	}
-	if r, _ := s.ResolveTierFor("p", Frontier, "codex", none); r.Model != "gpt-6.1-sol" || r.Agent.ID != "codex" {
+	if r, _ := s.ResolveTierFor("p", Frontier, "codex", none); r.Model != "gpt-6-astra" || r.Agent.ID != "codex" {
 		t.Fatalf("点了 agent 就只看它的模型：%+v", r)
 	}
 	asked := map[string]int{}
 	claudeOut := func(a AgentDef) bool { asked[a.ID]++; return a.ID == "claude" }
-	if r, _ := s.ResolveTierFor("p", Frontier, "", claudeOut); r.Model != "gpt-6.1-sol" {
+	if r, _ := s.ResolveTierFor("p", Frontier, "", claudeOut); r.Model != "gpt-6-astra" {
 		t.Fatalf("claude 额度用尽：取下一个：%+v", r)
 	}
 	if asked["claude"] != 1 || asked["grok"] != 0 {

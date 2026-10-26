@@ -39,6 +39,7 @@ var knownArgs = map[string]map[string]int{
 	// 上游登记里不写 resume_flag、dangerous_flag，不会再加别的参数
 	"grok":        {"--model": 1},
 	"antigravity": {"--model": 1},
+	"kimi":        {"--model": 1}, // n060 段 4：同 grok，经 -c "kimi --model <模型>" 传；kimi 的 -m 简写不在白名单里（deck 只发 --model）
 	// opencode（上游内置）：-m <模型>、恢复时 -s <会话号>、事件端口 --port <N>（上游 internal/session/instance.go:1894-1964
 	// buildOpenCodeCommand/ExtraFlags/SSEPortFlag；n057 自查：以前不在这里，OpenCode 起来就被停掉）。--agent 不在白名单里：
 	// 它换用 OpenCode 自己配置的 agent，权限由那份配置定

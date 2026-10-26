@@ -53,10 +53,22 @@ type ToolInfo struct {
 	Error     string               `json:"error"`
 	Added     bool                 `json:"added"`
 	CanList   bool                 `json:"can_list"`
+	// 按哪份 PATH 查的（n060 段 4）：login-shell 是会话 PATH；process 是没取到会话 PATH、退回 deckd 自己的，此时 Note* 说明原因
+	PathSource string `json:"path_source,omitempty"`
+	Note       string `json:"note,omitempty"`
+	NoteCode   string `json:"note_code,omitempty"`
+	NoteArgs   []any  `json:"note_args,omitempty"`
 }
+
+// toolsPreloader 是设置接口可选的能力：读完设置后在后台取一次工具目录（deckd 按会话 PATH 查各 CLI 装没装），只用来决定「没装」的标记。
+// 真接口有；测试里的假接口按需加（没有它就不取，行为与以前一样）。
+type toolsPreloader interface{ PreloadTools() bool }
 
 // DeckSettingsAPI 走 deckd。
 type DeckSettingsAPI struct{ C *deckclient.Client }
+
+// PreloadTools：设置进程自己的 PATH 与会话的未必一样，装没装以 deckd 说的为准（n060 段 4）。
+func (a DeckSettingsAPI) PreloadTools() bool { return true }
 
 func (a DeckSettingsAPI) Load(ctx context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
 	var s deckstore.Settings
@@ -193,6 +205,10 @@ type Settings struct {
 	hint  lazyText     // 下一次保存成功后显示的提示（新建项目后的下一步）
 	sub   *subView     // 不为 nil：正在编辑一个 agent、加入 agent、编辑某一档清单（n057）
 	tools []ToolInfo   // 工具目录（打开「加入」或 agent 时读）
+	// deckTools：deckd 说的各 CLI 装没装（第一次读完设置后在后台取一次，打开「加入」或 agent 时刷新）。
+	// 「没装」标记以它为准：deckd 按会话 PATH 查，设置进程自己的 PATH 与会话的未必一样（n060 段 4）。
+	deckTools []ToolInfo
+	toolsAsk  bool // 已经发出过后台取工具目录
 }
 
 type loadedMsg struct {
@@ -252,6 +268,8 @@ func (m *Settings) touch() {
 	m.edits++
 }
 
+// installed 说明一个 agent 的命令装没装。顺序：测试注入的 Installed；deckd 按会话 PATH 查的结果（命令与工具目录里的一致时）；
+// 都没有（deckd 还没答复、旧 deckd、自定义命令）才在本进程的 PATH 里找（n060 段 4：本进程的 PATH 与会话的未必一样）。
 func (m *Settings) installed(a deckstore.AgentDef) bool {
 	bin := a.Binary
 	if bin == "" {
@@ -259,6 +277,11 @@ func (m *Settings) installed(a deckstore.AgentDef) bool {
 	}
 	if m.Installed != nil {
 		return m.Installed(bin)
+	}
+	for _, t := range m.deckTools {
+		if t.Tool == a.Tool && t.Binary == bin {
+			return t.Installed
+		}
 	}
 	_, err := exec.LookPath(bin)
 	return err == nil
@@ -489,6 +512,10 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.langArmed = false
 			cmd = tea.Batch(cmd, m.langTick())
 		}
+		if p, ok := m.API.(toolsPreloader); ok && p.PreloadTools() && msg.err == nil && !msg.quiet && !msg.trustOnly && !m.toolsAsk {
+			m.toolsAsk = true // 第一次读到设置：后台问一次 deckd 各 CLI 装没装（n060 段 4）
+			cmd = tea.Batch(cmd, m.fetchToolsBg())
+		}
 	case langTickMsg:
 		cmd = m.syncLangCmd()
 	case langSyncedMsg:
@@ -570,6 +597,11 @@ func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case toolsMsg, toolModelsMsg:
 		return m, m.subMsg(msg)
+	case toolsBgMsg:
+		if msg.err == nil {
+			m.deckTools = msg.tools
+		}
+		return m, nil
 	case doneMsg:
 		if msg.save {
 			return m, m.saveDone(msg)

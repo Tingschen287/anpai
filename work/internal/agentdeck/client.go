@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/sessionenv"
 	"io"
 	"net/http"
 	"os"
@@ -191,6 +192,11 @@ func (c *Client) execWithStdin(ctx context.Context, stdin io.Reader, sub string,
 	}
 	cmd := exec.CommandContext(ctx, c.Binary, append([]string{sub}, args...)...)
 	cmd.Env = c.env()
+	if sp, ok := SessionPathOf(ctx); ok && sub == "launch" {
+		// 会话的 PATH 就是启动 agent-deck 的进程的 PATH（n060 段 4 实测）：把派工时查 CLI 用的那份交给它，
+		// 会话里实际跑的才是 trust 门记下的那个可执行文件
+		cmd.Env = sessionenv.Env(cmd.Env, sp)
+	}
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

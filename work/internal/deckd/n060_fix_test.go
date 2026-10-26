@@ -110,7 +110,7 @@ func TestN060SystemDecisionsStoreCodes(t *testing.T) {
 		t.Fatalf("英文决策摘要还有中文：%q", en)
 	}
 
-	code, b = w.do("main", "POST", "/v1/agents", spawnJSON("economy", "codex-task", "t", "nf5", "/tmp/alpha", "", "codex", "gpt-5.6-luna"))
+	code, b = w.do("main", "POST", "/v1/agents", spawnJSON("economy", "codex-task", "t", "nf5", "/tmp/alpha", "", "codex", "gpt-6-luna"))
 	if code != 202 {
 		t.Fatalf("应问 Codex trust：%d %s", code, b)
 	}

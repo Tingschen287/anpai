@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
@@ -31,6 +32,14 @@ func TestN060S3GlobalAgentPageIsVerbatimCf8a8bc(t *testing.T) {
 			t.Fatal(err)
 		}
 		m, _ := n057Fixture()
+		// n060 段 4：首次运行默认清单里 Codex 的三档改了（owner 2026-10-16：astra / 6.1-sol / 6-luna）。参照文件是 cf8a8bc 渲染的，
+		// 里面是当时的 Codex 清单；这里把夹具里的 Codex 钉回那三档，页面的版式、文字、说明与 cf8a8bc 逐字比对不变
+		for i := range m.set.Agents {
+			if m.set.Agents[i].Tool == "codex" {
+				m.set.Agents[i].Models = []deckstore.ModelDef{{ID: "gpt-6.1-sol", Tier: deckstore.Frontier},
+					{ID: "gpt-5.6-terra", Tier: deckstore.Balanced}, {ID: "gpt-5.6-luna", Tier: deckstore.Economy}}
+			}
+		}
 		m.width, m.height = c.w, c.h
 		m.switchPage(pageAgents)
 		m.cur = 0
