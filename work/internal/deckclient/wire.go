@@ -27,18 +27,23 @@ func show(err error) string {
 			msg = Text(de.Code, de.Args, de.Message)
 		}
 		// 没有码的 HTTP 错误（上游原文）在英文里也翻前缀：「deckd 502: …」，不留中文冒号
+		// 这里不中和 de.Message：deckd 线路上不带码的错误文字里可以带真标记（deckd 用 Clean 过的文字拼出来的错误），
+		// 现有测试（TestN060ShowAndTextTranslateTheNeutralMark 等）要求把它翻成当前语言的记号。
+		// deckd 把外部原文（例如文件系统错误）原样放进不带码的 error 字段，属于「按类型信任」的范围，移交 n068。
 		if i18n.Lang() == i18n.EN {
 			return i18n.T("err.deckclient.status", de.Status, msg)
 		}
 		return de.Error()
 	}
-	// 注意：这里不中和 err.Error()。最外层不带码的错误可以带着真标记——例如中间窗格的 tmux 退出说明，
-	// 测试里（layout.TestN060CenterPauseReasonTranslatesTheMark）就用不带码的错误装一个 Clean 过的文字，这里要把它翻成当前语言的记号。
-	// 外部文字变成「参数」的出口（Wire、(*Error).Error()、T、Errorf）在 i18n 里统一中和了，进不了这里（返工 2，M4，见 i18n/display_args.go）
+	// 最外层、不带码的错误（文件系统、网络、解码失败……）的文字是外部原文：里面的标记字符只可能是伪造的，
+	// 显示用的副本先中和再显示（段 3 返工 3，R2-1）。错误本身和 err.Error() 原文不改。
+	// 真标记走带码的形状——i18n.E(码, …, 字符串参数)：参数里的真标记由 Text 按当前语言换成记号，
+	// 而带码错误的 Error() 本身已经把真标记换成了中文记号（没有标记字符），所以这里中和不会误伤它们
+	// （例如中间窗格的 tmux 退出说明 err.deck.center.attachexit）。
 	if code, args, ok := i18n.Wire(err); ok {
-		return Text(code, args, err.Error())
+		return Text(code, args, i18n.Neutralize(err.Error()))
 	}
-	return err.Error()
+	return i18n.Neutralize(err.Error())
 }
 
 // Text 按当前语言翻译线路上的错误码。

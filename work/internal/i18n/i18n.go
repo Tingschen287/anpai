@@ -108,6 +108,22 @@ func SetLang(code string) {
 	langSeq.Add(1)
 }
 
+// SetLangIf 是条件更新：只有语言代次仍等于 seq（调用方发出请求时记下的）、且 code 是合法的另一种语言时才切换，返回是否切换了。
+// 「检查代次没变」和「设置新语言」在同一把锁里做完，不会在两步之间被另一个 goroutine 的 SetLang 插进来（段 3 返工 3，复审 2 的建议）。
+func SetLangIf(code string, seq uint64) bool {
+	if !ValidLang(code) {
+		return false
+	}
+	langMu.Lock()
+	defer langMu.Unlock()
+	if langSeq.Load() != seq || lang.Load().(string) == code {
+		return false
+	}
+	lang.Store(code)
+	langSeq.Add(1)
+	return true
+}
+
 // LangSeq 返回语言代次（见 langSeq）。
 func LangSeq() uint64 { return langSeq.Load() }
 

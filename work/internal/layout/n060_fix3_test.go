@@ -22,7 +22,11 @@ func TestN060CenterPauseReasonTranslatesTheMark(t *testing.T) {
 		l := &CenterLoop{
 			Now: func() time.Time { return now },
 			Attach: func() (int, func() error, error) {
-				return 1, func() error { return errors.New("exit status 1（tmux said " + i18n.RedactMark + "）") }, nil
+				// 生产里的带码形状（cmd/deck/up.go：i18n.E("err.deck.center.attachexit", err, deckstore.Clean(最后一行, 160))），
+				// 不是不带码的 errors.New 装一个真标记（段 3 复审 2：夹具改成生产形状，下面的中英文短语断言一字未动）
+				return 1, func() error {
+					return i18n.E("err.deck.center.attachexit", errors.New("exit status 1"), "tmux said "+i18n.RedactMark)
+				}, nil
 			},
 			Announce: func(context.Context, string, int) {},
 			Pause:    func(r string) bool { reason = r; return false },

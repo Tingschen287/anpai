@@ -122,9 +122,8 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		// 采用 deckd 的界面语言——但只在发出这个请求之后本进程没有换过语言时才采用（返工 2，M2）：
 		// 慢请求（取工具版本、起 agent）可能在 owner 刚存上新语言之前就被 deckd 处理了，它的语言头是那一刻的旧语言，
 		// 回来时不能把已经生效的新语言改回去。没采用的不要紧：下一次请求或设置进程的定时对时（Settings 每 2 秒）会对上。
-		if l := resp.Header.Get(i18n.LangHeader); i18n.ValidLang(l) && l != i18n.Lang() && i18n.LangSeq() == seq {
-			i18n.SetLang(l)
-		}
+		// 「代次没变」和「设置新语言」是同一次条件更新（i18n.SetLangIf，同一把锁），两步之间别的 goroutine 换了语言也不会被改回去
+		i18n.SetLangIf(resp.Header.Get(i18n.LangHeader), seq)
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 300 {

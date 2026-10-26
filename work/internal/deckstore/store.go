@@ -1003,7 +1003,7 @@ const maxScopeValue = 300
 // 不超过 scope 值上限（目录会原样进批准范围），且不含任何控制字符——包括 Clean 会保留的换行与制表符、DEL 与 C1。
 func CheckPath(p string) error {
 	if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
-		return i18n.E("err.deckstore.checkpath.1", ArgText(p, 120))
+		return i18n.E("err.deckstore.checkpath.1", Clean(p, 120))
 	}
 	if len(p) > maxScopeValue {
 		return i18n.E("err.deckstore.checkpath.2", maxScopeValue, len(p))
@@ -1013,7 +1013,7 @@ func CheckPath(p string) error {
 	}
 	for _, r := range p {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return i18n.E("err.deckstore.checkpath.4", r, ArgText(p, 120))
+			return i18n.E("err.deckstore.checkpath.4", r, Clean(p, 120))
 		}
 	}
 	return nil

@@ -51,7 +51,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 		return Projection{
 			GeneratedAt: Unknown[time.Time]("读不到状态投影 PROJECT-STATUS.md"),
 			Health:      Unknown[string]("读不到状态投影 PROJECT-STATUS.md"),
-		}, i18n.E("err.projectctl.status.read", path, err)
+		}, i18n.E("err.projectctl.status.read", shownPath(path), err)
 	}
 	defer f.Close()
 
@@ -170,7 +170,7 @@ func LoadProjection(projectRoot string) (Projection, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return p, i18n.E("err.projectctl.status.scan", path, err)
+		return p, i18n.E("err.projectctl.status.scan", shownPath(path), err)
 	}
 	return p, nil
 }

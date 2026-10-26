@@ -166,6 +166,12 @@ type Settings struct {
 	saved    bool        // 存成过（底部显示「已保存」）
 	scr      scrollState // 画面滚动（n059 attempt 2）
 	reloads  int         // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
+	saves    int         // 发出过的保存次数（含手动 s 重试）：静默重读发出之后又保存过，它的回包就是旧的（段 3 返工 3，R2-2）
+	quietSeq int         // 静默重读的请求序号：只认最新发出的那一次（段 3 返工 3，R2-2）
+	// langAt：最后一次与 deckd 对齐的权威语言（读设置时 deckd 说的语言；自己存上语言时是存下的那个）。"" 是还不知道，
+	// 此时用设置里的 ui_lang 代替；"?" 是读设置的那一刻别的请求正好换过语言，对不准。进程当前语言与它不一致，
+	// 不管是哪个请求换的，都要静默重读（段 3 返工 3，R2-3）
+	langAt string
 	// 再按一次确认：q（有没存上的改动时关闭）、R（丢掉没存上的改动重读）、d（撤销授权）各自确认（n057 自查：不能共用）
 	quitAsked   bool
 	reloadAsked bool
@@ -190,9 +196,17 @@ type loadedMsg struct {
 	set       deckstore.Settings
 	trust     []deckstore.TrustGrant
 	err       error
-	trustOnly bool // 只换授权列表，不动正在编辑的设置
-	force     bool // owner 按 R 重新读取：丢掉没存上的改动
+	trustOnly bool   // 只换授权列表，不动正在编辑的设置
+	force     bool   // owner 按 R 重新读取：丢掉没存上的改动
+	lang      string // 读设置时 deckd 说的语言（读的过程中别的请求换过语言就是 "?"）
+	// quiet：语言变了之后的静默重读。stamp 记着发出那一刻的序号和编辑、保存、强制重读的计数；
+	// 回包时对不上（之后有过编辑、保存、强制重读，或出了更新的静默重读）就整个丢弃（段 3 返工 3，R2-2）
+	quiet bool
+	stamp quietStamp
 }
+
+// quietStamp 是静默重读发出那一刻的状态。
+type quietStamp struct{ seq, edits, reloads, saves int }
 type doneMsg struct {
 	what    lazyText // 动作的名字（撤销授权等），随语言重画
 	err     error
@@ -212,8 +226,14 @@ func (m *Settings) Init() tea.Cmd {
 func (m *Settings) load() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	seq := i18n.LangSeq()
 	s, g, err := m.API.Load(ctx)
-	return loadedMsg{set: s, trust: g, err: err}
+	lang := i18n.Lang()
+	if i18n.LangSeq() != seq {
+		// 读的过程中进程语言变过：可能是这次响应带来的，也可能是别的请求换的，分不清，不当成已对齐，之后的对时会再读一次（R2-3）
+		lang = "?"
+	}
+	return loadedMsg{set: s, trust: g, err: err, lang: lang}
 }
 
 // loadTrust 重读授权列表，保留界面上的设置。
@@ -470,21 +490,53 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = m.syncLangCmd()
 	case langSyncedMsg:
 		cmd = m.langTick()
-		if msg.changed && m.loaded && !m.dirty && !m.saving && !m.pending && !m.conflict {
-			cmd = tea.Batch(cmd, m.reloadQuiet)
+		// 不只看这一次对时前后语言有没有变：取工具、取候选这类请求也会先换语言（deckclient 采用响应头里的语言），
+		// 那样下一次对时前后都是新语言，changed 为假。所以另看进程语言与最后一次对齐的语言是否一致（R2-3）。
+		if (msg.changed || m.langDiverged()) && m.loaded && m.clean() {
+			cmd = tea.Batch(cmd, m.reloadQuietCmd())
 		}
 	}
 	return mm, cmd
 }
 
-// reloadQuiet 静默重读设置和授权（别处改了语言之后让本窗口的「界面语言」行和代数跟上；没有未存的改动时才用）。
-func (m *Settings) reloadQuiet() tea.Msg { return m.load() }
+// clean 说明设置没有任何未存的改动、保存和冲突：这时才能让静默重读替换 m.set。
+func (m *Settings) clean() bool { return !m.dirty && !m.saving && !m.pending && !m.conflict }
+
+// langDiverged 说明进程当前语言与设置最后一次对齐的权威语言不一致。
+func (m *Settings) langDiverged() bool {
+	at := m.langAt
+	if at == "" && i18n.ValidLang(m.set.UILang) {
+		at = m.set.UILang
+	}
+	return at != "" && at != i18n.Lang()
+}
+
+// reloadQuietCmd 静默重读设置和授权（别处改了语言之后让本窗口的「界面语言」行和代数跟上；没有未存的改动时才用）。
+// 它有自己的请求序号，并记下发出时的编辑、保存、强制重读计数：回包时之后有过这些，或出了更新的静默重读，回包整个丢弃，
+// 不替换 m.set、不清 dirty、不回滚代数；按 R 的强制重读是另一回事，照旧（R2-2）。
+func (m *Settings) reloadQuietCmd() tea.Cmd {
+	m.quietSeq++
+	st := quietStamp{seq: m.quietSeq, edits: m.edits, reloads: m.reloads, saves: m.saves}
+	return func() tea.Msg {
+		msg := m.load().(loadedMsg)
+		msg.quiet, msg.stamp = true, st
+		return msg
+	}
+}
+
+// quietStale 说明一个静默重读的回包已经过时，必须丢弃。
+func (m *Settings) quietStale(st quietStamp) bool {
+	return st.seq != m.quietSeq || st.edits != m.edits || st.reloads != m.reloads || st.saves != m.saves || !m.clean()
+}
 
 func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
+		if msg.quiet && m.quietStale(msg.stamp) {
+			return m, nil // 过时的静默回包（成功或失败）：什么也不动，也不冒出读取失败的提示
+		}
 		if msg.err != nil {
 			err := msg.err
 			m.msg = later(func() string { return T("load.fail", errLong(err)) })
@@ -496,6 +548,7 @@ func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
+		m.langAt = msg.lang
 		if msg.force {
 			m.edits++   // 路上那次保存回来时不再当成「存上了现在的设置」
 			m.reloads++ // 路上那次保存回来时认得出是重读之前发的
@@ -611,6 +664,7 @@ func (m *Settings) save() tea.Cmd {
 		m.saveErr = errNote(err)
 		return nil
 	}
+	m.saves++
 	edits, reloads := m.edits, m.reloads
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -659,6 +713,7 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 		// 语言存上了才换（deckd 的响应头也会让本进程换到同一个语言；这里不依赖它，测试里的假 API 也一样）。
 		// 其他界面进程在下一次向 deckd 取数时跟着换：侧栏、标签条 1 秒内，面板 2 秒内
 		i18n.SetLang(msg.lang)
+		m.langAt = msg.lang // 自己存上的语言就是此刻的权威语言
 	}
 	if m.set.Generation == msg.gen {
 		m.set.Generation = msg.saved // 下一次保存带存下的代数（rev 127 起代数不是 +1，用 deckd 回的）
@@ -832,12 +887,12 @@ func (m *Settings) fixMain(p *deckstore.ProjectDef) {
 
 // mainTextFn 同 mainText，但名字现在取、档位名到画的时候才取（提示要随语言重画，名字不能引用以后会变的设置）。
 func (m *Settings) mainTextFn(ma deckstore.MainAgent) func() string {
-	name := sanitizeFull(m.agentName(ma.Agent))
+	name := m.agentName(ma.Agent) // 原始的名字：显示清洗（含打码记号的语言）放进下面的函数，画的时候按当时的语言做（返工 3，R2-4）
 	return func() string {
 		if ma.Agent == "" {
 			return T("main.unset")
 		}
-		return name + " · " + tierName(ma.Tier)
+		return sanitizeFull(name) + " · " + tierName(ma.Tier)
 	}
 }
 
@@ -938,7 +993,12 @@ var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 
 // sanitizeFull 是设置界面显示 owner 的数据（名字、模型 id、目录、路径、清单）用的清理：与侧栏的 sanitize 一样去控制字符、打码，
 // 但不按 80 个字截短，长的交给出口折行显示全（n059 自查 4：模型 id 可到 128 字、目录与清单更长，按 80 截就看不全）。
-func sanitizeFull(s string) string { return oneLine(deckstore.Display(strings.TrimSpace(s), 1024)) }
+//
+// 入口先把输入里的标记字符中和（段 3 返工 3，R2-1）：这里显示的都是外部文字（文件系统里的目录名、配置里的名字、工具返回的路径），
+// 里面带的标记字符只可能是伪造的，不能被后面的 Display 当成真打码；真打码只由 Display 自己对疑似密钥打码时才产生，在画的这一刻按当时的语言换成记号。
+func sanitizeFull(s string) string {
+	return oneLine(deckstore.Display(i18n.Neutralize(strings.TrimSpace(s)), 1024))
+}
 
 // errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。
 func errLong(err error) string { return oneLine(deckstore.Display(deckclient.Show(err), textCap)) }
