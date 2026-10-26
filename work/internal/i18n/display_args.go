@@ -24,19 +24,22 @@ import (
 //  2. 带码错误的字符串参数（deckd 用 deckstore.Arg / ArgText / CleanArgs 收进去的，保留的就是 Clean 的结果），
 //     以及中间窗格 tmux 退出说明那样「Clean 过的字符串作参数」；
 //  3. 嵌套码对象 Nest.Error / Nest.Args 里的同样的字符串；
-//  4. 最外层、不带码的错误的文字（测试里用它装一个 Clean 过的文字，deckclient.Show 把里面的标记翻成当前语言的记号）。
+//  4. 无码的 HTTP 错误（deckclient.Error，没有 Code）的 Message：它是 deckd 线路上的文字，按「可信线路文字」解释，
+//     里面的真标记由 deckclient.Show 翻成当前语言的记号。deckd 若把外部原文装进这种无码消息，与真 Clean 的消息区分不开，
+//     「按类型信任」的根本改造移交 n068。
 //
 // 前三处是 Go 的 string（或 Nest、List 里的 string），safeArg 对字符串、Nest、List 原样放行，真标记随字符串参数的往返不变。
-// 第四处是最外层的错误，不是「参数」，统一出口不碰它（deckclient.Show、deckd 的 writeErr 都原样用 err.Error()）。
-// 被中和的只有「作为参数的不带码的 error」和「fmt.Sprint 兜底的值」：
+// 最外层、不带码的错误（文件系统、网络、解码失败……）不再是真标记的来源：它的文字是外部原文，deckclient.Show 显示前
+// 先对显示用的副本中和（段 3 返工 3，R2-1），错误本身和 err.Error() 原文不改；真标记必须走带码的形状 i18n.E(码, …, 字符串参数)。
+// 被中和的是「作为参数的不带码的 error」、「fmt.Sprint 兜底的值」和「最外层不带码错误的显示副本」：
 //   - 作为参数的不带码的 error 里不会有真标记：带码错误的 Error() 已经把真标记换成了中文记号（revealRedactZH），
 //     deckstore.Arg 把不带码的错误收成参数时先 Clean 过——收成字符串，外部原文里的标记字符变成 U+FFFD，再打码；
 //     生产代码里没有把 Clean 过的文字装进不带码的 error 再当参数传的写法（grep Clean/Tidy 与 errors.New、fmt.Errorf 同行：无）。
-//   - Stringer、结构体、具名字符串这类兜底值不是 Clean 的出口，没有真标记。
+//   - Stringer、结构体、具名字符串这类兜底值不是 Clean 的出口，没有真标记（具名数字实现 Stringer 的伪造移交 n068）。
 // 所以参数里的不带码 error 与兜底值出现标记字符，只可能是外部伪造，一律中和。
 
 // ErrText 是错误的文字，已中和：标记字符换成 U+FFFD。给「错误作为参数」的出口用（wireArg 的不带码 error 一条）；nil 返回空串。
-// 最外层、不带码的错误不用它（见上，它可以带真标记）。
+// 最外层、不带码的错误显示前也要中和（deckclient.Show 用 Neutralize 处理显示副本），它不再是真标记的来源。
 func ErrText(err error) string {
 	if err == nil {
 		return ""

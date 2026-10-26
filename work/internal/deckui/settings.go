@@ -168,6 +168,9 @@ type Settings struct {
 	reloads  int         // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
 	saves    int         // 发出过的保存次数（含手动 s 重试）：静默重读发出之后又保存过，它的回包就是旧的（段 3 返工 3，R2-2）
 	quietSeq int         // 静默重读的请求序号：只认最新发出的那一次（段 3 返工 3，R2-2）
+	// quietBusy：有一份静默读取在路上。同一时刻只允许一份：在途时轮询不发新读取、也不加序号，回包处理完（接受、丢弃、失败、
+	// 超时都算）才清掉，下一拍才能再读；否则读取比轮询周期慢（load 最长 5 秒，轮询 2 秒）时每份回包都被后来的序号作废，永远对不齐（段 3 返工 4，R3-1）
+	quietBusy bool
 	// langAt：最后一次与 deckd 对齐的权威语言（读设置时 deckd 说的语言；自己存上语言时是存下的那个）。"" 是还不知道，
 	// 此时用设置里的 ui_lang 代替；"?" 是读设置的那一刻别的请求正好换过语言，对不准。进程当前语言与它不一致，
 	// 不管是哪个请求换的，都要静默重读（段 3 返工 3，R2-3）
@@ -492,7 +495,7 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = m.langTick()
 		// 不只看这一次对时前后语言有没有变：取工具、取候选这类请求也会先换语言（deckclient 采用响应头里的语言），
 		// 那样下一次对时前后都是新语言，changed 为假。所以另看进程语言与最后一次对齐的语言是否一致（R2-3）。
-		if (msg.changed || m.langDiverged()) && m.loaded && m.clean() {
+		if (msg.changed || m.langDiverged()) && m.loaded && m.clean() && !m.quietBusy {
 			cmd = tea.Batch(cmd, m.reloadQuietCmd())
 		}
 	}
@@ -514,8 +517,11 @@ func (m *Settings) langDiverged() bool {
 // reloadQuietCmd 静默重读设置和授权（别处改了语言之后让本窗口的「界面语言」行和代数跟上；没有未存的改动时才用）。
 // 它有自己的请求序号，并记下发出时的编辑、保存、强制重读计数：回包时之后有过这些，或出了更新的静默重读，回包整个丢弃，
 // 不替换 m.set、不清 dirty、不回滚代数；按 R 的强制重读是另一回事，照旧（R2-2）。
+//
+// 同一时刻只允许一份在途（quietBusy）：有在途读取时调用方不再发新的，也不增加序号（段 3 返工 4，R3-1）。
 func (m *Settings) reloadQuietCmd() tea.Cmd {
 	m.quietSeq++
+	m.quietBusy = true
 	st := quietStamp{seq: m.quietSeq, edits: m.edits, reloads: m.reloads, saves: m.saves}
 	return func() tea.Msg {
 		msg := m.load().(loadedMsg)
@@ -534,6 +540,9 @@ func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
+		if msg.quiet && msg.stamp.seq == m.quietSeq {
+			m.quietBusy = false // 这份在途读取回来了（成功、失败、超时、过时都一样）：下一拍才能再读
+		}
 		if msg.quiet && m.quietStale(msg.stamp) {
 			return m, nil // 过时的静默回包（成功或失败）：什么也不动，也不冒出读取失败的提示
 		}
@@ -996,8 +1005,17 @@ var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 //
 // 入口先把输入里的标记字符中和（段 3 返工 3，R2-1）：这里显示的都是外部文字（文件系统里的目录名、配置里的名字、工具返回的路径），
 // 里面带的标记字符只可能是伪造的，不能被后面的 Display 当成真打码；真打码只由 Display 自己对疑似密钥打码时才产生，在画的这一刻按当时的语言换成记号。
+// deckd 已经 Clean 过的字段（工具版本）不在此列，走 shownCleaned（返工 4，R3-2）。
 func sanitizeFull(s string) string {
 	return oneLine(deckstore.Display(i18n.Neutralize(strings.TrimSpace(s)), 1024))
+}
+
+// shownCleaned 是显示「已经由 deckd 清洗过」的文字用的出口（段 3 返工 4，R3-2）：与 sanitizeFull 一样去控制字符、打码、不截短，
+// 但不在入口中和标记字符，里面真打码的标记留到画的时候按当时的语言换成记号。
+// 只给 deckd 已经 Clean 过的字段用（目前只有工具版本 ToolInfo.Version，deckd/tools.go 的 deckstore.Clean(ver, 80)）；
+// 外部原文（目录名、配置里的名字、工具路径……）一律走 sanitizeFull。
+func shownCleaned(s string) string {
+	return oneLine(deckstore.Display(strings.TrimSpace(s), 1024))
 }
 
 // errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。

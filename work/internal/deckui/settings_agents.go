@@ -255,7 +255,7 @@ func (m *Settings) addView() (string, []string) {
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {
-		state := green + "●" + reset + " " + dimOn + sanitizeFull(t.Path) + "  " + sanitizeFull(t.Version) + reset
+		state := green + "●" + reset + " " + dimOn + sanitizeFull(t.Path) + "  " + shownCleaned(t.Version) + reset
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
@@ -380,7 +380,7 @@ func (m *Settings) agentView() (string, []string) {
 	cmd := T("agent.cmd", sanitizeFull(a.Binary))
 	if t, ok := m.toolInfo(a.Tool); ok {
 		if t.Installed {
-			cmd += "  " + sanitizeFull(t.Version)
+			cmd += "  " + shownCleaned(t.Version)
 		} else {
 			cmd += "  " + orange + T("agent.missing") + reset + dimOn
 		}

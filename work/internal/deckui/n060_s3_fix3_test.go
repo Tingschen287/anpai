@@ -22,6 +22,9 @@ import (
 // quietFromLangSync 取一次「语言变了」之后排出的静默重读命令（BatchMsg 的最后一项），不执行 tick，也先不交付回包。
 func quietFromLangSync(t *testing.T, m *Settings) tea.Cmd {
 	t.Helper()
+	// 返工 4 起同一时刻只允许一份静默读取在途（quietBusy）。这个 helper 要的就是「再发一份」（有的测试在前一份还没回包时
+	// 再发第二份，验证序号判断这第二道防线），所以先放弃前一份在途标记；各测试的断言不变。
+	m.quietBusy = false
 	_, next := m.Update(langSyncedMsg{changed: true})
 	if next == nil {
 		t.Fatal("语言变了且没有未存的改动，应排出静默重读")
