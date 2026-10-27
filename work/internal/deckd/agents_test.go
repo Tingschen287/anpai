@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -146,6 +147,8 @@ type agentWorld struct {
 	up      *fakeUp
 	leases  *lease.Store
 	version string
+	// toolDir 是假 toolInfo 回的可执行文件所在目录（n060 段 4 返工：trust 门授权后启动前要核对「会把授权的那个文件启动起来」，所以得是真实存在的可执行文件）
+	toolDir string
 	// 上游侧绕过检查的假结果：按工具给配置检查的错误；启动后命令行核对的错误
 	cfgBypass  map[string]error
 	procBypass error
@@ -168,9 +171,15 @@ func newAgentWorld(t *testing.T) *agentWorld {
 		t.Fatal(err)
 	}
 	t.Cleanup(l.Close)
-	w := &agentWorld{fixture: f, up: &fakeUp{output: "\x1b[31mhello\x1b[0m done\n" + fakeReadyScreen}, leases: l, version: "codex 1.0"}
+	w := &agentWorld{fixture: f, up: &fakeUp{output: "\x1b[31mhello\x1b[0m done\n" + fakeReadyScreen}, leases: l, version: "codex 1.0", toolDir: t.TempDir()}
 	f.srv.WithAgents(w.up, l, func(_ context.Context, bin string) (string, string, error) {
-		return "/usr/bin/" + bin, w.version, nil
+		p := filepath.Join(w.toolDir, bin)
+		if _, err := os.Stat(p); err != nil {
+			if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				return "", "", err
+			}
+		}
+		return p, w.version, nil
 	}, nil)
 	// 送 brief 前看画面的节奏换成很短的（n055）
 	f.srv.agents.startup = startupTiming{poll: time.Millisecond, settle: 50 * time.Millisecond, await: 2 * time.Second}
@@ -329,7 +338,7 @@ func TestSpawnCodexTrustRememberedPerToolVersion(t *testing.T) {
 	if code, b := w.do("owner", "POST", "/v1/decisions/"+dec["id"].(string)+"/answer", fmt.Sprintf(`{"option":"approve","version":%v}`, dec["version"])); code != 200 || decode(t, b)["state"] != deckstore.StateApplied {
 		t.Fatalf("批准即记住并标为 applied：%d %s", code, b)
 	}
-	if !w.store.TrustValid("alpha", "codex", "/tmp/alpha", "/tmp/alpha", "/usr/bin/codex", "codex 1.0") {
+	if !w.store.TrustValid("alpha", "codex", "/tmp/alpha", "/tmp/alpha", filepath.Join(w.toolDir, "codex"), "codex 1.0") {
 		t.Fatal("应记住授权")
 	}
 	if code, b := w.do("main", "POST", "/v1/agents", codex("c2")); code != 201 {

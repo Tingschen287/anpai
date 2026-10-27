@@ -44,7 +44,8 @@ type Config struct {
 	// 列模型、以及交给 agent-deck launch 的 PATH 都用它。nil（测试、没开）= 按 deckd 自己进程的 PATH，行为与以前一样。
 	// deck daemon 在生产里开它；解析登录 shell 会运行 owner 的 shell 启动文件，所以测试默认不开。
 	SessionEnv *sessionenv.Resolver
-	// SessionPath 为真时 Run 自己建一个解析登录 shell 的 Resolver（SessionEnv 为 nil 才建）并在后台先解析一次，第一次打开设置时就不用等。
+	// SessionPath 为真时 Run 自己建一个解析登录 shell 的 Resolver（SessionEnv 为 nil 才建）并在后台读一次，第一次打开设置时就不用等。
+	// 之后只有 owner 在 F9 按「刷新会话 PATH」键才会再读（POST /v1/tools/refresh）；打开设置、进加入页和 agent 页、派工、列模型都只用当前快照，不会运行 rc。
 	// 只有 deck daemon 设它。
 	SessionPath bool
 }
@@ -115,6 +116,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/resolve", s.getResolve)
 	mux.HandleFunc("GET /v1/tools", s.getTools)
 	mux.HandleFunc("GET /v1/tools/models", s.getToolModels)
+	mux.HandleFunc("GET /v1/tools/refresh", s.getToolsRefresh)
+	mux.HandleFunc("POST /v1/tools/refresh", s.postToolsRefresh) // 刷新会话 PATH（会运行登录启动文件），n060 段 4 返工
 	mux.HandleFunc("GET /v1/trust", s.getTrust)
 	mux.HandleFunc("DELETE /v1/trust", s.deleteTrust)
 	mux.HandleFunc("GET /v1/progress", s.getProgress)

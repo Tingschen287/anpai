@@ -58,6 +58,16 @@ type ToolInfo struct {
 	Note       string `json:"note,omitempty"`
 	NoteCode   string `json:"note_code,omitempty"`
 	NoteArgs   []any  `json:"note_args,omitempty"`
+	// PathRefreshing：deckd 正在后台重读会话 PATH（启动那次、或有人按了刷新键），这里的路径与版本是上一份快照的结果
+	PathRefreshing bool `json:"path_refreshing,omitempty"`
+}
+
+// pathRefresher 是设置接口可选的能力：「刷新会话 PATH」键（POST /v1/tools/refresh，deckd 在后台重读一次登录 shell 的 PATH，会运行 owner 的登录启动文件）。
+// 真接口有；测试里的假接口按需加（没有它这个键什么都不做）。
+type pathRefresher interface {
+	RefreshPath(ctx context.Context) error
+	// PathRefreshing：deckd 的那次读还在不在跑（轮询用，不跑任何 CLI 的版本查询）
+	PathRefreshing(ctx context.Context) (bool, error)
 }
 
 // toolsPreloader 是设置接口可选的能力：读完设置后在后台取一次工具目录（deckd 按会话 PATH 查各 CLI 装没装），只用来决定「没装」的标记。
@@ -101,6 +111,20 @@ func (a DeckSettingsAPI) SyncLang(ctx context.Context) error {
 func (a DeckSettingsAPI) Revoke(ctx context.Context, project, tool string) error {
 	var out any
 	return a.C.Do(ctx, "DELETE", "/v1/trust?project="+url.QueryEscape(project)+"&tool="+url.QueryEscape(tool), nil, &out)
+}
+
+// RefreshPath：请 deckd 在后台重读一次会话 PATH，立即返回；读完与否看 Tools 里的 PathRefreshing。
+func (a DeckSettingsAPI) RefreshPath(ctx context.Context) error {
+	var out any
+	return a.C.Do(ctx, "POST", "/v1/tools/refresh", nil, &out)
+}
+
+func (a DeckSettingsAPI) PathRefreshing(ctx context.Context) (bool, error) {
+	var out struct {
+		Refreshing bool `json:"refreshing"`
+	}
+	err := a.C.Get(ctx, "/v1/tools/refresh", &out)
+	return out.Refreshing, err
 }
 
 func (a DeckSettingsAPI) Tools(ctx context.Context) ([]ToolInfo, error) {
@@ -209,6 +233,8 @@ type Settings struct {
 	// 「没装」标记以它为准：deckd 按会话 PATH 查，设置进程自己的 PATH 与会话的未必一样（n060 段 4）。
 	deckTools []ToolInfo
 	toolsAsk  bool // 已经发出过后台取工具目录
+	// pathBusy：这个窗口按过「刷新会话 PATH」键、还在等 deckd 读完（连按忽略；deckd 那边多个窗口同时按也只读一次）
+	pathBusy bool
 }
 
 type loadedMsg struct {
@@ -595,7 +621,7 @@ func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
 		}
-	case toolsMsg, toolModelsMsg:
+	case toolsMsg, toolModelsMsg, pathRefreshMsg:
 		return m, m.subMsg(msg)
 	case toolsBgMsg:
 		if msg.err == nil {

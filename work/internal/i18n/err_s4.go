@@ -19,6 +19,10 @@ var errS4ZH = map[Key]string{
 	"err.deckd.codexmodels.empty":   "codex debug models 没有列出任何可选的模型",
 	// 设置里的提示：用了哪份 PATH
 	"err.deckd.servergettools.nopath": "没取到会话的 PATH，已改用 deckd 自己的 PATH 找 CLI：%w",
+	// 刷新会话 PATH（F9 的刷新键）失败：仍用上一份快照
+	"err.deckd.servergettools.refreshfail": "刷新会话 PATH 失败，仍用上一次读到的：%w",
+	// 返工 R1：授权的文件和启动时会用的对不上
+	"err.deckd.serverrunspawn.bind": "没有启动：授权时查到的 %s 是 %s，现在按要交给上游的 PATH 找到的是 %q（空表示找不到）；请重试，或先看看这个命令有没有被换掉",
 }
 
 var errS4EN = map[Key]string{
@@ -36,7 +40,9 @@ var errS4EN = map[Key]string{
 	"err.deckd.codexmodels.badjson": "the output of codex debug models is not the expected JSON: %v",
 	"err.deckd.codexmodels.empty":   "codex debug models listed no selectable models",
 
-	"err.deckd.servergettools.nopath": "Couldn't get the session PATH, so deckd's own PATH is used to find the CLIs: %w",
+	"err.deckd.servergettools.nopath":      "Couldn't get the session PATH, so deckd's own PATH is used to find the CLIs: %w",
+	"err.deckd.servergettools.refreshfail": "Refreshing the session PATH failed; the last one read is still in use: %w",
+	"err.deckd.serverrunspawn.bind":        "Not started: the %s that was checked when you approved is %s, but the PATH handed to the upstream now finds %q (empty means not found); try again, or check whether the command was replaced",
 }
 
 func init() {

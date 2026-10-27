@@ -161,21 +161,24 @@ func TestN060S4TrustGateRecordsTheExecutableTheSessionRuns(t *testing.T) {
 		t.Fatalf("批准过的版本再开应直接开：%d %s", code, b)
 	}
 	snap := res.Get(context.Background())
-	if len(up.paths) != 1 || up.paths[0] != snap.Path {
-		t.Fatalf("agent-deck launch 收到的会话 PATH 应与查可执行文件用的是同一份：%q vs %q", up.paths, snap.Path)
+	// 返工 R1：PATH 字符串相同并不保证上游找到的是同一个文件（核准之后前面的目录里新装一个同名文件，字符串一字不变）。
+	// 所以这里不再拿「launch 收到的 PATH == 查可执行文件用的 PATH」当凭据，而是看绑定：授权文件所在目录在最前面，且从中解析出的就是授权的文件。
+	// （此处授权文件的目录本来就排在快照最前，所以与快照仍相等；目录不在最前时的情形见 n060_s4fix_r1_test.go。）
+	if len(up.paths) != 1 || up.paths[0] != snap.Path || !strings.HasPrefix(up.paths[0], filepath.Dir(sessionCodex)+":") {
+		t.Fatalf("agent-deck launch 收到的会话 PATH 应以授权文件所在目录开头：%q（快照 %q）", up.paths, snap.Path)
 	}
 	// 实际会话里按这份 PATH 找 codex，找到的就是授权里记的那个
 	if got := sessionenv.LookPath(up.paths[0], "codex"); got != scope["tool_path"] {
 		t.Fatalf("会话 PATH 上的 codex 是 %q，授权记的是 %v", got, scope["tool_path"])
 	}
-	// 没开会话 PATH 时 launch 不带任何 PATH（旧行为）
+	// 没开会话 PATH 解析时：不读登录 shell，但授权文件所在目录同样前置后交给上游（返工 R1；此前这里 launch 不带 PATH）
 	w.srv.cfg.SessionEnv = nil
 	w.srv.agents.toolInfo = func(context.Context, string) (string, string, error) { return sessionCodex, "codex-cli 0.164.0", nil }
 	if code, b := spawn("s4c"); code != 201 {
 		t.Fatalf("%d %s", code, b)
 	}
-	if len(up.paths) != 2 || up.paths[1] != "" {
-		t.Fatalf("没开会话 PATH：launch 不带：%q", up.paths)
+	if len(up.paths) != 2 || !strings.HasPrefix(up.paths[1], filepath.Dir(sessionCodex)+":") || sessionenv.LookPath(up.paths[1], "codex") != sessionCodex {
+		t.Fatalf("没开会话 PATH 解析：launch 带的 PATH 应以授权文件所在目录开头并解析到授权的文件：%q", up.paths)
 	}
 }
 

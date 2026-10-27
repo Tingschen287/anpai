@@ -45,3 +45,29 @@ func Env(base []string, path string) []string {
 	}
 	return append(out, "PATH="+path)
 }
+
+// FrontDir 返回把目录 dir 放到最前面的 PATH（n060 段 4 返工，R1）：其余目录保持原来的顺序，重复的目录（包括 dir 在后面的那一处）去掉，
+// 相对目录、含控制字符或过长的目录丢掉（与 cleanList 一样：相对目录会让查找跟着当前目录走）。dir 必须是绝对路径，否则原样返回 path 并报 false。
+//
+// 用途：Codex trust 门核准的是「按会话 PATH 找到的那个文件」，而上游 agent-deck 起会话时又会按工具名在交给它的 PATH 里再找一次。
+// 核准的那个文件所在的目录放到最前，之后任何更靠前的目录里新装的同名文件都顶替不了它。
+// 这只绑定「路径」：同一个路径上的文件被替换（内容变了、符号链接被改指）不在它管的范围内。
+func FrontDir(path, dir string) (string, bool) {
+	if !filepath.IsAbs(dir) {
+		return path, false
+	}
+	front := filepath.Clean(dir)
+	if len(front) > maxEntry || hasControl(front) {
+		return path, false
+	}
+	rest, _ := cleanList(filepath.SplitList(path))
+	out := []string{front}
+	seen := map[string]bool{front: true}
+	for _, d := range rest {
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return strings.Join(out, ":"), true
+}

@@ -3,6 +3,7 @@ package deckd
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -180,7 +181,7 @@ func TestToolsCatalogAndModelList(t *testing.T) {
 		byTool[x.Tool] = x
 	}
 	if !byTool["claude"].Added || byTool["antigravity"].Binary != "agy" || !byTool["grok"].CanList || byTool["claude"].CanList ||
-		!byTool["opencode"].Installed || byTool["opencode"].Path != "/usr/bin/opencode" {
+		!byTool["opencode"].Installed || byTool["opencode"].Path != filepath.Join(w.toolDir, "opencode") {
 		t.Fatalf("目录项：%+v", byTool)
 	}
 	old := listModels

@@ -17,8 +17,13 @@ type sessionPathKey struct{}
 
 // WithSessionPath 在 ctx 里放一份会话 PATH（n060 段 4）。deckd 一次派工（或一次列工具）取一份，放进 ctx：
 // 找 CLI（deckd.scopedToolInfo、scopedListModels，调用方先在这份 PATH 里解出可执行文件的绝对路径，再交给本包的 ToolVersionAt、ListModelsAt）
-// 与 Client.Launch（把它交给 `agent-deck launch`，agent-deck 起的会话用的就是启动者的 PATH）用的是同一份，
-// trust 门记下的可执行文件才一定是会话里实际跑的那一个。ctx 里没有就用进程自己的 PATH（旧行为）。
+// 与 Client.Launch（把它交给 `agent-deck launch`，agent-deck 起的会话用的就是启动者的 PATH）用同一份起点。
+//
+// 注意这只保证「用的是同一份 PATH 字符串」，不保证「找到的是同一个文件」：launch 只带工具名，上游起会话时按名字在 PATH 里再找一次，
+// 核准之后、启动之前更靠前的目录里新装了同名文件，字符串一字不变，找到的却是另一个文件（Codex 第 4 段审查 1，R1）。
+// 要让 Codex trust 门核准的文件就是启动的文件，deckd 在授权通过后把核准文件所在的目录放到 PATH 最前面再交给这里
+// （deckd.bindLaunchPath，并核对按这份 PATH 找到的就是核准的文件）。路径绑定到此为止：同一路径上的文件被替换是既有的信任边界。
+// ctx 里没有就用进程自己的 PATH（旧行为）。
 func WithSessionPath(ctx context.Context, path string) context.Context {
 	return context.WithValue(ctx, sessionPathKey{}, path)
 }

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/sessionenv"
 )
 
 // 工具目录（n057）：设置界面「加入本机的 agent」从这里挑。每一项是安排 Anpai 认识、能经 agent-deck 起会话的终端 agent CLI：
@@ -176,6 +178,10 @@ type ToolStatus struct {
 	Note       string `json:"note,omitempty"`
 	NoteCode   string `json:"note_code,omitempty"`
 	NoteArgs   []any  `json:"note_args,omitempty"`
+	// PathRefreshing：有一次读会话 PATH 正在后台跑（启动时那次、或 owner 按「刷新会话 PATH」键触发的），上面的路径与版本是上一份快照的结果。
+	// Note* 在两种情形下带原因：启动时读失败、退回 deckd 自己的 PATH（err.deckd.servergettools.nopath）；
+	// 或最近一次按键刷新失败、仍用上一份好快照（err.deckd.servergettools.refreshfail）。读成功后消失。
+	PathRefreshing bool `json:"path_refreshing,omitempty"`
 }
 
 // getTools 列工具目录与本机情况（owner 界面）：命令在不在 PATH、版本（binary --version，与 Codex 授权核对同一个取法）。
@@ -189,17 +195,30 @@ func (s *Server) getTools(w http.ResponseWriter, r *http.Request) {
 	if s.agents != nil {
 		info = s.agents.toolInfo
 	}
-	// 找 CLI 用会话 PATH（与 agent-deck 起会话时用的同一份）：deckd 自己的 PATH 不读 rc 文件，会找不到或找到旧版（n060 段 4）
-	ctx, snap, scoped := s.sessionScope(r.Context(), true)
+	// 找 CLI 用会话 PATH（与 agent-deck 起会话时用的同一份）：deckd 自己的 PATH 不读 rc 文件，会找不到或找到旧版（n060 段 4）。
+	// 这里只读当前快照，不会运行登录 shell（快照启动时读一次，之后 owner 按刷新键才重读）。
+	ctx := r.Context()
+	scoped := s.cfg.SessionEnv != nil
+	var snap sessionenv.Snapshot
 	var note map[string]any
-	if scoped && snap.Fallback != nil {
-		note = withNote(nil, i18n.E("err.deckd.servergettools.nopath", snap.Fallback), 300)
+	var refreshing bool
+	if scoped {
+		st := s.cfg.SessionEnv.State(ctx) // 同一次读：快照与「在不在刷新、上次刷新有没有失败」出自同一个时刻
+		snap, refreshing = st.Snapshot, st.Refreshing
+		ctx = agentdeck.WithSessionPath(ctx, snap.Path)
+		if snap.Fallback != nil {
+			note = withNote(nil, i18n.E("err.deckd.servergettools.nopath", snap.Fallback), 300)
+		}
+		if note == nil && st.RefreshErr != nil { // 快照是好的，只是最近一次按键刷新失败了
+			note = withNote(nil, i18n.E("err.deckd.servergettools.refreshfail", st.RefreshErr), 300)
+		}
 	}
 	out := make([]ToolStatus, 0, len(Catalog))
 	for _, e := range Catalog {
 		st := ToolStatus{CatalogEntry: e, CanList: len(e.listArgs) > 0}
 		if scoped {
 			st.PathSource = string(snap.Source)
+			st.PathRefreshing = refreshing
 			if note != nil {
 				st.Note, _ = note["note"].(string)
 				st.NoteCode, _ = note["note_code"].(string)
@@ -245,7 +264,7 @@ func (s *Server) getToolModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 用会话 PATH 找到的那个可执行文件跑（与设置里显示的、Codex trust 门记下的是同一个，n060 段 4）
-	ctx, _, _ := s.sessionScope(r.Context(), false)
+	ctx, _, _ := s.sessionScope(r.Context())
 	text, err := listModels(ctx, e.Binary, e.listArgs)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.servergettoolmodels.2", e.Binary, strings.Join(e.listArgs, " "), err))

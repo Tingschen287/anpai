@@ -10,7 +10,9 @@
 //  2. 与 deckd 自己进程的 PATH 合并：登录 shell 里 deckd 没有的目录（owner 习惯的新版本所在，例如 ~/.kimi-code/bin）加在最前面，
 //     deckd 自己的目录保持原来的顺序跟在后面；
 //  3. deckd 用这个 PATH 找 CLI（设置里的已装与版本、Codex trust 门记下的可执行文件与版本、列模型），
-//     并在 `agent-deck launch` 时把同一个 PATH 交给它（agentdeck.WithSessionPath），于是会话里实际跑的就是 deckd 查到的那一份。
+//     并在 `agent-deck launch` 时把同一个 PATH 交给它（agentdeck.WithSessionPath）。
+//     PATH 相同本身不保证上游找到的是同一个文件（它按工具名再找一次）；Codex 授权通过后 deckd 另把核准文件所在的目录放到最前面（FrontDir），
+//     这只绑定路径，同一路径上的文件被替换是既有的信任边界（n060 段 4 返工，R1）。
 //
 // 取不到登录 shell 的 PATH（没有可用的 shell、超时、输出不对）时回退为 deckd 自己的 PATH，并带一条可译的原因，由界面提示。
 // 不改 owner 的任何 shell 配置；解析有超时，超时杀掉整个进程组；输出带随机边界，rc 文件打印的杂音不会被当成 PATH。
@@ -63,7 +65,23 @@ type Snapshot struct {
 	At       time.Time
 }
 
-// Resolver 解析并缓存会话 PATH。零值不能用，用 NewLoginResolver 或 NewStatic。
+// Resolver 解析并持有会话 PATH 的快照。零值不能用，用 NewLoginResolver 或 NewStatic。
+//
+// 什么时候会运行登录 shell（也就是运行 owner 的 rc 文件）——只有两个时机（n060 段 4 返工，owner 2026-10-27 定）：
+//  1. deckd 启动时后台读一次（Start，或第一次有人要用时），失败也只读这一次；
+//  2. owner 在 F9 里按「刷新会话 PATH」键时（Refresh）。
+//
+// 除此之外一律不运行：打开设置窗口、进加入页和 agent 页、派工、列模型，用的都是当前那份快照，快照不会因为「过期」被重读
+// （以前的「成功 5 分钟、失败 30 秒、Fresh 10 秒」过期重读都去掉了）。
+//
+// 不互相卡住：
+//   - 读在自己的后台 goroutine 里跑，Get 平时只是读一份指针，不等任何正在跑的读；刷新期间派工、列模型、显示照常用旧快照；
+//   - 一次只允许一个读在跑：读的过程中再按键（同一个窗口连按、几个窗口同时按）合并为同一次，不叠加；
+//   - 第一次读还没完成就有人要用（deckd 刚启动）：等这一次，上限是探针超时 Wait（5 秒）加收拾进程组的 WaitDelay（0.5 秒）。
+//
+// 读失败：启动那次失败，快照退回 deckd 自己的 PATH 并带原因（Snapshot.Fallback），界面提示 owner 可以按刷新键重试；
+// 按键刷新失败，已有的好快照保留（不让一次失败把 owner 习惯的目录弄丢），失败原因记在 State.RefreshErr，由界面提示；
+// 若当时快照本来就是启动失败的回退，则换成最新这次的回退（原因更新）。
 type Resolver struct {
 	// 下面几个字段给测试换；生产里用 NewLoginResolver 填好的。
 	Getenv  func(string) string
@@ -71,13 +89,27 @@ type Resolver struct {
 	Run     RunFunc
 	Now     func() time.Time
 	Wait    time.Duration // 一次解析最多等多久
+	// Base 是后台读的父 ctx：deckd 关闭时取消，探针的进程组随之被杀。nil 时用 context.Background()。
+	Base context.Context
 
-	static bool // NewStatic：不解析，直接用进程 PATH
-	mu     sync.Mutex
-	cur    *Snapshot
+	static bool       // NewStatic：不解析，直接用进程 PATH
+	mu     sync.Mutex // 只保护下面几个字段，不在运行 shell 的时候持有
+	cur    *Snapshot  // 当前快照；第一次读完成前为 nil
+	flight *flight    // 正在跑的那一次读；没有则为 nil
+	rerr   error      // 最近一次按键刷新失败的原因；成功后清空
 }
 
-// RunFunc 运行解析用的 shell 并返回它的标准输出：stdin 接 /dev/null、输出有上限、超时杀掉整个进程组、没有控制终端。
+// flight 是一次正在后台跑的读。done 在读完（快照已更新）后关闭。
+type flight struct{ done chan struct{} }
+
+// State 是快照加上读的状态，给界面显示用。
+type State struct {
+	Snapshot   Snapshot
+	Refreshing bool  // 有一次读正在跑（启动时的、或按键触发的）
+	RefreshErr error // 最近一次按键刷新失败的原因（*i18n.Error）；没有失败过或之后成功了为 nil
+}
+
+// RunFunc 运行解析用的 shell 并返回它的标准输出：stdin 接 /dev/null、输出有上限、结束时清理原进程组、没有控制终端。
 // 本包不自己起进程（exec 只许出现在两个 adapter 包里，TestEachAdapterOnlyTouchesItsOwnUpstream）；生产用 agentdeck.RunLoginShell。
 type RunFunc func(ctx context.Context, shell string, args []string, env []string) ([]byte, error)
 
@@ -91,34 +123,96 @@ func NewStatic() *Resolver {
 	return &Resolver{Getenv: os.Getenv, Environ: os.Environ, Now: time.Now, static: true}
 }
 
-// Get 返回缓存的会话 PATH（缓存 5 分钟；解析失败的结果只缓存 30 秒，之后再试）。第一次调用会等解析完成（最多 Wait）。
-func (r *Resolver) Get(ctx context.Context) Snapshot {
-	return r.get(ctx, 5*time.Minute, 30*time.Second)
-}
+func (r *Resolver) disabled() bool { return r == nil || r.static || r.Run == nil }
 
-// Fresh 与 Get 相同，但结果超过 10 秒就重新解析：设置里看「装了哪些」时用，owner 刚装完 CLI、改完 PATH 就能看到。
-func (r *Resolver) Fresh(ctx context.Context) Snapshot {
-	return r.get(ctx, 10*time.Second, 10*time.Second)
-}
-
-func (r *Resolver) get(ctx context.Context, okTTL, failTTL time.Duration) Snapshot {
+// Start 在后台读第一次（已经读过或正在读就什么都不做）。deckd 启动时调用。立即返回。
+func (r *Resolver) Start() {
+	if r.disabled() {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := r.now()
-	if r.cur != nil {
-		ttl := okTTL
-		if r.cur.Fallback != nil {
-			ttl = failTTL
-		}
-		if now.Sub(r.cur.At) < ttl {
-			return *r.cur
-		}
+	if r.cur == nil && r.flight == nil {
+		r.startLocked(false)
 	}
-	// 调用方（一次 HTTP 请求）取消了，不能让「被取消」当成解析失败缓存 30 秒：解析自己有超时，不跟着调用方的 ctx 走
-	s := r.resolve(context.WithoutCancel(ctx))
-	s.At = r.now()
-	r.cur = &s
-	return s
+}
+
+// Get 返回当前的会话 PATH 快照。不会因为「过期」重读；第一次读还没完成时等这一次（上限见 Resolver 的说明）。
+// 调用方（一次 HTTP 请求）取消不影响读：读在后台自己的 goroutine 里跑，有自己的超时。
+func (r *Resolver) Get(ctx context.Context) Snapshot { return r.State(ctx).Snapshot }
+
+// State 同 Get，另带读的状态。
+func (r *Resolver) State(ctx context.Context) State {
+	for {
+		r.mu.Lock()
+		if r.cur == nil && r.disabled() {
+			s := r.resolve(ctx) // 不解析的：只是读一下进程自己的 PATH，不起进程
+			s.At = r.now()
+			r.cur = &s
+		}
+		if r.cur != nil {
+			st := State{Snapshot: *r.cur, Refreshing: r.flight != nil, RefreshErr: r.rerr}
+			r.mu.Unlock()
+			return st
+		}
+		f := r.flight
+		if f == nil {
+			f = r.startLocked(false) // 没人启动过：第一个要用的人触发（deckd.Run 会先 Start）
+		}
+		r.mu.Unlock()
+		<-f.done
+	}
+}
+
+// Refresh 是「刷新会话 PATH」键：在后台重读一次登录 shell 的 PATH，立即返回。
+// 已经有一次读在跑（启动那次、别的窗口按的、同一个窗口连按）就合并进去，不再起新的，返回 false；真的起了新的读返回 true。
+// 没有开解析（NewStatic、Run 为 nil）时什么都不做，返回 false。
+func (r *Resolver) Refresh() bool {
+	if r.disabled() {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.flight != nil {
+		return false
+	}
+	r.startLocked(true)
+	return true
+}
+
+// Enabled 说明这个 Resolver 会不会真的运行登录 shell（界面据此决定要不要显示刷新键）。
+func (r *Resolver) Enabled() bool { return r != nil && !r.disabled() }
+
+// startLocked 在后台起一次读（调用方持有 mu，且当前没有读在跑）。读完更新快照、清掉 flight、关闭 done。
+func (r *Resolver) startLocked(manual bool) *flight {
+	f := &flight{done: make(chan struct{})}
+	r.flight = f
+	base := r.Base
+	if base == nil {
+		base = context.Background()
+	}
+	go func() {
+		s := r.resolve(base) // 自己有超时（Wait）；不持有 mu
+		s.At = r.now()
+		r.mu.Lock()
+		switch {
+		case r.cur == nil:
+			r.cur = &s
+		case !manual: // 不会发生：已有快照时只有按键触发读
+			r.cur = &s
+		case s.Fallback == nil:
+			r.cur, r.rerr = &s, nil
+		default:
+			if r.cur.Fallback != nil {
+				r.cur = &s // 本来就是回退：换成最新一次的回退（原因更新）
+			}
+			r.rerr = s.Fallback
+		}
+		r.flight = nil
+		r.mu.Unlock()
+		close(f.done)
+	}()
+	return f
 }
 
 func (r *Resolver) now() time.Time {

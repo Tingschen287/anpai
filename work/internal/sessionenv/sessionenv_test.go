@@ -95,11 +95,8 @@ func TestN060S4ShellNoiseAndForgedMarkersAreIgnored(t *testing.T) {
 		marks = append(marks, m)
 		return []byte(m + "B/a" + m + "E"), nil
 	})
-	at := time.Unix(2_000_000, 0)
-	r2.Now = func() time.Time { return at }
 	r2.Get(context.Background())
-	at = at.Add(11 * time.Second)
-	r2.Fresh(context.Background())
+	refreshAndWait(t, r2) // 返工：不再有「过期重读」，第二次解析只能由刷新键触发
 	if len(marks) != 2 || marks[0] == marks[1] {
 		t.Fatalf("每次解析的边界应不同：%v", marks)
 	}
@@ -236,8 +233,27 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-// 缓存：Get 5 分钟、失败 30 秒；Fresh 10 秒。同一次派工用的是同一份快照（Snapshot 是值，不随后来的解析变）。
-func TestN060S4CacheAndFresh(t *testing.T) {
+// refreshAndWait 按一次刷新键并等它读完（轮询状态，不 sleep 固定时间）。
+func refreshAndWait(t *testing.T, r *Resolver) {
+	t.Helper()
+	r.Refresh()
+	waitIdle(t, r)
+}
+
+func waitIdle(t *testing.T, r *Resolver) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		if !r.State(context.Background()).Refreshing {
+			return
+		}
+	}
+	t.Fatal("读一直没有结束")
+}
+
+// 快照：启动时读一次，之后无论过多久、被问多少次都不再运行登录 shell（返工，owner 2026-10-27 定；原来的「成功 5 分钟、失败 30 秒、Fresh 10 秒」过期重读已去掉）。
+// 只有刷新键才重读；先拿到的快照是值，不随后来的读变（同一次派工里 trust 门和启动用的是同一份）。
+// （原测试 TestN060S4CacheAndFresh 断言的正是被去掉的过期重读，按 owner 的决定改成下面的断言，其余检查点——快照是值、失败结果换成新回退——保留。）
+func TestN060S4SnapshotNeverExpiresOnItsOwn(t *testing.T) {
 	shell := okShell(t)
 	now := time.Unix(1_000_000, 0)
 	n := 0
@@ -252,34 +268,38 @@ func TestN060S4CacheAndFresh(t *testing.T) {
 	})
 	r.Now = func() time.Time { return now }
 	first := r.Get(context.Background())
-	r.Get(context.Background())
+	for _, d := range []time.Duration{0, 11 * time.Second, 6 * time.Minute, 24 * time.Hour} {
+		now = now.Add(d)
+		r.Get(context.Background())
+		r.State(context.Background())
+	}
 	if n != 1 {
-		t.Fatalf("5 分钟内用缓存：解析 %d 次", n)
+		t.Fatalf("时间过去多久都不重读：解析了 %d 次", n)
 	}
-	now = now.Add(11 * time.Second)
-	if r.Get(context.Background()); n != 1 {
-		t.Fatalf("Get 11 秒后仍用缓存：%d", n)
+	// 失败的启动读：同样只读一次，不会 30 秒后自己再试
+	fail = true
+	rf := fakeResolver(map[string]string{"SHELL": shell, "PATH": "/usr/bin"}, func(context.Context, string, []string, []string) ([]byte, error) {
+		n++
+		return nil, errors.New("boom")
+	})
+	rf.Now = func() time.Time { return now }
+	n = 0
+	if s := rf.Get(context.Background()); s.Fallback == nil || n != 1 {
+		t.Fatalf("启动读失败：%d %+v", n, s)
 	}
-	if s := r.Fresh(context.Background()); n != 2 || s.Path == first.Path {
-		t.Fatalf("Fresh 超过 10 秒重新解析：%d %q %q", n, s.Path, first.Path)
+	now = now.Add(time.Hour)
+	rf.Get(context.Background())
+	if n != 1 {
+		t.Fatalf("失败也只读一次，要等刷新键：%d", n)
+	}
+	// 刷新键：读一次，拿到新的；先拿到的快照不变
+	fail = false
+	refreshAndWait(t, r)
+	if s := r.Get(context.Background()); n != 2 || s.Path == first.Path {
+		t.Fatalf("刷新键触发一次重读：%d %q %q", n, s.Path, first.Path)
 	}
 	if !strings.HasPrefix(first.Path, "/dir1") {
 		t.Fatalf("先拿到的快照不随后来的解析变：%q", first.Path)
-	}
-	now = now.Add(6 * time.Minute)
-	fail = true
-	s := r.Get(context.Background())
-	if n != 3 || s.Fallback == nil {
-		t.Fatalf("缓存过期重新解析并失败：%d %+v", n, s)
-	}
-	r.Get(context.Background())
-	if n != 3 {
-		t.Fatalf("失败的结果缓存 30 秒：%d", n)
-	}
-	now = now.Add(31 * time.Second)
-	fail = false
-	if s := r.Get(context.Background()); n != 4 || s.Source != SourceLoginShell {
-		t.Fatalf("失败 30 秒后再试：%d %+v", n, s)
 	}
 }
 

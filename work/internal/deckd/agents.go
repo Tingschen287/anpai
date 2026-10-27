@@ -275,7 +275,7 @@ func creatorOf(c Caller) string {
 func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, plan spawnPlan, exception, graphNode string) {
 	x, p := plan.x, plan.project
 	// 这次派工只取一份会话 PATH：trust 门查可执行文件与版本、agent-deck launch 起会话都用它（n060 段 4）
-	ctx, _, _ = s.sessionScope(ctx, false)
+	ctx, _, _ = s.sessionScope(ctx)
 	// Codex trust 门（§14.3）
 	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !(trust == agentdeck.CodexTrustMaybe && s.notCodex(x.Tool)) {
 		path, version, err := s.agents.toolInfo(ctx, plan.agent.Binary)
@@ -298,6 +298,14 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			return
 		}
 		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.4", plan.agent.Name), "deckd")
+		// 授权依据的是 path 这个文件：把它所在的目录放到交给上游的 PATH 最前面，并核对按这份 PATH 找到的就是它（n060 段 4 返工，R1）。
+		// 之后上游按工具名再找一次时，更靠前的目录里新装的同名文件顶替不了它；同一路径上的文件被替换是既有的信任边界，这里不管。
+		bctx, berr := bindLaunchPath(ctx, plan.agent.Binary, path)
+		if berr != nil {
+			writeErr(w, bindStatus, berr)
+			return
+		}
+		ctx = bctx
 	}
 	// 主 agent：每个项目同时只能有一个。旧主 agent 的 tmux 会话已经不在（退出或被关掉）就记为已结束、放行
 	// （n051 自查：此前没有任何路径结束主 agent，它一退出，这个项目就再也起不了主 agent）。

@@ -67,6 +67,12 @@ func (m *Settings) fetchToolsBg() tea.Cmd {
 	}
 }
 
+// pathRefreshMsg 是「刷新会话 PATH」键的结果：err 是请求没发成或读不到状态；tools 是读完（或等到上限）后的工具目录。
+type pathRefreshMsg struct {
+	tools []ToolInfo
+	err   error
+}
+
 type toolModelsMsg struct {
 	tool   string
 	req    int
@@ -80,6 +86,62 @@ func (m *Settings) fetchTools() tea.Cmd {
 		defer cancel()
 		t, err := m.API.Tools(ctx)
 		return toolsMsg{tools: t, err: err}
+	}
+}
+
+// pathScoped：deckd 是不是在用会话 PATH（读到的工具带来源）。没有（测试、没开）就没有刷新键，也不显示相关提示。
+func (m *Settings) pathScoped() bool {
+	for _, t := range m.tools {
+		if t.PathSource != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// pathRefreshing：有一次读正在跑（本窗口按的，或 deckd 告诉我们别处按的、启动那次）。
+func (m *Settings) pathRefreshing() bool {
+	if m.pathBusy {
+		return true
+	}
+	for _, t := range m.tools {
+		if t.PathRefreshing {
+			return true
+		}
+	}
+	return false
+}
+
+// pathRefreshWait 是按键后等 deckd 读完的上限（一次读最多 5 秒探针加半秒收拾，留余量）；超过就不再等，下次打开这一页会重新取。
+const pathRefreshWait = 20 * time.Second
+
+// refreshPath 是「刷新会话 PATH」键（加入页、agent 页同一个键 p）：请 deckd 在后台重读一次登录 shell 的 PATH（会运行 owner 的登录启动文件），
+// 读的时候界面照常可用，读完更新已装与版本。本窗口已经在等就忽略（连按不叠加）；deckd 那边几个窗口同时按也只读一次。
+func (m *Settings) refreshPath() tea.Cmd {
+	rf, ok := m.API.(pathRefresher)
+	if !ok || !m.pathScoped() || m.pathBusy {
+		return nil
+	}
+	m.pathBusy = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pathRefreshWait+10*time.Second)
+		defer cancel()
+		if err := rf.RefreshPath(ctx); err != nil {
+			return pathRefreshMsg{err: err}
+		}
+		deadline := time.Now().Add(pathRefreshWait)
+		for { // 先轮询「读完没有」（便宜的状态请求），读完再取一次工具目录
+			busy, err := rf.PathRefreshing(ctx)
+			if err != nil {
+				return pathRefreshMsg{err: err}
+			}
+			if !busy || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		t, err := m.API.Tools(ctx)
+		return pathRefreshMsg{tools: t, err: err}
 	}
 }
 
@@ -112,6 +174,23 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		m.tools, m.deckTools = msg.tools, msg.tools
 		if m.sub != nil && m.sub.kind == subAdd {
 			m.msg = nil
+		}
+	case pathRefreshMsg:
+		m.pathBusy = false
+		if msg.err != nil {
+			err := msg.err
+			m.msg = later(func() string { return T("path.refresh.fail", errLong(err)) })
+			return nil
+		}
+		m.tools, m.deckTools = msg.tools, msg.tools
+		still := false
+		for _, t := range msg.tools {
+			still = still || t.PathRefreshing
+		}
+		if still {
+			m.msg = later(func() string { return T("path.refresh.slow") })
+		} else if m.sub != nil && (m.sub.kind == subAdd || m.sub.kind == subAgent) {
+			m.msg = later(func() string { return T("path.refresh.done") })
 		}
 	case toolModelsMsg:
 		if m.sub == nil || m.sub.input == nil {
@@ -172,6 +251,31 @@ func (m *Settings) pathNoteLines() string {
 	var b strings.Builder
 	for _, l := range m.wrap(n, 2) {
 		b.WriteString(orange + "  " + l + reset + "\n")
+	}
+	return b.String()
+}
+
+// pathRefreshLines 是加入页与 agent 页上「刷新会话 PATH」的状态与说明（只在 deckd 用会话 PATH 时显示）：
+// 正在刷新时说明（界面照常可用、先用旧结果）；启动时没读到就提示按 p 重试；平时一行说明这个键会运行登录启动文件。
+func (m *Settings) pathRefreshLines() string {
+	if !m.pathScoped() {
+		return ""
+	}
+	var b strings.Builder
+	if m.pathRefreshing() {
+		b.WriteString(m.note(T("path.refreshing")))
+		return b.String()
+	}
+	startupFail := false
+	for _, t := range m.tools {
+		if t.PathSource == "process" && (t.NoteCode != "" || t.Note != "") { // 退回了 deckd 自己的 PATH（启动时没读到、或之后的刷新也没成）
+			startupFail = true
+		}
+	}
+	if startupFail {
+		b.WriteString(m.note(T("path.retry")))
+	} else {
+		b.WriteString(m.note(T("path.help")))
 	}
 	return b.String()
 }
@@ -260,6 +364,9 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 // ---------------- 加入 agent ----------------
 
 func (m *Settings) addKey(k string) tea.Cmd {
+	if k == "p" {
+		return m.refreshPath()
+	}
 	opts := m.addable()
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	if (k != "enter" && k != " ") || len(opts) == 0 {
@@ -317,6 +424,7 @@ func (m *Settings) addView() (string, []string) {
 	}
 	b.WriteString("\n" + m.note(T("add.about")))
 	b.WriteString(m.pathNoteLines())
+	b.WriteString(m.pathRefreshLines())
 	return b.String(), m.msgFoot()
 }
 
@@ -331,6 +439,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 	n := len(a.Models)
 	m.sub.cur = max(0, min(m.sub.cur, n-1))
 	switch k {
+	case "p":
+		return m.refreshPath()
 	case "enter", " ":
 		if n == 0 {
 			return nil
@@ -432,6 +542,7 @@ func (m *Settings) agentView() (string, []string) {
 	}
 	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitizeFull(a.Tool)) + reset + "\n")
 	b.WriteString(m.pathNoteLines())
+	b.WriteString(m.pathRefreshLines())
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
