@@ -2,6 +2,7 @@ package sessionenv
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -30,9 +31,26 @@ func LookPath(path, name string) string {
 	return ""
 }
 
+// executable 问的是「当前进程的有效身份真能执行它吗」，不是「任意一类用户有执行位」（n060 段 4 返工 2，R1b）。
+//
+// 旧写法只看 Mode().Perm()&0o111：文件被改成 0645（属主不能执行、其他人能）时它仍判可执行，而实际的查找（Go 的 exec.LookPath、shell）会跳过这个文件，
+// 去跑后面目录里的同名文件——设置里显示的、trust 门核准的、绑定核对放行的，就和真正会被启动的对不上。
+// 现在对绝对路径直接调 exec.LookPath：它在 unix 上走 faccessat(X_OK)（有效 uid/gid，含属组与目录的搜索权限、noexec 挂载等），
+// 与实际启动用的是同一套判断，系统调用不可用（ENOSYS、容器 seccomp 的 EPERM）时才退回权限位。darwin、linux 都能编译，不引入依赖。
+// 仍要求是普通文件（跟随符号链接）。设置里的「已装」查找、trust 门、启动前的绑定核对都经 LookPath，用的就是这一个判断。
+//
+// 以 root 运行时的差别（只分析）：内核对 root 的 X_OK 要求至少有一个执行位，所以 0644 的文件 root 仍不能执行，
+// 0645、0100 这类 root 能执行；root 不受属主/属组位限制，这与 exec.LookPath 一致，此处不另做处理。
 func executable(p string) bool {
+	if !filepath.IsAbs(p) { // 只处理绝对路径：相对路径会让 exec.LookPath 去看当前目录
+		return false
+	}
 	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	_, err = exec.LookPath(p) // 带斜杠：只做 findExecutable，不看 PATH
+	return err == nil
 }
 
 // Env 返回 base 的副本，PATH 换成 path（没有就加上）。子进程用它，这样 `#!/usr/bin/env node` 之类的脚本也按会话 PATH 找解释器。

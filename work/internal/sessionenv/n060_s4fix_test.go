@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -330,5 +331,113 @@ func TestN060S4FixFrontDirBindsWhichFileLookPathFinds(t *testing.T) {
 	bound, _ = FrontDir(path, filepath.Dir(approved))
 	if LookPath(bound, "codex") == approved {
 		t.Fatal("不可执行的文件不会被解析到")
+	}
+}
+
+// 返工 2（Codex 复审 2 的 R1b）：LookPath 的「可执行」是当前有效身份真能执行，与 exec.LookPath 一致，不是「任意一类用户有执行位」。
+func TestN060S4Fix2LookPathMeansEffectiveExecute(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 的执行权限判断不同（有任一执行位即可）；本测试只在普通用户下有意义")
+	}
+	mk := func(dir string, mode os.FileMode) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "codex")
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for name, tc := range map[string]struct {
+		mode os.FileMode
+		want bool
+	}{
+		"0755 全员可执行":                  {0o755, true},
+		"0700 只有 owner 能执行":           {0o700, true},
+		"0100 owner 只有执行位":            {0o100, true},
+		"0645 owner 不能执行、other 能":     {0o645, false},
+		"0075 owner 不能执行、属组与 other 能": {0o075, false},
+		"0001 只有 other 能执行":           {0o001, false},
+		"0644 谁都不能执行":                 {0o644, false},
+		"0000":                        {0o000, false},
+	} {
+		dir := t.TempDir()
+		p := mk(dir, tc.mode)
+		got := LookPath(dir, "codex")
+		if (got == p) != tc.want || (got != "" && got != p) {
+			t.Errorf("%s：LookPath = %q，可执行应为 %v", name, got, tc.want)
+		}
+		// 与标准库一致（字面路径与 PATH 查找两种形状）
+		_, stdErr := exec.LookPath(p)
+		if (stdErr == nil) != tc.want {
+			t.Errorf("%s：前提不成立：exec.LookPath(%s) err=%v", name, p, stdErr)
+		}
+		if lit := LookPath("", p); (lit == p) != tc.want {
+			t.Errorf("%s：带斜杠的名字：%q", name, lit)
+		}
+	}
+	// 前面目录里 owner 不能执行的同名文件被跳过，查到后面那个（与实际启动的查找一致）
+	early, later := t.TempDir(), t.TempDir()
+	mk(early, 0o645)
+	good := mk(later, 0o755)
+	if got := LookPath(early+":"+later, "codex"); got != good {
+		t.Errorf("应跳过 0645 的前一个、找到 %q：%q", good, got)
+	}
+}
+
+// 目录不可进入（无 x 权限）时里面的文件找不到；符号链接按目标判断：指向不可执行文件的链接不算，指向可执行文件的算（返回链接路径本身）。
+func TestN060S4Fix2LookPathDirsAndSymlinks(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 不受目录权限限制；本测试只在普通用户下有意义")
+	}
+	root := t.TempDir()
+	// 目录没有搜索（x）权限：文件本身 0755 也执行不了
+	locked := filepath.Join(root, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+	if got := LookPath(locked, "codex"); got != "" {
+		t.Errorf("目录不可进入，不能找到里面的文件：%q", got)
+	}
+	// 符号链接
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	okT, badT := filepath.Join(real, "ok"), filepath.Join(real, "bad")
+	os.WriteFile(okT, []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(badT, []byte("#!/bin/sh\n"), 0o755)
+	os.Chmod(badT, 0o645)
+	links := filepath.Join(root, "links")
+	os.MkdirAll(links, 0o755)
+	os.Symlink(okT, filepath.Join(links, "good-link"))
+	os.Symlink(badT, filepath.Join(links, "bad-link"))
+	os.Symlink(filepath.Join(real, "nothing"), filepath.Join(links, "dangling"))
+	if got := LookPath(links, "good-link"); got != filepath.Join(links, "good-link") {
+		t.Errorf("指向可执行文件的符号链接应找到（返回链接路径本身）：%q", got)
+	}
+	for _, n := range []string{"bad-link", "dangling"} {
+		if got := LookPath(links, n); got != "" {
+			t.Errorf("%s 指向不可执行/不存在的文件，不能算找到：%q", n, got)
+		}
+	}
+	// 目录当文件：不是普通文件
+	if err := os.MkdirAll(filepath.Join(real, "dirname"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := LookPath(real, "dirname"); got != "" {
+		t.Errorf("目录不是可执行文件：%q", got)
 	}
 }
