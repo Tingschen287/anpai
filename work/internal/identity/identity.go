@@ -1,6 +1,7 @@
 // Package identity 判定一个 unix socket 连接来自哪个 tmux 窗格（n050，架构稿 §3）。
 //
-// 做法：取 SO_PEERCRED 拿到对方 pid，沿 /proc 父进程链向上，匹配各 tmux server 的窗格进程。窗格用
+// 做法：取对端 pid（Linux 用 SO_PEERCRED，macOS 用 LOCAL_PEERCRED 核对 uid、LOCAL_PEERPID 取 pid），
+// 沿父进程链向上（Linux 读 /proc，macOS 读 sysctl kern.proc.pid），匹配各 tmux server 的窗格进程。窗格用
 // 「server socket 路径 + pane id」标识——pane id 只在同一 server 内唯一。
 //
 // 这条判定防的是模型越权与误操作：子 agent 冒充 owner、用 setsid 脱离进程链（落到「未知」）。
@@ -11,12 +12,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
@@ -56,81 +55,14 @@ func (s TmuxSource) Panes(ctx context.Context) ([]Pane, error) {
 	return panes, nil
 }
 
-// PeerPID 取 unix socket 连接对端进程的 pid。
-func PeerPID(c *net.UnixConn) (int, error) {
-	raw, err := c.SyscallConn()
-	if err != nil {
-		return 0, err
-	}
-	var cred *syscall.Ucred
-	var serr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, serr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil {
-		return 0, err
-	}
-	if serr != nil {
-		return 0, serr
-	}
-	return int(cred.Pid), nil
-}
-
-// soPeerPIDFD 是 SO_PEERPIDFD（Linux 6.5 起；asm-generic 下为 77）。标准库 syscall 没有这个常量。
-const soPeerPIDFD = 77
-
-// ErrNoPIDFD 表示内核不支持 SO_PEERPIDFD。
+// ErrNoPIDFD 表示这个系统取不到对端进程的生命周期绑定（Linux 内核不支持 SO_PEERPIDFD）。
+// 各平台的 PeerPID、PeerLifetime 在 identity_linux.go、identity_darwin.go。
 var ErrNoPIDFD = errors.New("内核不支持 SO_PEERPIDFD")
-
-// PeerPIDFD 取连接对端进程的 pidfd。内核在 connect 时记下对端的进程结构，所以 pidfd 指向的一定是建立连接的那个进程，
-// 不会因为 pid 被复用而指错。用完要 Close（syscall.Close）。
-func PeerPIDFD(c *net.UnixConn) (int, error) {
-	raw, err := c.SyscallConn()
-	if err != nil {
-		return -1, err
-	}
-	fd, serr := -1, error(nil)
-	if err := raw.Control(func(s uintptr) {
-		fd, serr = syscall.GetsockoptInt(int(s), syscall.SOL_SOCKET, soPeerPIDFD)
-	}); err != nil {
-		return -1, err
-	}
-	if errors.Is(serr, syscall.ENOPROTOOPT) {
-		return -1, ErrNoPIDFD
-	}
-	if serr != nil {
-		return -1, serr
-	}
-	return fd, nil
-}
-
-// PIDFDHolds 返回一个检查：pidfd 指向的进程仍然持有 pid。进程被回收后 /proc/self/fdinfo 里的 Pid 变为 -1
-// （僵尸状态下 pid 仍被占着、不会被复用），所以「Pid 等于 pid」就说明此刻 /proc/<pid> 是这个进程。
-func PIDFDHolds(fd, pid int) func() error {
-	return func() error {
-		data, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
-		if err != nil {
-			return err
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if v, ok := strings.CutPrefix(line, "Pid:"); ok {
-				got, err := strconv.Atoi(strings.TrimSpace(v))
-				if err != nil {
-					return err
-				}
-				if got != pid {
-					return fmt.Errorf("pidfd 现在指向 pid %d（-1 表示已退出）", got)
-				}
-				return nil
-			}
-		}
-		return errors.New("pidfd 的 fdinfo 里没有 Pid")
-	}
-}
 
 // Resolver 把一个 pid 对应到它所在的窗格。
 type Resolver struct {
 	Sources  []PaneSource
-	ProcRoot string // 默认 /proc；测试可换
+	ProcRoot string // 空表示用本平台的进程表（Linux /proc，macOS sysctl）；测试可换成假的 /proc 目录
 }
 
 // ErrUnknown 表示进程链上没有任何已知窗格。
@@ -155,7 +87,7 @@ type Peer struct {
 
 // ErrNoLifetimeBinding 表示一条连接的对端没有生命周期绑定（Peer.Same 为空，通常是内核不支持 SO_PEERPIDFD）。
 // 没有 pidfd 就没有可靠的办法证明 /proc/<pid> 还是建立连接的那个进程（n050 评审 A3-1），所以不据此判定窗格。
-var ErrNoLifetimeBinding = errors.New("连接没有绑定到对端进程（内核不支持 SO_PEERPIDFD，需 Linux 6.5 及以上），不据进程号判定窗格")
+var ErrNoLifetimeBinding = errors.New("连接没有绑定到对端进程（取不到对端进程的生命周期绑定；Linux 需内核 6.5 及以上的 SO_PEERPIDFD），不据进程号判定窗格")
 
 // Resolve 按一个 pid 判定窗格，不核对进程生命周期：只用于不涉及连接的查询与测试，不能用于授权。
 func (r Resolver) Resolve(ctx context.Context, pid int) (Pane, error) {
@@ -238,7 +170,6 @@ func (r Resolver) ResolvePeer(ctx context.Context, peer Peer) (Pane, error) {
 // Ancestry 返回从 pid 起、沿父进程向上直到 1 的进程链（含 pid 本身，不含 1）。
 // pid 本身读不到就是错误：对端已退出，不能把它当成「未知但无害」。
 func (r Resolver) Ancestry(pid int) ([]Proc, error) {
-	root := r.root()
 	var chain []Proc
 	seen := map[int]bool{}
 	for cur := pid; cur > 1; {
@@ -246,7 +177,7 @@ func (r Resolver) Ancestry(pid int) ([]Proc, error) {
 			return nil, fmt.Errorf("进程链出现环（pid %d）", cur)
 		}
 		seen[cur] = true
-		ppid, start, err := statOf(root, cur)
+		ppid, start, err := r.stat(cur)
 		if err != nil {
 			if cur == pid {
 				return nil, fmt.Errorf("读不到调用进程 %d：%w", pid, err)
@@ -259,11 +190,12 @@ func (r Resolver) Ancestry(pid int) ([]Proc, error) {
 	return chain, nil
 }
 
-func (r Resolver) root() string {
-	if r.ProcRoot == "" {
-		return "/proc"
+// stat 返回 pid 的父进程与出生时间：指定了 ProcRoot 就读那个 /proc 形状的目录，否则走本平台的进程表。
+func (r Resolver) stat(pid int) (int, uint64, error) {
+	if r.ProcRoot != "" {
+		return statOf(r.ProcRoot, pid)
 	}
-	return r.ProcRoot
+	return nativeStat(pid)
 }
 
 // statOf 返回父进程 pid 与出生时间。

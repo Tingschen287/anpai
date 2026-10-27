@@ -60,7 +60,7 @@ func reviewCommand(script string, node projectctl.Node, attempt int, b binding.B
 		return shq(v)
 	}
 	return strings.Join([]string{
-		"python3", or(script, "<控制器脚本路径>"), "review", shq(node.ID),
+		projectctl.PythonForText(), or(script, "<控制器脚本路径>"), "review", shq(node.ID),
 		"--decision", shq(verdict),
 		"--reviewer", shq("workdeck-review-" + b.SessionID),
 		"--role", or(node.ReviewerRole, "<review_policy.reviewer_role>"),

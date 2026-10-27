@@ -140,6 +140,7 @@ func TestIntegrationBriefCommandsWorkAgainstTheRealController(t *testing.T) {
 	if err != nil {
 		t.Skipf("跳过：找不到 projectctl（%v）", err)
 	}
+	useRealPythonInCommands(t)
 	src, _ := filepath.Abs("../../testdata/workdeck-fixture")
 	// 控制器要求目录名等于 project_id，空格放在上一级：命令里的路径照样要正确引用。
 	parent := filepath.Join(t.TempDir(), "with space")

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,12 +23,20 @@ func TestEstimatedOpenCodeQuotaStillGatesFrontier(t *testing.T) {
 	defer srv.Close()
 	w := newAgentWorld(t)
 	w.srv.agents.quotaOf = nil
-	w.srv.quota = &dashquota.Client{URL: srv.URL}
+	// Claude 的状态栏缓存用测试自己的夹具文件：原来读本机真实的 /tmp/claude/…，本机没有 Claude Code 缓存时
+	// 响应里就没有 source 字段，wirecheck 里对 source 的例外会被判过期（Mac 上暴露，n067）
+	cache := filepath.Join(t.TempDir(), "statusline-usage-cache.json")
+	usage := fmt.Sprintf(`{"five_hour":{"utilization":35.0,"resets_at":%q},"seven_day":{"utilization":64.4,"resets_at":%q}}`,
+		now.Add(2*time.Hour).Format(time.RFC3339), now.Add(48*time.Hour).Format(time.RFC3339)) // 重置时间要在未来，过去的会被当成上个周期丢掉
+	if err := os.WriteFile(cache, []byte(usage), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.srv.quota = &dashquota.Client{URL: srv.URL, ClaudeUsagePath: cache}
 	if !w.srv.quotaUnsure(context.Background(), "opencode") {
 		t.Fatal("估算的 OpenCode 额度不能放开额度门")
 	}
 	code, b := w.do("owner", "GET", "/v1/quota", "")
-	if code != 200 || !strings.Contains(b, `"tool":"opencode"`) || !strings.Contains(b, `"estimated":true`) || !strings.Contains(b, `"key":"day"`) {
+	if code != 200 || !strings.Contains(b, `"source":`) || !strings.Contains(b, `"tool":"opencode"`) || !strings.Contains(b, `"estimated":true`) || !strings.Contains(b, `"key":"day"`) {
 		t.Fatalf("面板照样拿到估算窗口：%d %s", code, b)
 	}
 }

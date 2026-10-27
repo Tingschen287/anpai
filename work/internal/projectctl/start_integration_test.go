@@ -23,7 +23,7 @@ func TestIntegrationStartReturnsTheLedgerAttemptForAResumedNode(t *testing.T) {
 	if out, err := exec.Command("cp", "-r", src, dst).CombinedOutput(); err != nil {
 		t.Fatalf("复制夹具失败：%v %s", err, out)
 	}
-	resume := exec.Command("python3", script, "--format", "json", "resume", "f05_legacy_path", "--actor", "owner", "--reason", "n042 测试：恢复失败节点")
+	resume := exec.Command(testPython(t), script, "--format", "json", "resume", "f05_legacy_path", "--actor", "owner", "--reason", "n042 测试：恢复失败节点")
 	resume.Dir = dst
 	if out, err := resume.CombinedOutput(); err != nil {
 		t.Fatalf("resume 失败：%v %s", err, out)
@@ -64,7 +64,7 @@ func TestIntegrationStartReconcilesWhenTheReceiptGoesWrong(t *testing.T) {
 		if out, err := exec.Command("cp", "-r", src, dst).CombinedOutput(); err != nil {
 			t.Fatalf("复制夹具失败：%v %s", err, out)
 		}
-		resume := exec.Command("python3", script, "--format", "json", "resume", "f05_legacy_path", "--actor", "owner", "--reason", "n044 测试：恢复失败节点")
+		resume := exec.Command(testPython(t), script, "--format", "json", "resume", "f05_legacy_path", "--actor", "owner", "--reason", "n044 测试：恢复失败节点")
 		resume.Dir = dst
 		if out, err := resume.CombinedOutput(); err != nil {
 			t.Fatalf("resume 失败：%v %s", err, out)
@@ -115,4 +115,14 @@ sys.exit(subprocess.run([sys.executable, real] + args).returncode)
 	if err == nil || errors.As(err, &ns) || !strings.Contains(err.Error(), "可能已经开工") {
 		t.Errorf("账本动了、却对不上这次开工：应当报结果不明，不能当没开工：%v", err)
 	}
+}
+
+// testPython 是集成测试里直接调控制器用的解释器：和产品代码一样的选法（Mac 自带的 python3 是 3.9，跑不了 projectctl）。
+func testPython(t *testing.T) string {
+	t.Helper()
+	py, err := ResolvePython()
+	if err != nil {
+		t.Skipf("跳过：没有 Python 3.11 及以上（%v）", err)
+	}
+	return py
 }

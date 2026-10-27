@@ -258,7 +258,10 @@ func TestConfirmPageCaretVisible(t *testing.T) {
 			if name != "" {
 				m.agentPtr("claude").Name = name
 			}
-			dir := filepath.Join(t.TempDir(), strings.Repeat("项", 80))
+			// 目录名最多 80 个字；临时目录前缀长（macOS 的 $TMPDIR 就有 50 多字节）时缩短，使整条路径留在
+			// deckstore.CheckPath 的 300 字节上限内，否则选不了目录、进不了确认页（n067）
+			base := t.TempDir()
+			dir := filepath.Join(base, strings.Repeat("项", min(80, (290-len(base)-1)/3)))
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}

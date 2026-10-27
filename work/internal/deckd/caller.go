@@ -5,7 +5,6 @@ import (
 	"errors"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net"
-	"syscall"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
@@ -38,7 +37,8 @@ func withConn(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connKey{}, c)
 }
 
-// peerOf 取连接的对端：pid、连接建立时间，以及（内核支持时）绑定对端进程本身的 pidfd 检查——
+// peerOf 取连接的对端：pid、连接建立时间，以及（系统支持时）绑定对端进程本身的生命周期检查
+// （Linux 是 pidfd，macOS 是连接 audit token 里的 pidversion，见 identity.PeerLifetime）——
 // 连接身份绑定到进程，而不只是一个会被复用的整数 pid（n050 评审 R4）。内核不支持 SO_PEERPIDFD 时
 // 返回没有 Same 的 Peer，由 classify 降为未知调用者（评审 A3-1）；其他错误按身份查询失败处理（不能写）。
 // done 必须调用。
@@ -48,11 +48,11 @@ func peerOf(c *net.UnixConn, at time.Time) (identity.Peer, func(), error) {
 		return identity.Peer{}, func() {}, err
 	}
 	peer := identity.Peer{PID: pid, ConnectedAt: at}
-	fd, err := identity.PeerPIDFD(c)
+	same, release, err := identity.PeerLifetime(c, pid)
 	switch {
 	case err == nil:
-		peer.Same = identity.PIDFDHolds(fd, pid)
-		return peer, func() { syscall.Close(fd) }, nil
+		peer.Same = same
+		return peer, release, nil
 	case errors.Is(err, identity.ErrNoPIDFD):
 		return peer, func() {}, nil
 	default:

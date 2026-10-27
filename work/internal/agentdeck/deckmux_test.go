@@ -59,7 +59,7 @@ func TestDeckMuxCenterClientLifecycle(t *testing.T) {
 	conf := filepath.Join(filepath.Dir(layout), "deck.conf")
 	os.WriteFile(conf, []byte("set -g prefix None\nset -g status off\n"), 0o600)
 	center, err := LayoutNewSession(ctx, layout, conf, "deck", "main", "160", "40",
-		"tmux -S "+agent+" attach-session -r -t =deck-idle")
+		"tmux -S "+agent+" attach-session -r -t \"=deck-idle\"") // 目标加引号：macOS 的 zsh 会把裸的 =name 当命令路径展开（n067）
 	if err != nil {
 		t.Fatal(err)
 	}

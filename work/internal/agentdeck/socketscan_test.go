@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // needTmux 没有 tmux 就跳过，并说清原因。
@@ -17,6 +20,13 @@ func needTmux(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("跳过：本机没有 tmux")
+	}
+	// 这组测试按 -L 名字在 tmux 的 socket 目录里起 server，扫描时还会探测目录里的每一个 socket。
+	// 用测试自己的短目录当 TMUX_TMPDIR，不碰 owner 真实的 /tmp/tmux-<uid>/（里面可能有 owner 自己的 default server）。
+	// 目录里的 tmux-<uid> 先建好并设成 0700（tmux 也是这么建的）：有 tmux 在跑过的机器上它本来就在（n067）
+	t.Setenv("TMUX_TMPDIR", testsock.Dir(t))
+	if err := os.MkdirAll(tmuxSocketDir(), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -331,13 +341,22 @@ func TestResolveSocketTreatsACancelledProbeAsUnavailable(t *testing.T) {
 func TestDeadSocketsAreQuietNotAnError(t *testing.T) {
 	needTmux(t)
 	dir := tmuxSocketDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil { // tmux 自己建这个目录并要求 0700；隔离的 TMUX_TMPDIR 下它可能还不存在
+		t.Fatalf("造不出 socket 目录：%v", err)
+	}
 	dead := filepath.Join(dir, "n037scandead"+randomHexPlain(t, 4))
-	if err := os.WriteFile(dead, nil, 0o600); err != nil {
+	// 真正的死 socket：绑定过、关掉后文件还在，没人听。以前用一个空的普通文件冒充：Linux 上连它得到
+	// ECONNREFUSED（tmux 说 "no server running"），macOS 上得到 ENOTSOCK（tmux 说 "error connecting … non-socket"），
+	// 后者不是「死 socket」而是「探测失败」。真死 socket 两个平台都是 "no server running"（n067）
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: dead, Net: "unix"})
+	if err != nil {
 		t.Fatalf("造不出死 socket：%v", err)
 	}
+	ln.SetUnlinkOnClose(false)
+	ln.Close()
 	t.Cleanup(func() { os.Remove(dead) })
 
-	_, err := ResolveSocketFor(context.Background(), "n037scan-nobody-"+randomHexPlain(t, 4), "")
+	_, err = ResolveSocketFor(context.Background(), "n037scan-nobody-"+randomHexPlain(t, 4), "")
 	if err == nil {
 		t.Fatal("没有这个会话，应当拒绝")
 	}

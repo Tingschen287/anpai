@@ -23,8 +23,12 @@ func TmuxSessionAlive(ctx context.Context, socket, tmuxSession string) (bool, er
 	return false, nil
 }
 
-// procChildren 从 /proc/*/stat 建父进程 → 子进程表。
+// procChildren 从进程表建父进程 → 子进程表。proc 为空用本平台的进程表（Linux /proc，macOS sysctl），
+// 否则读那个 /proc 形状的目录（测试用）。
 func procChildren(proc string) map[int][]int {
+	if proc == "" {
+		return nativeChildren()
+	}
 	out := map[int][]int{}
 	entries, _ := os.ReadDir(proc)
 	for _, e := range entries {

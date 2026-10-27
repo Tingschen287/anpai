@@ -5,13 +5,12 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 type paneOf identity.Pane
@@ -39,7 +38,7 @@ func TestCallerWithoutPIDFDGetsNoRole(t *testing.T) {
 // deckd 把连接身份绑定到 pidfd：真机 socket 上，对端检查已接上且成立（n050 评审 R4）。
 // 内核不支持（6.5 以前）时跳过：那种机器上 deckd 不授予任何写权限（见上一条测试）。
 func TestPeerOfBindsTheConnectionToThePeerProcess(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "s")
+	path := testsock.Path(t, "s")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -56,10 +55,10 @@ func TestPeerOfBindsTheConnectionToThePeerProcess(t *testing.T) {
 	}
 	defer srv.Close()
 	at := time.Now()
-	if fd, err := identity.PeerPIDFD(srv); errors.Is(err, identity.ErrNoPIDFD) {
+	if _, release, err := identity.PeerLifetime(srv, os.Getpid()); errors.Is(err, identity.ErrNoPIDFD) {
 		t.Skip("内核不支持 SO_PEERPIDFD")
 	} else if err == nil {
-		syscall.Close(fd)
+		release()
 	}
 	peer, done, err := peerOf(srv, at)
 	if err != nil {

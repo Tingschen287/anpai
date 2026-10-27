@@ -49,7 +49,7 @@ func (e *ErrWriteCommandRefused) I18n() *i18n.Error {
 
 // Client 执行 projectctl 并把输出翻译成 Work Deck 的类型。
 type Client struct {
-	// Python 解释器。
+	// Python 解释器。空表示自动选（ResolvePython：指定的 → PATH 上第一个 3.11 及以上的 → 报错）。
 	Python string
 	// projectctl.py 的路径。
 	Script string
@@ -63,7 +63,6 @@ type Client struct {
 // NewClient 按给定项目根构造一个客户端，其余字段取默认值。
 func NewClient(project, script string) *Client {
 	return &Client{
-		Python:  "python3",
 		Script:  script,
 		Project: project,
 		Timeout: 60 * time.Second,
@@ -109,7 +108,11 @@ func (c *Client) run(ctx context.Context, command string, args ...string) (json.
 	}
 
 	full := append([]string{c.Script, "--format", "json", command}, args...)
-	cmd := exec.CommandContext(ctx, c.Python, full...)
+	py, perr := c.python()
+	if perr != nil {
+		return nil, perr
+	}
+	cmd := exec.CommandContext(ctx, py, full...)
 	cmd.Dir = c.Project
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -131,6 +134,35 @@ func (c *Client) run(ctx context.Context, command string, args ...string) (json.
 		return nil, i18n.E("err.projectctl.run.3", command, truncate(env.Error, 400))
 	}
 	return env.Result, nil
+}
+
+// probeTimeout 是问一次解释器版本的上限。
+const probeTimeout = 5 * time.Second
+
+// probePython 问一个解释器的 major.minor（选解释器用，python.go）。对 projectctl 的一切 exec 都收在本文件；
+// 这里不跑 projectctl，只跑 `<解释器> -c "print(版本)"`。
+func probePython(exe string) (pyVersion, error) {
+	cmd := exec.Command(exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		return pyVersion{}, err
+	}
+	timer := time.AfterFunc(probeTimeout, func() { cmd.Process.Kill() })
+	err := cmd.Wait()
+	timer.Stop()
+	if err != nil {
+		return pyVersion{}, err
+	}
+	return parsePyVersion(out.String())
+}
+
+// python 返回这个客户端该用的解释器：显式设了 Python 就用它，否则自动选。
+func (c *Client) python() (string, error) {
+	if c.Python != "" {
+		return c.Python, nil
+	}
+	return ResolvePython()
 }
 
 func truncate(s string, n int) string {
@@ -210,7 +242,11 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	}
 	args := []string{c.Script, "--format", "json", StartCommand, r.NodeID,
 		"--actor", r.Actor, "--role", r.Role, "--route-class", r.RouteClass, "--model", r.Model, "--reason", r.Reason}
-	cmd := exec.CommandContext(runCtx, c.Python, args...)
+	py, perr := c.python()
+	if perr != nil {
+		return StartResult{}, &ErrStartNotStarted{i18n.E("err.projectctl.start.noverify", perr)}
+	}
+	cmd := exec.CommandContext(runCtx, py, args...)
 	cmd.Dir = c.Project
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

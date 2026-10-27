@@ -7,6 +7,8 @@
 
 仓库里另有两个 Python 写的早先启动器 `ai` 与 `host`，与本目录互不影响，见根 README 最后一节。
 
+支持 macOS 和 Linux；本机前提是装好 tmux（要带 `--enable-sixel` 编译，侧栏的图标才显示）和 upstream agent-deck；用 Graph 项目时 projectctl 要 Python 3.11 及以上，环境变量 `DECK_PROJECTCTL_PYTHON` 可指定解释器。
+
 ## 名字
 
 本产品公开名是「安排 Anpai」（窄处只写「Anpai」；字标 Anpai 用 Geist SemiBold，「安排」用思源黑体，logo 仍是 A4）。

@@ -4,17 +4,17 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/testsock"
 )
 
 // NewUI 的请求带 i18n.MarkHeader，New 的不带；WithTimeout 的副本保留这个性质。
 func TestN060NewUISendsTheMarkHeader(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	sock := testsock.Path(t, "d.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Skipf("不能监听 unix socket：%v", err)

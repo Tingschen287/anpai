@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/constant"
 	"go/importer"
 	"go/parser"
@@ -911,17 +912,42 @@ func dynamicKeyProblems(src map[string]string) ([]string, error) {
 	return probs, nil
 }
 
+// dynamicCallProblems 对 darwin 和 linux 各做一遍完整的类型检查（n067）：_linux.go 与 _darwin.go 里的文件各只在自己的平台上
+// 参与编译，只检查本机平台会让另一个平台的文件从来没被检查过（审查 1：Linux 专用文件里的错键在 Mac 上漏检）。
+// 每个平台各扫一遍问题，动态取键的白名单（dynamicCallAllow、genericKeyAllow）对两个平台合起来的结果核对。
 func dynamicCallProblems(src map[string]string) ([]string, error) {
+	plats, err := checkModuleAll(src)
+	if err != nil {
+		return nil, err
+	}
 	var probs []string
-	err := withTypeImp(func(fset *token.FileSet, imp types.Importer) error {
-		checked, err := checkModule(fset, imp, src)
-		if err != nil {
-			return err
+	got, genGot := map[string]bool{}, map[string]bool{}
+	for _, pp := range plats {
+		p, g, gg := keyInvariantScan(pp.fset, pp.pkgs)
+		probs = append(probs, p...)
+		for k := range g {
+			got[k] = true
 		}
-		probs = keyInvariantProblems(fset, checked)
-		return nil
-	})
-	return probs, err
+		for k := range gg {
+			genGot[k] = true
+		}
+	}
+	probs = append(probs, allowlistProblems(got, genGot)...)
+	return dedupSorted(probs), nil
+}
+
+// dedupSorted 去重并排序：同一个文件在两个平台上都参与编译时，同一个问题会出现两次。
+func dedupSorted(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func orphanProblems(src map[string]string, catalog map[string]bool) ([]string, error) {
@@ -1003,13 +1029,31 @@ func tierProblems(src map[string]string, catalog map[string]bool) ([]string, err
 	return probs, nil
 }
 
-// 依赖包的类型信息只建一次，读本地源码，不联网、不新增模块。
+// 依赖包的类型信息每个平台只建一次，读本地源码，不联网、不新增模块。
 // 被测包每次用内存里的源码重新检查。FileSet 跟导入器绑在一起，所以一直复用。
+// 源码导入器按 go/build.Default 找文件，所以每次检查期间把 build.Default 的 GOOS 换成要查的平台（持锁，查完还原）。
 var (
-	typeImpMu   sync.Mutex
-	typeImpFset *token.FileSet
-	typeImp     types.Importer
+	typeImpMu      sync.Mutex
+	platformWorlds = map[string]*platformWorld{}
 )
+
+// typeCheckPlatforms 是类型检查要覆盖的平台。每个源文件至少在其中一个平台上被检查（TestN060TypeCheckCoversEveryFile 核对）。
+var typeCheckPlatforms = []string{"darwin", "linux"}
+
+// platformWorld 是一个平台的类型检查环境：FileSet、源码导入器，和没被改动的包的检查结果缓存。
+type platformWorld struct {
+	goos  string
+	fset  *token.FileSet
+	imp   types.Importer
+	cache map[string]checkedPkg
+}
+
+// platformPkgs 是一个平台上全模块的检查结果。
+type platformPkgs struct {
+	goos string
+	fset *token.FileSet
+	pkgs []checkedPkg
+}
 
 const (
 	moduleImport    = "github.com/Tingschen287/terminal-deck/work"
@@ -1040,17 +1084,45 @@ func isModulePath(path string) bool {
 	return path == moduleImport || strings.HasPrefix(path, moduleImport+"/")
 }
 
-func withTypeImp(fn func(*token.FileSet, types.Importer) error) error {
+// withPlatform 在 goos 平台的环境里运行 fn：持锁、把 build.Default 换成这个平台（不用 cgo，两个平台一致），fn 返回后还原。
+func withPlatform(goos string, fn func(w *platformWorld) error) error {
 	typeImpMu.Lock()
 	defer typeImpMu.Unlock()
-	if typeImp == nil {
-		typeImpFset = token.NewFileSet()
-		typeImp = importer.ForCompiler(typeImpFset, "source", nil)
-		if typeImp == nil {
+	saved := build.Default
+	defer func() { build.Default = saved }()
+	build.Default.GOOS = goos
+	build.Default.CgoEnabled = false
+	w := platformWorlds[goos]
+	if w == nil {
+		fset := token.NewFileSet()
+		imp := importer.ForCompiler(fset, "source", nil)
+		if imp == nil {
 			return errors.New("go/importer 没有 source 导入器")
 		}
+		w = &platformWorld{goos: goos, fset: fset, imp: imp, cache: map[string]checkedPkg{}}
+		platformWorlds[goos] = w
 	}
-	return fn(typeImpFset, typeImp)
+	return fn(w)
+}
+
+// checkModuleAll 在 typeCheckPlatforms 的每个平台上各装载、各做一遍全模块的类型检查。src 的含义同 checkModule。
+func checkModuleAll(src map[string]string) ([]platformPkgs, error) {
+	var out []platformPkgs
+	for _, goos := range typeCheckPlatforms {
+		var pp platformPkgs
+		if err := withPlatform(goos, func(w *platformWorld) error {
+			pkgs, err := checkModule(w, src)
+			if err != nil {
+				return fmt.Errorf("GOOS=%s：%w", goos, err)
+			}
+			pp = platformPkgs{goos: goos, fset: w.fset, pkgs: pkgs}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		out = append(out, pp)
+	}
+	return out, nil
 }
 
 type checkedPkg struct {
@@ -1134,10 +1206,19 @@ func parseModule(fset *token.FileSet, src map[string]string) ([]*pkgGroup, error
 		for _, e := range ents {
 			n := e.Name()
 			if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+				// n067：一次类型检查只装载这个平台（build.Default.GOOS，withPlatform 设的）会编进去的文件。
+				// _linux.go 与 _darwin.go 各自声明同名函数，一起检查会报重复声明；所以每个平台各检查一遍（checkModuleAll）。
+				// 文字扫描类的守卫（parseCovered）仍然看全部文件，不受影响
+				if ok, err := build.Default.MatchFile(dir, n); err == nil && !ok {
+					continue
+				}
 				names = append(names, n)
 			}
 		}
 		sort.Strings(names)
+		if len(names) == 0 {
+			continue // 这个平台上没有任何文件会编进这个包
+		}
 		g := &pkgGroup{dir: dir, path: pkgImportPath(dir)}
 		seenImp := map[string]bool{}
 		for _, n := range names {
@@ -1243,10 +1324,9 @@ func (o *overlayImporter) ImportFrom(path, dir string, mode types.ImportMode) (*
 // moduleCheckCache 存没被改动的包的类型检查结果（返工 4，建议 1）。反例每次只改 deckd/agents.go 这类一个文件，
 // 其余包重新装载、类型检查是纯重复：21 个参数反例 + 32 个动态键反例各做一遍，占了这组测试的大半耗时。
 // 只缓存「自己没有被覆盖、依赖的模块内部包也都没被覆盖」的包，所以结果与每次重做逐字相同。
-// 只在共享的 fset（withTypeImp 给的）上用，调用都在 typeImpMu 里，不用另外加锁。
-var moduleCheckCache = map[string]checkedPkg{}
-
-func checkModule(fset *token.FileSet, base types.Importer, src map[string]string) ([]checkedPkg, error) {
+// 缓存在 platformWorld 里（每个平台一份），调用都在 typeImpMu 里，不用另外加锁。
+func checkModule(w *platformWorld, src map[string]string) ([]checkedPkg, error) {
+	fset, base := w.fset, w.imp
 	groups, err := parseModule(fset, src)
 	if err != nil {
 		return nil, err
@@ -1273,9 +1353,9 @@ func checkModule(fset *token.FileSet, base types.Importer, src map[string]string
 		if changed {
 			dirty[g.path] = true
 		}
-		useCache := !changed && fset == typeImpFset
+		useCache := !changed
 		if useCache {
-			if cp, ok := moduleCheckCache[g.path]; ok {
+			if cp, ok := w.cache[g.path]; ok {
 				over.have[g.path] = cp.pkg
 				out = append(out, cp)
 				continue
@@ -1310,19 +1390,21 @@ func checkModule(fset *token.FileSet, base types.Importer, src map[string]string
 			enums: enumsIn(info, pkg, asts),
 		}
 		if useCache {
-			moduleCheckCache[g.path] = cp
+			w.cache[g.path] = cp
 		}
 		out = append(out, cp)
 	}
 	return out, nil
 }
 
-func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
+// keyInvariantScan 扫一个平台的检查结果：返回问题，以及这个平台上看到的动态取键、泛型实例化的站点（白名单的核对要对
+// 所有平台合起来做，见 allowlistProblems）。
+func keyInvariantScan(fset *token.FileSet, pkgs []checkedPkg) (probs []string, got, genGot map[string]bool) {
 	var dirs []string
 	for _, cp := range pkgs {
 		dirs = append(dirs, cp.dir)
 	}
-	probs := pkgSetProblems(dirs)
+	probs = pkgSetProblems(dirs)
 	known := map[string]bool{}
 	for _, k := range i18n.Keys() {
 		known[string(k)] = true
@@ -1331,8 +1413,8 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 	for _, s := range genericKeyAllow {
 		genAllow[s] = true
 	}
-	got := map[string]bool{}
-	genGot := map[string]bool{}
+	got = map[string]bool{}
+	genGot = map[string]bool{}
 	for _, cp := range pkgs {
 		w := bindWorld{info: cp.info, pkg: cp.pkg, enums: cp.enums}
 		outside := cp.pkg.Path() != i18nImport
@@ -1443,6 +1525,12 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 			genGot[site] = true
 		}
 	}
+	return probs, got, genGot
+}
+
+// allowlistProblems 把两个平台合起来看到的动态取键站点与白名单互相核对。
+func allowlistProblems(got, genGot map[string]bool) []string {
+	var probs []string
 	want := map[string]bool{}
 	for _, s := range dynamicCallAllow {
 		want[s] = true
@@ -1460,7 +1548,6 @@ func keyInvariantProblems(fset *token.FileSet, pkgs []checkedPkg) []string {
 			probs = append(probs, "genericKeyAllow 里的 "+s+" 已经不是泛型实例化")
 		}
 	}
-	sort.Strings(probs)
 	return probs
 }
 
@@ -2239,7 +2326,12 @@ func assertRenderMiss(t *testing.T, overlay map[string]string) {
 	if err := os.WriteFile(ov, buf, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/home/linux/.local/go/bin/go", "test", "-overlay", ov, "-count=1", "-timeout", "180s", "-run", "^TestEnglishUIHasNoHan$", "./internal/deckui")
+	// go 可执行文件：按当前测试进程的 GOROOT 找（以前写死 /home/linux/.local/go/bin/go，换机器就找不到；n067）
+	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if _, err := os.Stat(goBin); err != nil {
+		goBin = "go"
+	}
+	cmd := exec.Command(goBin, "test", "-overlay", ov, "-count=1", "-timeout", "180s", "-run", "^TestEnglishUIHasNoHan$", "./internal/deckui")
 	cmd.Dir = moduleRoot()
 	env := make([]string, 0, len(os.Environ())+3)
 	for _, e := range os.Environ() {

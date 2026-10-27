@@ -36,8 +36,7 @@ var intakeFiles = map[string]intake{
 	"internal/agentdeck/socketscan.go": {neutral, "tmux 的 stderr 与实例号"},
 	"internal/agentdeck/panes.go":      {neutral, "tmux list-panes 的输出"},
 	"internal/agentdeck/toolinfo.go":   {neutral, "CLI 的 --version 与列模型输出"},
-	"internal/agentdeck/argallow.go":   {neutral, "/proc 里进程的命令行"},
-	"internal/agentdeck/inbox.go":      {neutral, "/proc 里进程的命令行"},
+	"internal/agentdeck/procs.go":      {neutral, "进程表里进程的命令行（Linux 读 /proc，macOS 读 sysctl；n067 起从 argallow.go、inbox.go 收到这一个文件，procArgv 里中和）"},
 	"internal/agentdeck/bypasscfg.go":  {neutral, "上游 agent-deck 的配置文件"},
 	"internal/projectctl/client.go":    {neutral, "projectctl 子进程的 stdout、stderr"},
 	"internal/projectctl/graph.go":     {neutral, "项目的 work-graph.yaml"},
@@ -64,6 +63,9 @@ var intakeFiles = map[string]intake{
 	"internal/deckui/newproject.go":     {exempt, "新建项目时列目录名，只经 sanitizeFull 显示，不进错误码参数；选定的路径随请求体发给 deckd，在 readBody 中和"},
 	"internal/ui/verdict.go":            {exempt, "旧界面 internal/ui 读评审报告，不经 deckd，不进错误码参数"},
 	"cmd/deck/agent.go":                 {exempt, "命令行读 stdin 或文件，原样发给 deckd；deckd 的 readBody 是入口，在那里中和"},
+
+	"internal/projectctl/python.go":       {exempt, "列 PATH 目录里的文件名找 python3.N，只看文件名里的数字；解释器的版本输出只解析成两个数字（client.go 的 probePython）"},
+	"internal/identity/identity_linux.go": {exempt, "读 /proc/self/fdinfo 里 pidfd 的 Pid 数字字段，没有文字"},
 }
 
 // neutralCall 认调用，不认注释里的字。
