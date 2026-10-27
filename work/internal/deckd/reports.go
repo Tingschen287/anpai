@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,20 +56,20 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 	}
 	var b reportBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if strings.TrimSpace(b.Text) == "" {
-		fail(w, http.StatusBadRequest, "汇报是空的")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostreport.1"))
 		return
 	}
 	x, ok := s.store.Session(c.Session)
 	if !ok {
-		fail(w, http.StatusForbidden, "认不出这个子 agent")
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.serverpostreport.2"))
 		return
 	}
 	if !b.Done {
-		n, err := s.store.Notify(x.Project, "report", fmt.Sprintf("子 agent「%s」：%s", x.Title, b.Text), x.Key)
+		n, err := s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.3", x.TitleArg(), b.Text), x.Key)
 		if err != nil {
 			fail(w, http.StatusServiceUnavailable, "%v", err)
 			return
@@ -86,11 +87,11 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request) {
 	}
 	// 子 agent 自己说做完了：不管是不是同一次完成的重复，都标 done、释放名额（attempt 2 自查：撞上已送的推断时以前会一直占着）
 	if x.Status == deckstore.StatusRunning {
-		s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "子 agent 报告已完成")
+		s.store.SetSessionStatus(x.Key, deckstore.StatusDone, i18n.E("err.deckd.serverpostreport.5").Error())
 	}
 	if !added && rep.Text != deckstore.Clean(b.Text, 2000) {
 		// 同一次完成的补充说明：不再转告主 agent，记进通知栏，不悄悄丢
-		s.store.Notify(x.Project, "report", fmt.Sprintf("子 agent「%s」补充（同一次完成，已转告过或正在等送，不再转告）：%s", x.Title, deckstore.Clean(b.Text, 300)), x.Key)
+		s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostreport.4", x.TitleArg(), deckstore.ArgText(b.Text, 300)), x.Key)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queued": true, "report": rep, "duplicate": !added})
 }
@@ -188,7 +189,7 @@ func (s *Server) inferCompletions(st *inferState, now time.Time) {
 				CompletionID: deckstore.HintID(st.quietGen[x.Key], from),
 				Text: fmt.Sprintf("推断：子 agent「%s」停下了 %d 秒（agent-deck 状态从 running 变为 %s），没有运行 deck agent report --done。可能已做完，也可能在等输入或权限确认。"+
 					"这只是提醒、不算完成：它之后真正的完成仍会转告。请用 deck agent output %s 查看。",
-					x.Title, int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})
+					i18n.PresentZH(x.Title), int(inferAfter.Seconds()), s.activity.of(x.TmuxSession), x.Key)})
 		}
 	}
 }
@@ -226,7 +227,7 @@ func (s *Server) deliverPending(ctx context.Context, st *inferState, project str
 				st.mu.Lock()
 				if st.notified[main.Key] != len(pending) {
 					st.notified[main.Key] = len(pending)
-					s.store.Notify(main.Project, "report", fmt.Sprintf("%d 条汇报等着转告主 agent（你停止输入 30 秒后自动送，或按 F8 立刻送）", len(pending)), "deckd")
+					s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverpending.1", len(pending)), "deckd")
 				}
 				st.mu.Unlock()
 				break
@@ -254,7 +255,8 @@ func (s *Server) reportText(rep deckstore.Report) string {
 	} else if rep.Source == deckstore.ReportGraph {
 		label = "账本提醒"
 	}
-	return fmt.Sprintf("［安排 Anpai 转告·%s］子 agent「%s」（%s）：\n%s", label, sub.Title, sub.Key, rep.Text)
+	// 汇报是清洗过再存的，里面的中性打码标记换成中文记号：给模型读的文字和改码之前逐字一样。
+	return fmt.Sprintf("［安排 Anpai 转告·%s］子 agent「%s」（%s）：\n%s", label, i18n.PresentZH(sub.Title), sub.Key, i18n.PresentZH(rep.Text))
 }
 
 // maxWait 是 deck agent wait 一次最多等多久。
@@ -271,7 +273,7 @@ func (s *Server) getReportsWait(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("timeout"); v != "" {
 		sec, err := strconv.Atoi(v)
 		if err != nil || sec < 0 {
-			fail(w, http.StatusBadRequest, "timeout 要写秒数")
+			writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.servergetreportswait.1"))
 			return
 		}
 		d = time.Duration(sec) * time.Second
@@ -398,7 +400,7 @@ func (s *Server) graphSubmits(ctx context.Context, st *inferState, now time.Time
 			Text: fmt.Sprintf("账本显示 Graph 节点 %s 第 %d 轮已提交（现在是 %s）。这只是提醒、不算完成：子 agent 运行 deck agent report --done 的主动报告才算完成，到了仍会转告。需要时用 deck agent output %s 查看。",
 				x.Graph.Node, x.Graph.Attempt, state, x.Key)})
 		if err == nil && added {
-			s.store.SetSessionStatus(x.Key, deckstore.StatusDone, "账本显示已提交")
+			s.store.SetSessionStatus(x.Key, deckstore.StatusDone, i18n.E("err.deckd.servergraphsubmits.1").Error())
 		}
 	}
 }
@@ -410,14 +412,14 @@ func (s *Server) postReportsDeliverNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agents == nil {
-		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetagentoutput.1"))
 		return
 	}
 	var b struct {
 		Project string `json:"project"`
 	}
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	sent := s.deliverPending(detached(r), newInferState(), b.Project, true)
@@ -440,7 +442,7 @@ func (s *Server) postReportsAck(w http.ResponseWriter, r *http.Request) {
 		IDs []string `json:"ids"`
 	}
 	if err := readBody(r, &b); err != nil || len(b.IDs) == 0 {
-		fail(w, http.StatusBadRequest, "要给 ids")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostreportsack.1"))
 		return
 	}
 	n, err := s.store.AckReports(c.Session, b.IDs)
@@ -462,8 +464,7 @@ func (s *Server) expireClaims(now time.Time) {
 	}
 	for _, rep := range reps {
 		sub, _ := s.store.Session(rep.Sub)
-		s.store.Notify(rep.Project, "report", fmt.Sprintf("主 agent 用 deck agent wait 领走的汇报（%s）没有确认收到，送没送到不确定、不会重发，请在主 agent 那里核对：%s",
-			sub.Title, deckstore.Clean(rep.Text, 160)), "deckd")
+		s.store.NotifyCoded(rep.Project, "report", i18n.E("err.deckd.serverexpireclaims.1", sub.TitleArg(), deckstore.ArgText(rep.Text, 160)), "deckd")
 	}
 }
 
@@ -472,7 +473,7 @@ var waitPoll = time.Second
 
 // deliverOne 送一条汇报。返回 nil 表示这条已处理完（送达或标为未确认）；返回错误表示没送、保持 pending。
 // errMainStarting：主 agent 还在启动期或停在启动确认上，汇报先不送。
-var errMainStarting = errors.New("主 agent 还在启动或停在启动确认上，汇报先留着")
+var errMainStarting = i18n.E("err.deckd.pkg.2")
 
 func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep deckstore.Report, now bool) error {
 	sub, _ := s.store.Session(rep.Sub)
@@ -504,7 +505,7 @@ func (s *Server) deliverOne(ctx context.Context, main deckstore.Session, rep dec
 		default:
 			// 送达未确认或失败：不自动重发，标出来交给 owner
 			s.store.MarkReport(rep.ID, deckstore.ReportUnconfirmed)
-			s.store.Notify(main.Project, "report", fmt.Sprintf("转告主 agent 的汇报送达未确认（%s）：%s", sub.Title, deckstore.Clean(err.Error(), 200)), "deckd")
+			s.store.NotifyCoded(main.Project, "report", i18n.E("err.deckd.serverdeliverone.1", sub.TitleArg(), deckstore.Arg(err, 200)), "deckd")
 			return nil
 		}
 	}

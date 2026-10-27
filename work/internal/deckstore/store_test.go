@@ -28,7 +28,7 @@ func withProject(t *testing.T, d Dirs, env Envelope) *Store {
 	set.Projects = []ProjectDef{{
 		ID: "deck", Name: "Agent Deck", Path: "/tmp/proj",
 		Agents:    []string{"claude", "codex", "kimi"},
-		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5"}, Balanced: {"kimi-code/k3"}, Economy: {"gpt-5.6-luna"}},
+		Models:    map[Tier]ModelList{Frontier: {"claude-opus-5-5"}, Balanced: {"kimi-code/k3"}, Economy: {"gpt-6-luna"}},
 		MainAgent: MainAgent{Agent: "claude", Tier: Frontier},
 		Envelope:  env,
 	}}

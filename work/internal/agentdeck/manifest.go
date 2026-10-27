@@ -2,6 +2,7 @@ package agentdeck
 
 import (
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -48,9 +49,12 @@ var ToolsAcceptingModel = []string{"claude", "codex", "gemini", "opencode"}
 
 // ToolsModelViaCommand 是在上游配置里登记成自定义工具、CLI 自己有模型参数的工具 → 那个参数（n057）。
 //
+// kimi（n060 段 4 加入）：Kimi Code 2.3.2 的 `-m, --model <别名>` 仍在；上游配置里要有 [tools.kimi]（只写 command 与 icon），
+// 隔离环境实测 `-c "kimi --model <模型>"` 把 `--model <模型>` 原样接在 kimi 的 argv 上（见 stage-4/kimi/）。
+//
 // 上游 launch 对自定义工具不接受 --model（internal/session/instance.go:9358 ApplyLaunchModel，launch 直接退出 1），
 // 但 -c "<工具> 参数…" 会把工具名后面的参数接在命令末尾（cmd/agent-deck/cli_utils.go:271-279），模型就这样传给 CLI。
-var ToolsModelViaCommand = map[string]string{"grok": "--model", "antigravity": "--model"}
+var ToolsModelViaCommand = map[string]string{"grok": "--model", "antigravity": "--model", "kimi": "--model"}
 
 // ToolsWithoutModel 是上游内置、根本没有模型可选的工具：给它传 --model，上游 launch 直接失败（n040 终审断点 3）。
 var ToolsWithoutModel = []string{"shell"}
@@ -60,9 +64,9 @@ var ToolsWithoutModel = []string{"shell"}
 func CheckToolModel(tool string, modelNotApplicable bool) error {
 	switch {
 	case !modelNotApplicable && contains(ToolsWithoutModel, tool):
-		return fmt.Errorf("工具 %s 没有模型可选，上游 launch 不接受 --model：在配置的这个模型条目里写 \"model_not_applicable\": true", tool)
+		return i18n.E("err.agentdeck.checktoolmodel.1", tool)
 	case modelNotApplicable && (contains(ToolsAcceptingModel, tool) || ToolsModelViaCommand[tool] != ""):
-		return fmt.Errorf("工具 %s 有模型可选，却声明了 model_not_applicable：那等于让上游替你挑默认模型，不派。去掉这个声明并写明模型 id", tool)
+		return i18n.E("err.agentdeck.checktoolmodel.2", tool)
 	}
 	return nil
 }
@@ -88,13 +92,11 @@ var ShellInterpreters = []string{"bash", "zsh", "sh", "fish", "dash", "ksh", "tc
 func CheckTakesTaskText(tool string, declaredAgent bool) error {
 	switch {
 	case contains(ToolsWithoutTaskText, tool):
-		return fmt.Errorf("工具 %s 不是 agent：它会把任务说明当命令逐行执行（n043 复审实测），不派。"+
-			"Graph 任务要派给 claude、codex 这类 agent，或配置里声明 agent: true 的自定义 agent 工具", tool)
+		return i18n.E("err.agentdeck.checktakestasktext.1", tool)
 	case contains(BuiltinTools, tool):
 		return nil
 	case !declaredAgent:
-		return fmt.Errorf("工具 %s 不是上游内置的 agent，配置里也没声明 \"agent\": true：它的命令写在上游配置里，"+
-			"Work Deck 看不到，确认不了它会把任务说明当任务读（命令若是 bash 之类，说明会被当命令执行），不派", tool)
+		return i18n.E("err.agentdeck.checktakestasktext.2", tool)
 	}
 	return nil
 }
@@ -103,17 +105,17 @@ func CheckTakesTaskText(tool string, declaredAgent bool) error {
 // 实际命令（resolved_command，没有就看 command）是 shell 解释器也不送。
 func CheckLaunchedTakesTaskText(res LaunchResult) error {
 	if strings.TrimSpace(res.Tool) == "" {
-		return fmt.Errorf("上游 launch 回执没写会话是哪种工具，确认不了它是 agent，任务说明不送")
+		return i18n.E("err.agentdeck.checklaunchedtakestasktext.1")
 	}
 	if contains(ToolsWithoutTaskText, res.Tool) {
-		return fmt.Errorf("上游把命令 %q 起成了 %s 会话：它不是 agent，会把任务说明当命令执行，任务说明不送", res.Command, res.Tool)
+		return i18n.E("err.agentdeck.checklaunchedtakestasktext.2", res.Command, res.Tool)
 	}
 	cmd := res.ResolvedCommand
 	if strings.TrimSpace(cmd) == "" {
 		cmd = res.Command
 	}
 	if bin := commandBinary(cmd); contains(ShellInterpreters, bin) {
-		return fmt.Errorf("上游起的工具 %s 实际命令是 %q：%s 是 shell 解释器，会把任务说明当命令执行，任务说明不送", res.Tool, cmd, bin)
+		return i18n.E("err.agentdeck.checklaunchedtakestasktext.3", res.Tool, cmd, bin)
 	}
 	return nil
 }
@@ -823,7 +825,7 @@ func checkSensitiveAssignments(f string) error {
 	// TOML 的 \u、\U（以及 TOML 1.1 的 \x）转义能把键名或取值改写成任何字符；deck 不解码，一律拒绝
 	for _, esc := range []string{`\u`, `\x`} {
 		if strings.Contains(low, esc) {
-			return fmt.Errorf("拒绝含转义写法（%s…）的参数或配置：deck 不解码转义，确认不了它没有关掉权限确认；请 owner 改成不带转义的写法", esc)
+			return i18n.E("err.agentdeck.checksensitiveassignments.1", esc)
 		}
 	}
 	for _, m := range assignRe.FindAllStringSubmatchIndex(low, -1) {
@@ -838,11 +840,15 @@ func checkSensitiveAssignments(f string) error {
 			}
 		}
 		if allowed == nil {
-			return fmt.Errorf("拒绝 deck 认不出的权限或沙箱设置 %s（只放行已知的安全写法，请 owner 去掉或改成标准写法）", key)
+			return i18n.E("err.agentdeck.checksensitiveassignments.2", key)
 		}
 		value, ok := assignValue(low[m[1]:])
 		if !ok || !slices.Contains(allowed, value) {
-			return fmt.Errorf("拒绝权限或沙箱设置 %s = %s：只放行 %s（逐字比较，硬拒绝，owner 也批不过）", key, value, strings.Join(allowed, "、"))
+			items := make([]any, len(allowed))
+			for i, name := range allowed {
+				items[i] = name
+			}
+			return i18n.E("err.agentdeck.checksensitiveassignments.3", key, value, i18n.ListOf("sep.list", items...))
 		}
 	}
 	return nil
@@ -931,7 +937,7 @@ func checkBypassFlags(fields ...string) error {
 			name, value, hasValue := strings.Cut(lw, "=")
 			for _, b := range BypassFlags {
 				if name == b {
-					return fmt.Errorf("拒绝绕过权限的参数 %s（硬拒绝，owner 也批不过）", w)
+					return i18n.E("err.agentdeck.checkbypassflags.1", w)
 				}
 			}
 			bad, ok := bypassValues[name]
@@ -942,7 +948,7 @@ func checkBypassFlags(fields ...string) error {
 				value, hasValue = strings.ToLower(words[i+1]), true
 			}
 			if hasValue && strings.Trim(value, `"'`) == bad {
-				return fmt.Errorf("拒绝绕过权限的参数 %s %s（硬拒绝，owner 也批不过）", w, value)
+				return i18n.E("err.agentdeck.checkbypassflags.2", w, value)
 			}
 		}
 	}

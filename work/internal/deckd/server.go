@@ -18,7 +18,9 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/identity"
+	"github.com/Tingschen287/terminal-deck/work/internal/sessionenv"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
 
@@ -33,6 +35,19 @@ type Config struct {
 	// UpstreamAddr 是 agent-deck headless 服务地址（例如 127.0.0.1:8420），用来读会话运行状态；留空则状态一律 unknown。
 	UpstreamAddr  string
 	UpstreamToken string
+	// SystemLang 是系统语言（zh 或 en）：只在全新安装、deckd 第一次创建 agents.yaml 时写进 ui_lang（n060 段 3 返工，owner 定：
+	// 升级的老用户保持中文，全新安装才跟系统）。已有 agents.yaml 时它不起作用。
+	// 由 deck up 按它自己（owner 的 shell）的环境变量算好，经 deck daemon 的 -system-lang 传进来；
+	// 空（测试、没传）时全新安装也不记语言（界面按中文）。deckd 自己不换语言：给模型、落盘、日志的文字一直是中文，界面语言只经 LangHeader 告诉界面。
+	SystemLang string
+	// SessionEnv 解析「会话 PATH」（n060 段 4，见 internal/sessionenv）：deckd 找 agent CLI 的已装与版本、Codex trust 门记下的可执行文件、
+	// 列模型、以及交给 agent-deck launch 的 PATH 都用它。nil（测试、没开）= 按 deckd 自己进程的 PATH，行为与以前一样。
+	// deck daemon 在生产里开它；解析登录 shell 会运行 owner 的 shell 启动文件，所以测试默认不开。
+	SessionEnv *sessionenv.Resolver
+	// SessionPath 为真时 Run 自己建一个解析登录 shell 的 Resolver（SessionEnv 为 nil 才建）并在后台读一次，第一次打开设置时就不用等。
+	// 之后只有 owner 在 F9 按「刷新会话 PATH」键才会再读（POST /v1/tools/refresh）；打开设置、进加入页和 agent 页、派工、列模型都只用当前快照，不会运行 rc。
+	// 只有 deck daemon 设它。
+	SessionPath bool
 }
 
 type paneResolver interface {
@@ -64,6 +79,12 @@ type Server struct {
 	// bg 是后台工作的 context（n055：等 owner 处理 CLI 启动确认后再送 brief），deckd 关闭时取消
 	bg   context.Context
 	bgWG sync.WaitGroup
+	// bgMu 护着 bg 和下面几项。life 是没接 WithBackground 时的后台 context；bgCancels 是 Close 要取消的全部；
+	// closed 之后新造的后台 context 一出生就是取消的
+	bgMu      sync.Mutex
+	life      context.Context
+	bgCancels []context.CancelFunc
+	closed    bool
 }
 
 // NewServer 组装 HTTP 层。view 可为 nil（布局未接上时 /v1/view 返回 503）。
@@ -77,6 +98,7 @@ func NewServer(cfg Config, store *deckstore.Store, resolver paneResolver, quota 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/lang", s.getLang)
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
 	mux.HandleFunc("GET /v1/quota", s.getQuota)
 	mux.HandleFunc("GET /v1/projects", s.getProjects)
@@ -94,6 +116,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/resolve", s.getResolve)
 	mux.HandleFunc("GET /v1/tools", s.getTools)
 	mux.HandleFunc("GET /v1/tools/models", s.getToolModels)
+	mux.HandleFunc("GET /v1/tools/refresh", s.getToolsRefresh)
+	mux.HandleFunc("POST /v1/tools/refresh", s.postToolsRefresh) // 刷新会话 PATH（会运行登录启动文件），n060 段 4 返工
 	mux.HandleFunc("GET /v1/trust", s.getTrust)
 	mux.HandleFunc("DELETE /v1/trust", s.deleteTrust)
 	mux.HandleFunc("GET /v1/progress", s.getProgress)
@@ -108,7 +132,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/reports/wait", s.getReportsWait)
 	mux.HandleFunc("POST /v1/reports/ack", s.postReportsAck)
 	mux.HandleFunc("POST /v1/reports/deliver-now", s.postReportsDeliverNow)
-	return mux
+	return markFilter{next: mux, lang: s.uiLang}
+}
+
+// uiLang 是此刻的界面语言：设置里的 ui_lang；没有就是中文。
+// 没有 ui_lang 只会是升级的老用户（agents.yaml 在这次启动前就存在，且没有这个字段），和升级前一样用中文；
+// 全新安装在第一次创建 agents.yaml 时已经把系统语言（Config.SystemLang）写进了 ui_lang（deckstore.LoadSettingsFor），所以不再有「没选过就按系统」这一档。
+// 每个响应都带它（markFilter 写 i18n.LangHeader），界面进程据此换语言。
+func (s *Server) uiLang() string {
+	if l := s.store.UILang(); i18n.ValidLang(l) {
+		return l
+	}
+	return i18n.ZH
+}
+
+// getLang 回此刻的界面语言，以及设置里有没有 ui_lang（saved：全新安装第一次创建文件时写进去的也算；没有的是升级的老用户，中文）。界面进程启动时用它先对一次语言，不必等第一个业务请求。
+func (s *Server) getLang(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"lang": s.uiLang(), "saved": i18n.ValidLang(s.store.UILang())})
 }
 
 // ---------------- 通用 ----------------
@@ -122,6 +162,8 @@ func (s *Server) caller(r *http.Request) Caller {
 
 type apiError struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
+	Args  []any  `json:"args,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -130,8 +172,53 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// withNote 在响应里留下中文兜底，并带上码。英文界面用 note_code，不把整句中文当参数。
+func withNote(body map[string]any, err error, max int) map[string]any {
+	if body == nil {
+		body = map[string]any{}
+	}
+	if err == nil {
+		return body
+	}
+	body["note"] = deckstore.Clean(err.Error(), max)
+	if c, a, ok := i18n.Wire(err); ok {
+		body["note_code"] = c
+		body["note_args"] = deckstore.CleanArgs(a, max)
+	}
+	return body
+}
+
+// writeErr 回一条错误。error 字段仍是中文原文。能取出码时再带 code 和 args。
+func writeErr(w http.ResponseWriter, code int, err error) {
+	body := apiError{Error: err.Error()}
+	if c, args, ok := i18n.Wire(err); ok {
+		body.Code = c
+		body.Args = args
+	}
+	writeJSON(w, code, body)
+}
+
+// errFields 在手写 JSON 里带上码。error 仍是中文原文。
+func errFields(err error, extra map[string]any) map[string]any {
+	body := map[string]any{"error": err.Error()}
+	if c, args, ok := i18n.Wire(err); ok {
+		body["code"] = c
+		body["args"] = args
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	return body
+}
+
 func fail(w http.ResponseWriter, code int, format string, a ...any) {
-	writeJSON(w, code, apiError{Error: fmt.Sprintf(format, a...)})
+	if len(a) == 1 {
+		if err, ok := a[0].(error); ok && (format == "%v" || format == "%s" || format == "%w") {
+			writeErr(w, code, err)
+			return
+		}
+	}
+	writeErr(w, code, fmt.Errorf(format, a...))
 }
 
 // storeErr 把存储错误映射成状态码：存储已停止 → 503。
@@ -140,22 +227,33 @@ func storeErr(w http.ResponseWriter, err error) {
 	var ve *deckstore.ErrVersion
 	switch {
 	case errors.As(err, &be):
-		fail(w, http.StatusServiceUnavailable, "%v", err)
+		writeErr(w, http.StatusServiceUnavailable, err)
 	case errors.As(err, &ve):
-		fail(w, http.StatusConflict, "%v", err)
+		writeErr(w, http.StatusConflict, err)
 	default:
-		fail(w, http.StatusBadRequest, "%v", err)
+		writeErr(w, http.StatusBadRequest, err)
 	}
 }
 
 func readBody(r *http.Request, v any) error {
+	if err := readBodyRaw(r, v); err != nil {
+		return err
+	}
+	// 请求体是外部原文的入口：里面伪造的打码标记在这里换掉，后面进通知参数时才分得清真假（返工 4）
+	neutralizeValue(v)
+	return nil
+}
+
+// readBodyRaw 只解码、不中和标记。只有带指纹的请求用它（开子 agent：指纹是客户端对原文算的），
+// 用的地方要自己在核对完指纹后立刻 neutralizeValue。
+func readBodyRaw(r *http.Request, v any) error {
 	const max = 64 << 10
 	data, err := io.ReadAll(io.LimitReader(r.Body, max+1))
 	if err != nil {
 		return err
 	}
 	if len(data) > max {
-		return fmt.Errorf("请求体超过 %d 字节", max)
+		return i18n.E("err.deckd.readbody.1", max)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
@@ -163,11 +261,11 @@ func readBody(r *http.Request, v any) error {
 		return err
 	}
 	if dec.More() {
-		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+		return i18n.E("err.deckd.readbody.2")
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("请求体在 JSON 对象之后还有内容")
+		return i18n.E("err.deckd.readbody.2")
 	}
 	return nil
 }
@@ -175,7 +273,7 @@ func readBody(r *http.Request, v any) error {
 // need 检查角色。写操作另要求身份查询本身没有出错。
 func need(w http.ResponseWriter, c Caller, write bool, roles ...string) bool {
 	if write && c.Err != nil {
-		fail(w, http.StatusForbidden, "认不出调用者（%v），拒绝写入", c.Err)
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.need.1", c.Err))
 		return false
 	}
 	for _, r := range roles {
@@ -183,20 +281,20 @@ func need(w http.ResponseWriter, c Caller, write bool, roles ...string) bool {
 			return true
 		}
 	}
-	fail(w, http.StatusForbidden, "%s 不能调用这个接口", roleName(c.Role))
+	writeErr(w, http.StatusForbidden, i18n.E("err.deckd.need.2", roleName(c.Role)))
 	return false
 }
 
-func roleName(r string) string {
+func roleName(r string) *i18n.Error {
 	switch r {
 	case RoleOwner:
-		return "owner 界面"
+		return i18n.E("err.deckd.rolename.1")
 	case RoleMain:
-		return "主 agent"
+		return i18n.E("err.deckd.serverrunspawn.49")
 	case RoleSub:
-		return "子 agent"
+		return i18n.E("err.deckd.serverrunspawn.50")
 	}
-	return "未知调用者"
+	return i18n.E("err.deckd.rolename.2")
 }
 
 // projectScope 决定本次请求能看哪个项目：owner 可指定任意项目（空 = 全部）；主/子 agent 只能是自己的项目。
@@ -205,7 +303,7 @@ func projectScope(w http.ResponseWriter, c Caller, asked string) (string, bool) 
 		return asked, true
 	}
 	if asked != "" && asked != c.Project {
-		fail(w, http.StatusForbidden, "%s 不能访问其他项目 %s", roleName(c.Role), asked)
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.projectscope.1", roleName(c.Role), asked))
 		return "", false
 	}
 	return c.Project, true
@@ -246,7 +344,7 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 	if s.quota == nil {
-		fail(w, http.StatusServiceUnavailable, "没接 Token 看板")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetquota.1"))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.quota.Display(r.Context())) // 面板用：OpenCode 的估算窗口只在这里补（n056）
@@ -390,7 +488,7 @@ func (s *Server) getView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.view == nil {
-		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetview.1"))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.view.State())
@@ -407,18 +505,18 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	p, found := s.store.Settings().Project(project)
 	if !found {
-		fail(w, http.StatusNotFound, "没有项目 %s", project)
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.servergetprogress.1", project))
 		return
 	}
 	if s.progress == nil || p.GraphRoot == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "graph": false, "note": "这个项目没有接 Graph"})
+		writeJSON(w, http.StatusOK, withNote(map[string]any{"project": project, "graph": false}, i18n.E("err.deckd.servergetprogress.3"), 300))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	out, err := s.progress(ctx, p)
 	if err != nil {
-		fail(w, http.StatusBadGateway, "读项目进度失败：%v", err)
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.servergetprogress.2", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -445,17 +543,17 @@ func (s *Server) postDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	var b postDecisionBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if !agentKinds[b.Kind] {
-		fail(w, http.StatusBadRequest, "主 agent 只能上报 cost、config、push、disagree、deviation，不是 %q", b.Kind)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostdecision.1", b.Kind))
 		return
 	}
 	// 开子 agent 的超额例外与 Codex trust 的批准范围只能由 deckd 在开子 agent 时生成（n051 自查）：
 	// 主 agent 自己写的话，owner 在面板上只看到说明，批准的却是一个藏在范围里的启动
 	if a := b.Scope["action"]; a == "spawn" || a == "codex_trust" {
-		fail(w, http.StatusBadRequest, "action=%s 的批准范围只能由 deck 在开子 agent 时生成；超额请直接运行 deck agent spawn，deck 会自己生成决定", a)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostdecision.2", a))
 		return
 	}
 	d, err := s.store.CreateDecision(deckstore.NewDecision{Project: c.Project, Kind: b.Kind, Summary: b.Summary,
@@ -464,7 +562,7 @@ func (s *Server) postDecision(w http.ResponseWriter, r *http.Request) {
 		storeErr(w, err)
 		return
 	}
-	s.store.Notify(c.Project, "decision", "主 agent 有 1 件事要你决定："+d.Summary, c.Session)
+	s.store.NotifyCoded(c.Project, "decision", i18n.E("err.deckd.serverpostdecision.3", d.Summary), c.Session)
 	writeJSON(w, http.StatusCreated, d)
 }
 
@@ -479,8 +577,11 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b answerBody
-	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+	// 只有 owner 的界面能答。它回传的 option 是界面显示过的选项原文，存下来的选项可能带真标记，
+	// 只拿来和存下来的选项比较，所以不在这里中和（中和了就对不上选项）。别的请求体一律 readBody 中和（返工 4）。
+	// 这个例外只限比较：比较失败时 Store.Answer 在 option 进错误参数之前先中和它（段 3，复审 4 必改 2）。
+	if err := readBodyRaw(r, &b); err != nil {
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	d, err := s.store.Answer(r.PathValue("id"), b.Option, b.Version, "owner@"+c.Pane)
@@ -490,7 +591,7 @@ func (s *Server) answerDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	// Codex trust 批准即记住（§14.3，n051）；记不下就如实报出，决定转为 failed
 	if err := s.executeCodexTrust(d); err != nil {
-		fail(w, http.StatusServiceUnavailable, "已批准，但记不下授权：%v", err)
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serveranswerdecision.1", err))
 		return
 	}
 	if got, ok := s.store.Decision(d.ID); ok {
@@ -523,20 +624,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		Agents     *[]deckstore.AgentDef   `json:"agents"`
 		Projects   *[]deckstore.ProjectDef `json:"projects"`
 		Generation *int                    `json:"generation"`
+		// UILang：界面语言。不带这个字段（旧客户端、deck project add）表示不动已存的语言，不是「清空」；带 "" 才是清掉已存的选择（之后和老用户一样是中文）
+		UILang *string `json:"ui_lang"`
 	}
 	if err := readBody(r, &body); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if body.Agents == nil || body.Projects == nil {
-		fail(w, http.StatusBadRequest, "整份替换设置须同时给出 agents 与 projects")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverputsettings.1"))
 		return
 	}
 	if body.Generation == nil || *body.Generation < 0 {
-		fail(w, http.StatusBadRequest, "整份替换设置须带上读到的 generation（不小于 0）")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverputsettings.2"))
 		return
 	}
-	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects}
+	next := deckstore.Settings{Agents: *body.Agents, Projects: *body.Projects, UILang: s.store.UILang()}
+	if body.UILang != nil {
+		next.UILang = *body.UILang
+	}
 	if err := checkAgentEdits(s.store.Settings(), next); err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
@@ -576,10 +682,10 @@ func (s *Server) deleteTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
-		fail(w, http.StatusNotFound, "没有项目 %s、工具 %s 的已记住授权", q.Get("project"), q.Get("tool"))
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.serverdeletetrust.1", q.Get("project"), q.Get("tool")))
 		return
 	}
-	s.store.Notify(q.Get("project"), "trust", "已撤销 "+q.Get("tool")+" 的已记住授权：下次启动会重新问你", "owner")
+	s.store.NotifyCoded(q.Get("project"), "trust", i18n.E("err.deckd.serverdeletetrust.2", q.Get("tool")), "owner")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -596,7 +702,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 	}
 	var b viewBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if b.Op == "fence" {
@@ -609,7 +715,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.view == nil {
-		fail(w, http.StatusServiceUnavailable, "布局还没接上（中间窗格由 deck up 建立）")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetview.1"))
 		return
 	}
 	if err := s.stopped(); err != nil {
@@ -635,7 +741,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		// 中间 client 断开（Ctrl-Q）后、新 client 以只读连上时：焦点会话按隐藏处理（架构稿 §1、§7）
 		err = s.view.CenterReset(b.Client)
 	default:
-		fail(w, http.StatusBadRequest, "不认识的操作 %q", b.Op)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostview.1", b.Op))
 		return
 	}
 	if err != nil {
@@ -643,7 +749,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &he) {
 			// 操作本身已完成（例如已切走），但交还失败：会话保持接管、自动派送暂停
 			s.bus.publish(deckstore.Event{Kind: "view"})
-			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State(), "handback_failed": he.Session})
+			writeJSON(w, http.StatusConflict, errFields(err, map[string]any{"state": s.view.State(), "handback_failed": he.Session}))
 			return
 		}
 		if s.stopped() != nil {
@@ -653,7 +759,7 @@ func (s *Server) postView(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, viewstate.ErrStaleClient) || errors.As(err, new(*viewstate.ErrPartial)) {
 			// 中途停下：状态可能已部分提交（见 ErrPartial），面板要按最新状态重画
 			s.bus.publish(deckstore.Event{Kind: "view"})
-			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "state": s.view.State()})
+			writeJSON(w, http.StatusConflict, errFields(err, map[string]any{"state": s.view.State()}))
 			return
 		}
 		fail(w, http.StatusConflict, "%v", err)
@@ -683,7 +789,7 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 	}
 	var b panelBody
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
@@ -706,7 +812,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		fail(w, http.StatusInternalServerError, "不支持流式响应")
+		writeErr(w, http.StatusInternalServerError, i18n.E("err.deckd.serverevents.1"))
 		return
 	}
 	last := r.Header.Get("Last-Event-ID")

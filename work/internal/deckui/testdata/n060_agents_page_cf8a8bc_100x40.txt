@@ -1,0 +1,10 @@
+ 设置    项目   全局 agent   授权 
+────────────────────────────────────────────────────────────────────────────────────────────────
+
+ › ● Claude Code    最强 claude-opus-5-5、claude-fable-5-1   日常 claude-sonnet-5-5                 
+                    便宜 claude-haiku-5-5                                                           
+   ● Codex          最强 gpt-6.1-sol   日常 gpt-5.6-terra   便宜 gpt-5.6-luna
+   + 加入本机的 agent
+
+ ⏎ 打开：改模型与档位、移出
+ Tab 换页  ↑↓ 选  ⏎ 打开  a 加入  R 重读  q 关闭

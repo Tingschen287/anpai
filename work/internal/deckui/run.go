@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
@@ -36,6 +35,8 @@ type StartMainResult struct {
 	Session        deckstore.Session `json:"session"`
 	BriefDelivered bool              `json:"brief_delivered"`
 	Note           string            `json:"note"`
+	NoteCode       string            `json:"note_code,omitempty"`
+	NoteArgs       []any             `json:"note_args,omitempty"`
 	Pending        string            `json:"pending"`
 	Next           string            `json:"next"`
 }
@@ -79,21 +80,40 @@ func (a DeckAPI) StartMain(ctx context.Context, project string) (StartMainResult
 	return out, err
 }
 
-// startMainText 是起主 agent 的结果说明（侧栏底部显示）；ok 为 false 时按出错显示。
-func startMainText(project string, r StartMainResult, err error) (text string, ok bool) {
+// startMainNote 是起主 agent 的结果说明（侧栏底部显示，最长留 12 秒）；ok 为 false 时按出错显示。
+// 返回的是 lazyText：每次画的时候才按当前语言取文字，错误也留着原错误（返工 2，M1：以前这里直接存译文，
+// 12 秒内 owner 切了语言，这条还是旧语言）。
+func startMainNote(project string, r StartMainResult, err error) (text lazyText, ok bool) {
 	switch {
 	case err != nil:
-		return fmt.Sprintf("起「%s」的主 agent 失败：%s", project, errText(err)), false
+		return later(func() string { return T("main.start.fail", project, errText(err)) }), false
 	case r.Pending != "":
-		return fmt.Sprintf("「%s」的主 agent 要先等你在右栏批准（%s），批准后选中项目再按一次 m", project, r.Pending), true
+		pending := r.Pending
+		return later(func() string { return T("main.start.pending", project, pending) }), true
 	case r.Note != "":
-		return oneLine(deckstore.Clean(fmt.Sprintf("已起「%s」的主 agent：%s", project, r.Note), 160)), true
+		code, args, raw := r.NoteCode, r.NoteArgs, r.Note
+		return later(func() string {
+			note := raw
+			if code != "" {
+				note = deckclient.Text(code, args, raw)
+			}
+			return oneLine(deckstore.Display(T("main.start.note", project, note), 160))
+		}), true
 	}
-	return fmt.Sprintf("已起「%s」的主 agent", project), true
+	return later(func() string { return T("main.start.ok", project) }), true
 }
 
-// errText 把错误清洗成一行可显示的文字。
-func errText(err error) string { return oneLine(deckstore.Clean(err.Error(), 120)) }
+// startMainText 是 startMainNote 此刻的文字（测试和只要当前文字的调用方用）。
+func startMainText(project string, r StartMainResult, err error) (text string, ok bool) {
+	n, ok := startMainNote(project, r, err)
+	return n.String(), ok
+}
+
+// errText 把错误清洗成一行可显示的文字。中文仍是原文。英文按错误码翻译。
+func errText(err error) string { return oneLine(deckstore.Display(deckclient.Show(err), 120)) }
+
+// errNoteShort 是「这个错误」的一行提示（120 字上限）：留着原错误，每次画时按当前语言翻译。
+func errNoteShort(err error) lazyText { return func() string { return errText(err) } }
 
 type driver struct {
 	old    *term.State
@@ -175,9 +195,9 @@ type loop struct {
 	api      API
 	kick     chan struct{}
 	data     chan Data
-	errText  string
+	errText  lazyText // 出错的提示：存怎么取文字，不存译文（返工 2，M1）
 	errUntil time.Time
-	info     string // 动作的结果说明（绿色），显示 12 秒
+	info     lazyText // 动作的结果说明（绿色），显示 12 秒
 	infoTill time.Time
 }
 
@@ -191,7 +211,7 @@ func newLoop(api API) *loop {
 			d, err := api.Fetch(ctx)
 			cancel()
 			if err != nil {
-				d.Err = "连不上 deckd：" + errText(err)
+				d.Err = T("ui.deckd") + errText(err)
 			}
 			select {
 			case l.data <- d:
@@ -221,30 +241,30 @@ func (l *loop) act(op, session string) error {
 	defer cancel()
 	err := l.api.View(ctx, op, session)
 	if err != nil {
-		l.errText, l.errUntil = errText(err), time.Now().Add(6*time.Second)
+		l.errText, l.errUntil = errNoteShort(err), time.Now().Add(6*time.Second)
 	} else {
-		l.errText = ""
+		l.errText = nil
 	}
 	l.refresh()
 	return err
 }
 
 func (l *loop) merge(d Data) Data {
-	if l.errText != "" && time.Now().Before(l.errUntil) && d.Err == "" {
-		d.Err = l.errText
+	if !l.errText.empty() && time.Now().Before(l.errUntil) && d.Err == "" {
+		d.Err = l.errText.String()
 	}
-	if l.info != "" && time.Now().Before(l.infoTill) {
-		d.Info = l.info
+	if !l.info.empty() && time.Now().Before(l.infoTill) {
+		d.Info = l.info.String()
 	}
 	return d
 }
 
 // say 在底部显示一条结果说明：ok 为 false 时按出错显示。
-func (l *loop) say(text string, ok bool) {
+func (l *loop) say(text lazyText, ok bool) {
 	if ok {
-		l.info, l.infoTill, l.errText = text, time.Now().Add(12*time.Second), ""
+		l.info, l.infoTill, l.errText = text, time.Now().Add(12*time.Second), nil
 	} else {
-		l.errText, l.errUntil, l.info = text, time.Now().Add(12*time.Second), ""
+		l.errText, l.errUntil, l.info = text, time.Now().Add(12*time.Second), nil
 	}
 }
 
@@ -293,15 +313,15 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 	starting := map[string]bool{}
 	startMain := func(project string) {
 		if project == "" {
-			l.say("先选中一个项目（还没有项目就按 F9、再按 n 新建）", false)
+			l.say(later(func() string { return T("main.noproject") }), false)
 			return
 		}
 		if starting[project] {
-			l.say(fmt.Sprintf("「%s」的主 agent 正在起，请稍等", project), true)
+			l.say(later(func() string { return T("main.starting.wait", project) }), true)
 			return
 		}
 		starting[project] = true
-		l.say(fmt.Sprintf("正在起「%s」的主 agent……", project), true)
+		l.say(later(func() string { return T("main.starting", project) }), true)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), deckclient.LongTimeout)
 			defer cancel()
@@ -323,7 +343,7 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 			}
 		case r := <-started:
 			delete(starting, r.project)
-			text, ok := startMainText(r.project, r.res, r.err)
+			text, ok := startMainNote(r.project, r.res, r.err)
 			l.say(text, ok)
 			if r.err == nil && r.res.Pending == "" && r.res.Session.AgentDeckID != "" {
 				// 开成：换进中间（停在启动确认上时 deckd 已经换过去，再换一次无妨）

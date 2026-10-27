@@ -80,8 +80,8 @@ func TestNewProjectFromDirectoryBrowser(t *testing.T) {
 		len(p.Agents) != 1 || p.Agents[0] != "claude" || p.Envelope.ID != "alpha-xq-default" {
 		t.Fatalf("新项目的默认值：%+v", p)
 	}
-	if !strings.Contains(m.msg, "按 m 起主 agent") || m.project().ID != "alpha-xq" {
-		t.Fatalf("建好后停在新项目上并提示下一步：%q", m.msg)
+	if !strings.Contains(m.msg.String(), "按 m 起主 agent") || m.project().ID != "alpha-xq" {
+		t.Fatalf("建好后停在新项目上并提示下一步：%q", m.msg.String())
 	}
 }
 
@@ -92,7 +92,7 @@ func TestNewProjectRejectsBadInput(t *testing.T) {
 	m.set.Projects[0].Path = filepath.Join(root, "ai", "alpha-proj") // 已有项目用了这个目录
 	m.Start = filepath.Join(root, "ai")
 	press(m, "n", "down", "right", "enter")
-	if m.form.chosen != "" || !strings.Contains(m.form.err, "已经是项目") {
+	if m.form.chosen != "" || !strings.Contains(m.form.err.String(), "已经是项目") {
 		t.Fatalf("目录已是项目：%+v", m.form)
 	}
 	press(m, "left", "down", "down", "right", "enter") // Beta Proj
@@ -102,11 +102,11 @@ func TestNewProjectRejectsBadInput(t *testing.T) {
 	saves := len(api.saved)
 	backspace(m, 20)
 	press(m, "enter")
-	if m.form == nil || m.form.err == "" || len(api.saved) != saves {
+	if m.form == nil || m.form.err.empty() || len(api.saved) != saves {
 		t.Fatalf("空 id 不写盘：%+v", m.form)
 	}
 	press(m, "d", "e", "c", "k", "enter") // 与已有项目 deck 重复
-	if m.form == nil || !strings.Contains(m.form.err, "重复") || len(api.saved) != saves {
+	if m.form == nil || !strings.Contains(m.form.err.String(), "重复") || len(api.saved) != saves {
 		t.Fatalf("重复 id 不写盘：%+v", m.form)
 	}
 	press(m, "esc", "esc")
@@ -145,7 +145,7 @@ func TestNewProjectSymlinkDuplicate(t *testing.T) {
 	m.set.Projects[0].Path = filepath.Join(root, "ai", "alpha-proj")
 	m.Start = filepath.Join(root, "ai")
 	press(m, "n", "down", "right", "enter") // alias/（排在 alpha-proj 前）
-	if m.form.chosen != "" || !strings.Contains(m.form.err, "已经是项目") {
+	if m.form.chosen != "" || !strings.Contains(m.form.err.String(), "已经是项目") {
 		t.Fatalf("软链指向已有项目的目录：%+v", m.form)
 	}
 }

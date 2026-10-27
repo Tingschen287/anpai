@@ -6,12 +6,14 @@ import (
 	"testing"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 // n051 真模型端到端实测：agent-deck v1.15 默认给 Claude 加 --dangerously-skip-permissions，deck 自己的参数检查看不到。
 
 func TestUpstreamConfigBypassRejectedBeforeLaunch(t *testing.T) {
 	w := newAgentWorld(t)
+	wirecheck.External("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions") // 夹具里上游配置核对给的原文
 	w.cfgBypass = map[string]error{"claude": errors.New("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions")}
 	before := w.store.Slots("alpha")
 	code, b := w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "x", "t", "c1", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))
@@ -66,6 +68,7 @@ func TestProcessBypassStopsSessionWithoutBrief(t *testing.T) {
 func TestProcessBypassStopFailsKeepsSlotUncertain(t *testing.T) {
 	w := newAgentWorld(t)
 	w.procBypass = errors.New("核对不了")
+	wirecheck.External("上游停不了") // 夹具：替身上游停不掉时返回的错误原文（以前靠别的测试的全局登记碰巧放行，返工 4 起按测试登记）
 	w.up.stopErr = errors.New("上游停不了")
 	before := w.store.Slots("alpha")
 	w.do("main", "POST", "/v1/agents", spawnJSON("balanced", "停不了", "t", "c4", "/tmp/alpha", "", "claude", "claude-sonnet-5-5"))

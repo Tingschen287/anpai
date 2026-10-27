@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/wirecheck"
 )
 
 type fixture struct {
 	t     *testing.T
+	dirs  deckstore.Dirs
 	store *deckstore.Store
 	srv   *Server
 	http  *httptest.Server
@@ -31,6 +33,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	wirecheck.Track(t) // 运行时保险按测试名归属响应和通知
 	root := t.TempDir()
 	dirs := deckstore.Dirs{Config: filepath.Join(root, "cfg"), State: filepath.Join(root, "state")}
 	st, err := deckstore.Open(dirs)
@@ -46,7 +49,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := st.ReplaceSettings(set); err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, store: st}
+	f := &fixture{t: t, dirs: dirs, store: st}
 	mk := func(project, role, tmux string) deckstore.Session {
 		r, err := st.Reserve(deckstore.Session{Project: project, Role: role, Agent: "claude", Tool: "claude", Model: "m", Tier: deckstore.Economy, Title: role, CreatedBy: "owner", RequestID: "req-" + tmux, Dir: "/tmp/" + project, TaskSHA256: strings.Repeat("a", 64), ArgsSHA256: strings.Repeat("b", 64)}, "")
 		if err != nil {
@@ -60,6 +63,9 @@ func newFixture(t *testing.T) *fixture {
 	f.sub = mk("alpha", "sub", "agentdeck_alpha_sub")
 	f.other = mk("beta", "main", "agentdeck_beta_main")
 	f.srv = NewServer(Config{Dirs: dirs}, st, nil, nil, nil, nil)
+	// 清理时取消并等 deckd 的后台任务（返工 4）：测试看到状态更新就返回，后台那一路可能还在写状态或通知，
+	// 不等它，临时目录的清理会和它赛跑。Cleanup 后进先出：这条先登记，所以在 http.Close 之后、临时目录清理之前执行。
+	t.Cleanup(f.srv.Close)
 	// 测试里按请求头指定调用者；生产路径没有这个口子。
 	f.srv.callerFn = func(r *http.Request) Caller {
 		switch r.Header.Get("X-Test-As") {

@@ -2,10 +2,10 @@ package projectctl
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Validate 跑 projectctl validate，确认 graph 与证据是否自洽。
@@ -15,8 +15,8 @@ func (c *Client) Validate(ctx context.Context) (ValidateResult, error) {
 		return ValidateResult{}, err
 	}
 	var v ValidateResult
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return ValidateResult{}, fmt.Errorf("解析 validate 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(raw, &v); err != nil {
+		return ValidateResult{}, i18n.E("err.projectctl.validate.parse", err)
 	}
 	return v, nil
 }
@@ -46,8 +46,8 @@ func (c *Client) Next(ctx context.Context) ([]ReadyNode, error) {
 		return nil, err
 	}
 	var out []ReadyNode
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("解析 next 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(raw, &out); err != nil {
+		return nil, i18n.E("err.projectctl.next.parse", err)
 	}
 	return out, nil
 }
@@ -72,8 +72,8 @@ func (c *Client) VerifyChain(ctx context.Context) (ChainStatus, error) {
 		LagDays     *float64 `json:"lag_days"`
 		AuditFailed bool     `json:"audit_failed"`
 	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return ChainStatus{}, fmt.Errorf("解析 verify-chain 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(raw, &v); err != nil {
+		return ChainStatus{}, i18n.E("err.projectctl.verifychain.parse", err)
 	}
 	out := ChainStatus{
 		ChainOK:     v.ChainOK,
@@ -114,12 +114,12 @@ func (c *Client) BriefState(ctx context.Context, nodeID string) (State, error) {
 		return "", err
 	}
 	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return "", fmt.Errorf("解析 brief 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(raw, &text); err != nil {
+		return "", i18n.E("err.projectctl.briefstate.parse", err)
 	}
 	m := briefStateRe.FindStringSubmatch(text)
 	if m == nil {
-		return "", fmt.Errorf("brief 输出里找不到节点 %s 的状态行", nodeID)
+		return "", i18n.E("err.projectctl.briefstate.nostateline", nodeID)
 	}
 	return State(m[1]), nil
 }

@@ -2,10 +2,6 @@ package deckui
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"strconv"
 	"strings"
 	"testing"
 	"unicode"
@@ -17,9 +13,6 @@ import (
 
 // n059（owner：「UIUE能不能再优化得更舒服一点。更简单点」）：分页、自动保存、中文档位、上下文提示、整行高亮、矮窗口、文字表。
 
-// settingsUIFiles 是设置界面的代码：给 owner 看的文字都要从文字表取（settings_text.go）。
-var settingsUIFiles = []string{"settings.go", "settings_agents.go", "newproject.go"}
-
 func cjk(s string) bool {
 	for _, r := range s {
 		if unicode.Is(unicode.Han, r) || (r >= 0x3000 && r <= 0x303F) || (r >= 0xFF00 && r <= 0xFFEF) {
@@ -29,51 +22,9 @@ func cjk(s string) bool {
 	return false
 }
 
-// 文字表把关：设置界面代码里的字符串字面量不能有中文（含中文标点），注释不算；用到的键在表里都有。
+// 文字表把关（n060 从设置三文件推广到 deck 自己画的界面）：代码里不能有中文字面量；用到的键都在表里，表里的键都有人用。
 func TestSettingsTextHasNoStrayChinese(t *testing.T) {
-	fset := token.NewFileSet()
-	used := map[string]bool{}
-	for _, name := range settingsUIFiles {
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.BasicLit:
-				if x.Kind == token.STRING {
-					if v, err := strconv.Unquote(x.Value); err == nil && cjk(v) {
-						t.Errorf("%s 里有中文字面量 %q：放进文字表 settings_text.go", fset.Position(x.Pos()), v)
-					}
-				}
-			case *ast.CallExpr:
-				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "T" && len(x.Args) > 0 {
-					if lit, ok := x.Args[0].(*ast.BasicLit); ok {
-						key, _ := strconv.Unquote(lit.Value)
-						used[key] = true
-					}
-				}
-			}
-			return true
-		})
-	}
-	for _, t2 := range deckstore.Tiers { // 档位名与页签名是拼出来的键
-		used["tier."+string(t2)] = true
-	}
-	for _, k := range pageText {
-		used[k] = true
-	}
-	delete(used, "tier.") // tierName 里拼键的前缀
-	for k := range used {
-		if _, ok := textZH[k]; !ok {
-			t.Errorf("文字表里没有 %q", k)
-		}
-	}
-	for k := range textZH {
-		if !used[k] {
-			t.Errorf("文字表里的 %q 没人用", k)
-		}
-	}
+	checkNoStrayChinese(t)
 	if T("没有这个键") != "没有这个键" || T("tier.frontier") != "最强" || T("main.uses", "x") != "起来时用 x" {
 		t.Fatal("T 取文字、填参数，缺的键原样返回")
 	}

@@ -2,7 +2,7 @@ package agentdeck
 
 import (
 	"context"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,6 +39,7 @@ var knownArgs = map[string]map[string]int{
 	// 上游登记里不写 resume_flag、dangerous_flag，不会再加别的参数
 	"grok":        {"--model": 1},
 	"antigravity": {"--model": 1},
+	"kimi":        {"--model": 1}, // n060 段 4：同 grok，经 -c "kimi --model <模型>" 传；kimi 的 -m 简写不在白名单里（deck 只发 --model）
 	// opencode（上游内置）：-m <模型>、恢复时 -s <会话号>、事件端口 --port <N>（上游 internal/session/instance.go:1894-1964
 	// buildOpenCodeCommand/ExtraFlags/SSEPortFlag；n057 自查：以前不在这里，OpenCode 起来就被停掉）。--agent 不在白名单里：
 	// 它换用 OpenCode 自己配置的 agent，权限由那份配置定
@@ -104,13 +105,13 @@ func CheckCLIArgs(args []string, want LaunchArgs) error {
 			switch {
 			case inline && n == 1:
 				if !knownValueOK(want.Tool, flag, value) {
-					return fmt.Errorf("参数 %s 的取值不在白名单里（硬拒绝）", a)
+					return i18n.E("err.agentdeck.checkcliargs.1", a)
 				}
 				i++
 				continue
 			case !inline && i+n < len(args):
 				if n == 1 && !knownValueOK(want.Tool, flag, args[i+1]) {
-					return fmt.Errorf("参数 %s %s 的取值不在白名单里（硬拒绝）", a, args[i+1])
+					return i18n.E("err.agentdeck.checkcliargs.2", a, args[i+1])
 				}
 				i += 1 + n
 				continue
@@ -120,7 +121,7 @@ func CheckCLIArgs(args []string, want LaunchArgs) error {
 			i += n
 			continue
 		}
-		return fmt.Errorf("参数 %q 不在白名单里：deck 只放行上游按启动请求加的参数和 owner 在 deck 设置里逐字声明的额外参数（硬拒绝）", a)
+		return i18n.E("err.agentdeck.checkcliargs.3", a)
 	}
 	return nil
 }
@@ -178,7 +179,7 @@ var envNameRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 func CheckExtraArgs(tool string, extra [][]string) error {
 	for _, g := range extra {
 		if err := checkDeclaredGroup(tool, g); err != nil {
-			return fmt.Errorf("额外参数 %q：%w（deck 只放行白名单里的额外参数，见 agentdeck.declaredAllow）", g, err)
+			return i18n.E("err.agentdeck.checkextraargs.1", g, err)
 		}
 	}
 	return nil
@@ -190,40 +191,40 @@ func checkDeclaredGroup(tool string, g []string) error {
 	case 1:
 		var ok bool
 		if flag, value, ok = strings.Cut(g[0], "="); !ok {
-			return fmt.Errorf("要写成 参数 取值 两个元素，或 参数=取值")
+			return i18n.E("err.agentdeck.checkdeclaredgroup.1")
 		}
 		if tool == "claude" && strings.ContainsAny(g[0], " \t\r\n") {
 			// 上游 launch --extra-arg 拒收「以 - 开头又含空白」的元素（n055：声明的参数随启动传上去）
-			return fmt.Errorf("取值里有空白时要写成 参数 取值 两个元素")
+			return i18n.E("err.agentdeck.checkdeclaredgroup.2")
 		}
 	case 2:
 		flag, value = g[0], g[1]
 	default:
-		return fmt.Errorf("每组只能是一个参数加一个取值")
+		return i18n.E("err.agentdeck.checkdeclaredgroup.3")
 	}
 	if !declaredAllow[tool][flag] {
-		return fmt.Errorf("%s 不在 %s 可声明的参数里", flag, tool)
+		return i18n.E("err.agentdeck.checkdeclaredgroup.4", flag, tool)
 	}
 	if value == "" || strings.HasPrefix(value, "-") {
-		return fmt.Errorf("参数 %s 的取值不能为空、不能是参数", flag)
+		return i18n.E("err.agentdeck.checkdeclaredgroup.5", flag)
 	}
 	if low := strings.ToLower(value); strings.Contains(low, `\u`) || strings.Contains(low, `\x`) || strings.ContainsRune(value, 0) {
-		return fmt.Errorf("含转义写法，deck 不解码，请改成不带转义的写法")
+		return i18n.E("err.agentdeck.checkdeclaredgroup.6")
 	}
 	if tool == "codex" && strings.ContainsAny(value, "{}") {
 		// codex 的声明经上游 -c "codex 参数…" 的包装传上去，上游把包装里的 {command} 换成整条命令（自查）
-		return fmt.Errorf("-c 的取值不能含 { 或 }")
+		return i18n.E("err.agentdeck.checkdeclaredgroup.7")
 	}
 	if tool == "codex" {
 		key, v, ok := strings.Cut(value, "=")
 		key = strings.TrimSpace(key)
 		switch {
 		case !ok:
-			return fmt.Errorf("-c 的取值要写成 键=值")
+			return i18n.E("err.agentdeck.checkdeclaredgroup.8")
 		case envKeyOK(key):
 		case key == "sandbox_workspace_write.network_access" && (strings.TrimSpace(v) == "true" || strings.TrimSpace(v) == "false"):
 		default:
-			return fmt.Errorf("-c 只认 shell_environment_policy.set.<变量名>（LD_*、PATH、HOME、CODEX_HOME 等除外）与 sandbox_workspace_write.network_access=true|false，不认 %s", key)
+			return i18n.E("err.agentdeck.checkdeclaredgroup.9", key)
 		}
 	}
 	return nil
@@ -236,7 +237,7 @@ var CLIWait = 10 * time.Second
 // 一个 CLI 进程都没找到（等了 CLIWait）就报错：核对不了。
 func CheckSessionArgs(ctx context.Context, socket, tmuxSession string, want LaunchArgs) error {
 	if tmuxSession == "" {
-		return fmt.Errorf("不知道会话在哪个 tmux 会话里，核对不了它的命令行")
+		return i18n.E("err.agentdeck.checksessionargs.1")
 	}
 	deadline := time.Now().Add(CLIWait)
 	for {
@@ -245,7 +246,7 @@ func CheckSessionArgs(ctx context.Context, socket, tmuxSession string, want Laun
 			return err
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("tmux 会话 %s 里等了 %s 也没找到 %s 的进程，核对不了它的启动参数", tmuxSession, CLIWait, want.Tool)
+			return i18n.E("err.agentdeck.checksessionargs.2", tmuxSession, CLIWait, want.Tool)
 		}
 		select {
 		case <-ctx.Done():
@@ -267,7 +268,7 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 		}
 	}
 	if len(queue) == 0 {
-		return false, fmt.Errorf("tmux 会话 %s 里没有在跑的窗格，核对不了它的命令行", tmuxSession)
+		return false, i18n.E("err.agentdeck.checksessiononce.1", tmuxSession)
 	}
 	children := procChildren("/proc")
 	seen := map[int]bool{}
@@ -281,7 +282,7 @@ func checkSessionOnce(ctx context.Context, socket, tmuxSession string, want Laun
 		seen[pid] = true
 		ok, err := procArgsOK("/proc", pid, want)
 		if err != nil {
-			return false, fmt.Errorf("tmux 会话 %s 的进程 %d %w", tmuxSession, pid, err)
+			return false, i18n.E("err.agentdeck.checksessiononce.2", tmuxSession, pid, err)
 		}
 		found = found || ok
 		queue = append(queue, children[pid]...)
@@ -295,15 +296,15 @@ func procArgsOK(proc string, pid int, want LaunchArgs) (bool, error) {
 	if err != nil || len(data) == 0 {
 		return false, nil
 	}
-	argv := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(data)), "\x00"), "\x00") // 进程命令行是外部原文（返工 4）
 	if args, ok := cliArgs(argv, want); ok {
 		if err := CheckCLIArgs(args, want); err != nil {
-			return true, fmt.Errorf("（%s）的启动参数：%w", filepath.Base(argv[0]), err)
+			return true, i18n.E("err.agentdeck.procargsok.1", filepath.Base(argv[0]), err)
 		}
 		return true, nil
 	}
 	if err := checkBypassFlags(append(argv, strings.Join(argv, " "))...); err != nil {
-		return false, fmt.Errorf("的命令行带着绕过参数：%w", err)
+		return false, i18n.E("err.agentdeck.procargsok.2", err)
 	}
 	return false, nil
 }

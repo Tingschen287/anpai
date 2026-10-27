@@ -14,8 +14,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/dashquota"
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 )
 
@@ -75,7 +77,7 @@ func resetText(r, now time.Time) string {
 	}
 	l, n := r.Local(), now.Local()
 	if !l.After(n) {
-		return "↻ 已重置" // 看板的窗口数据停在上一个周期（例如 Codex 一阵没用）：时刻已过，旁边的百分比是旧的（n056 自查）
+		return i18n.T("quota.reset") // 看板的窗口数据停在上一个周期（例如 Codex 一阵没用）：时刻已过，旁边的百分比是旧的（n056 自查）
 	}
 	if l.Year() == n.Year() && l.YearDay() == n.YearDay() {
 		return "↻ " + l.Format("15:04")
@@ -111,10 +113,15 @@ func quotaBadge(tool, mode string, rows int) []string {
 
 // windowLabel 是窗口在面板上的名字：认识的写中文，其余（看板给的键）清洗后原样。
 func windowLabel(key string) string {
-	if l, ok := map[string]string{"5h": "5h", "week": "周", "day": "日"}[key]; ok {
-		return l
+	switch key {
+	case "5h":
+		return "5h"
+	case "week":
+		return i18n.T("quota.week")
+	case "day":
+		return i18n.T("quota.day")
 	}
-	return strings.Join(strings.Fields(deckstore.Clean(key, 12)), " ")
+	return strings.Join(strings.Fields(deckstore.Display(key, 12)), " ")
 }
 
 // QuotaLines 画额度面板（n056 按 owner 2026-10-14 的要求）：每个来源前有它的 logo；每个窗口带重置时间；
@@ -122,7 +129,7 @@ func windowLabel(key string) string {
 // sixel 时返回各 logo 的位置，图由调用方另画。
 func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []QuotaLogo) {
 	now := quotaNow()
-	lines := []string{title.Render("额度")}
+	lines := []string{title.Render(i18n.T("quota.title"))}
 	var logos []QuotaLogo
 	var shown []dashquota.ToolQuota
 	resetW := 0
@@ -136,7 +143,7 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		}
 	}
 	if len(shown) == 0 {
-		return append(lines, dim.Render("暂时没有可显示的额度")), nil
+		return append(lines, dim.Render(i18n.T("quota.empty"))), nil
 	}
 	// 一行：前缀 6 格（空格 + logo 4 格 + 空格）、标签 labelW 格 + 空格、条、空格 + 百分比 4 格、两格 + 重置时间
 	labelW := 3
@@ -164,7 +171,7 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 	}
 	for _, q := range shown {
 		// Label 来自看板 JSON（Antigravity 的池名）：显示前清洗、压成一行（同 n050 评审 B7；n056 自查）
-		name := strings.Join(strings.Fields(deckstore.Clean(q.Label, 40)), " ")
+		name := strings.Join(strings.Fields(deckstore.Display(q.Label, 40)), " ")
 		if name == "" {
 			name = toolName[q.Tool]
 		}
@@ -174,9 +181,9 @@ func QuotaLines(qs []dashquota.ToolQuota, width int, mode string) ([]string, []Q
 		style, mark := good, ""
 		switch q.Status {
 		case dashquota.Exhausted:
-			style, mark = bad, " 用尽"
+			style, mark = bad, i18n.T("quota.full")
 		case dashquota.Warn:
-			style, mark = warn, " 告急"
+			style, mark = warn, i18n.T("quota.low")
 		}
 		// 太窄时截名字、保住「用尽」「告急」（n056 attempt 2 自查）
 		if room := width - 6 - lipgloss.Width(mark); room > 0 && lipgloss.Width(name) > room {
@@ -235,36 +242,77 @@ func OpenDecisions(ds []deckstore.Decision) []deckstore.Decision {
 	return out
 }
 
-var kindName = map[string]string{
-	deckstore.KindCost: "要花额度", deckstore.KindConfig: "要改电脑设置", deckstore.KindPush: "要推送代码",
-	deckstore.KindDisagree: "协作者意见不一", deckstore.KindDeviation: "偏离你的决策",
-	deckstore.KindCodexTrust: "Codex 会改写你的配置", deckstore.KindGraphGate: "项目计划的门", deckstore.KindSessionWait: "会话在等你",
+var kindKey = map[string]i18n.Key{
+	deckstore.KindCost: "decide.kind.cost", deckstore.KindConfig: "decide.kind.config", deckstore.KindPush: "decide.kind.push",
+	deckstore.KindDisagree: "decide.kind.disagree", deckstore.KindDeviation: "decide.kind.deviation",
+	deckstore.KindCodexTrust: "decide.kind.codex", deckstore.KindGraphGate: "decide.kind.gate", deckstore.KindSessionWait: "decide.kind.wait",
 }
 
-var optionName = map[string]string{deckstore.OptApprove: "同意", deckstore.OptReject: "不同意", deckstore.OptStop: "停止"}
+var optionKey = map[string]i18n.Key{deckstore.OptApprove: "decide.opt.approve", deckstore.OptReject: "decide.opt.reject", deckstore.OptStop: "decide.opt.stop"}
+
+// activityStatusKey 把活动面板的会话状态对到文字键。
+// 启动中、在跑和侧栏共用 side.status.*。其余用 act.status.*。
+// 不认识的状态不在表里，查出来是空串，画面留空。
+var activityStatusKey = map[string]i18n.Key{
+	deckstore.StatusLaunching: "side.status.launching", deckstore.StatusRunning: "side.status.running",
+	deckstore.StatusUncertain: "act.status.uncertain", deckstore.StatusDone: "act.status.done",
+	deckstore.StatusFailed: "act.status.failed", deckstore.StatusStopped: "act.status.stopped",
+}
+
+// progressUnitKey 把预算单位的语言无关写法对到文字键。
+var progressUnitKey = map[string]i18n.Key{
+	"round": "progress.unit.round", "call": "progress.unit.call", "hour": "progress.unit.hour",
+}
+
+// unitText 是预算行上的单位：有语言无关写法的按语言翻译，没有的（token 没有单位）用原文。
+func unitText(bl deckd.BudgetView) string {
+	if k, ok := progressUnitKey[bl.UnitKey]; ok {
+		return i18n.T(k)
+	}
+	return bl.Unit
+}
+
+// progressCountKey 把进度计数的状态对到文字键。
+var progressCountKey = map[string]i18n.Key{
+	"accepted": "progress.accepted", "running": "progress.running", "submitted": "progress.submitted",
+	"ready": "progress.ready", "rework": "progress.rework", "blocked": "progress.blocked",
+	"failed": "progress.failed", "planned": "progress.planned", "superseded": "progress.superseded",
+}
+
+// TextKeys 返回本包里经 map 传给 i18n.T 的键。调用处不是字符串字面量，扫描器看不见。
+func TextKeys() []string {
+	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey)+len(progressUnitKey))
+	for _, m := range []map[string]i18n.Key{kindKey, optionKey, activityStatusKey, progressCountKey, progressUnitKey} {
+		for _, k := range m {
+			out = append(out, string(k))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // RenderDecisions 画「需要你决策」面板。sel 是选中的那一条。
 func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 	open := OpenDecisions(ds)
 	var b strings.Builder
-	b.WriteString(title.Render(fmt.Sprintf("需要你决策（%d）", len(open))) + "\n")
-	b.WriteString(dim.Render("只有主 agent 过滤后的事项才会出现在这里") + "\n")
+	b.WriteString(title.Render(i18n.T("decide.title", len(open))) + "\n")
+	b.WriteString(dim.Render(i18n.T("decide.about")) + "\n")
 	if len(open) == 0 {
-		b.WriteString(dim.Render("现在没有要你决定的事") + "\n")
+		b.WriteString(dim.Render(i18n.T("decide.empty")) + "\n")
 	}
 	for i, d := range open {
 		mark := "  "
 		if i == sel {
 			mark = picked.Render("▸ ")
 		}
-		k := kindName[d.Kind]
+		k := kindLabel(d.Kind)
 		if k == "" {
 			k = d.Kind
 		}
 		b.WriteString(mark + warn.Render("["+k+"]") + " " + dim.Render(d.Project) + "\n")
-		b.WriteString("  " + deckstore.Clean(d.Summary, 800) + "\n")
+		b.WriteString("  " + decisionText(d) + "\n")
 		if d.Recommend != "" {
-			b.WriteString(dim.Render("  推荐："+label(d.Recommend)) + "\n")
+			b.WriteString(dim.Render(i18n.T("decide.recommend")+label(d.Recommend)) + "\n")
 		}
 		if i == sel {
 			var opts []string
@@ -274,50 +322,90 @@ func RenderDecisions(ds []deckstore.Decision, sel int, note string) string {
 			b.WriteString("  " + picked.Render(strings.Join(opts, "  ")) + "\n")
 		}
 	}
-	b.WriteString(dim.Render("↑↓ 选  数字键作答") + "\n")
+	b.WriteString(dim.Render(i18n.T("decide.keys")) + "\n")
 	if note != "" {
 		b.WriteString(note + "\n")
 	}
 	return b.String()
 }
 
-func label(opt string) string {
-	if n, ok := optionName[opt]; ok {
-		return n
+func decisionText(d deckstore.Decision) string {
+	if d.SummaryCode == "" {
+		// 没有码的旧摘要。系统生成的那几类（花额度、Codex 授权）里能逐字认出的，deckstore.Open 已经补了码；
+		// 剩下的混有外部原文、反解不确定，英文界面整条显示原文并加「旧记录」标签；中文界面照旧。主 agent 写的摘要（包括它提交的 cost 决定）本来就是外部原文，不加（段 3；返工 2 起按 SystemSummary 的来源证据判断，不再凭种类）
+		return legacyPrefix(d.Summary, deckstore.SystemSummary(d)) + deckstore.Display(d.Summary, 800)
 	}
-	return opt
+	return deckstore.Clip(deckclient.Text(d.SummaryCode, []any(d.SummaryArgs), d.Summary), 800)
+}
+
+// legacyPrefix 是兼容显示策略：英文界面里没有码、含汉字的旧系统记录，整条显示原文，前面加「旧记录」标签（按语言）。
+// 中文界面、没有汉字的、不是系统记录的都不加。
+func legacyPrefix(text string, system bool) string {
+	if !system || i18n.Lang() != i18n.EN || !hasCJK(text) {
+		return ""
+	}
+	return dim.Render("[" + i18n.T("legacy.label") + "] ")
+}
+
+// hasCJK 与检查器同一口径：汉字、中文标点（U+3000–303F）、全角形式（U+FF00–FFEF）。
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if (r >= 0x4e00 && r <= 0x9fff) || (r >= 0x3400 && r <= 0x4dbf) || (r >= 0x3000 && r <= 0x303f) || (r >= 0xff00 && r <= 0xffef) {
+			return true
+		}
+	}
+	return false
+}
+
+func kindLabel(k string) string {
+	// 表的值已经是 Key，直接传入。再套一层 i18n.Key 没有新信息。
+	if _, ok := kindKey[k]; ok {
+		return i18n.T(kindKey[k])
+	}
+	return k
+}
+
+func label(opt string) string {
+	if _, ok := optionKey[opt]; ok {
+		return i18n.T(optionKey[opt])
+	}
+	// 选项文字是清洗过再存的，里面可能有中性打码标记
+	return i18n.Present(opt)
 }
 
 // RenderProgress 画项目进度面板。
 func RenderProgress(p deckd.Progress) string {
 	var b strings.Builder
-	b.WriteString(title.Render("项目进度 · "+p.Project) + "\n")
+	b.WriteString(title.Render(i18n.T("progress.title")+p.Project) + "\n")
 	if !p.Graph {
-		b.WriteString(dim.Render("这个项目没有接 Graph") + "\n")
+		b.WriteString(dim.Render(i18n.T("progress.nograph")) + "\n")
 		return b.String()
 	}
 	order := []string{"accepted", "running", "submitted", "ready", "rework", "blocked", "failed", "planned", "superseded"}
-	zh := map[string]string{"accepted": "已验收", "running": "进行中", "submitted": "待评审", "ready": "可开工", "rework": "返工",
-		"blocked": "阻塞", "failed": "失败", "planned": "计划中", "superseded": "已取代"}
 	var parts []string
 	for _, k := range order {
 		if n := p.Counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", zh[k], n))
+			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), n))
 		}
 	}
 	if p.Unknown > 0 {
-		parts = append(parts, fmt.Sprintf("状态未知 %d", p.Unknown))
+		parts = append(parts, i18n.T("progress.unknown", p.Unknown))
 	}
 	b.WriteString(strings.Join(parts, " · ") + "\n")
 	for _, bl := range p.Budgets {
 		switch {
 		case bl.Used == nil && bl.Limit != nil:
-			b.WriteString(fmt.Sprintf("%s 未知 / %g%s\n", bl.Label, *bl.Limit, bl.Unit))
+			b.WriteString(i18n.T("progress.budget.unknown", bl.Label, *bl.Limit, unitText(bl)))
 		case bl.Used != nil && bl.Limit != nil:
-			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, bl.Unit))
+			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, unitText(bl)))
 		}
 	}
-	for _, pr := range p.Problems {
+	for i, pr := range p.Problems {
+		// 能翻译的按码翻译；没有码的（旧 deckd、外部原文）当原文
+		if i < len(p.ProblemsCoded) && p.ProblemsCoded[i].Code != "" {
+			n := p.ProblemsCoded[i]
+			pr = deckclient.Text(n.Code, n.Args, pr)
+		}
 		b.WriteString(warn.Render("! "+pr) + "\n")
 	}
 	return b.String()
@@ -326,9 +414,9 @@ func RenderProgress(p deckd.Progress) string {
 // RenderNotifications 画下栏通知，最新的在下面，最多 height 行。
 func RenderNotifications(ns []deckstore.Notification, height int) string {
 	var b strings.Builder
-	b.WriteString(title.Render("通知") + dim.Render("  主 agent 开了子 agent、需要你决定时都会出现在这里，不打断你") + "\n")
+	b.WriteString(title.Render(i18n.T("notify.title")) + dim.Render(i18n.T("notify.about")) + "\n")
 	if len(ns) == 0 {
-		b.WriteString(dim.Render("还没有通知") + "\n")
+		b.WriteString(dim.Render(i18n.T("notify.empty")) + "\n")
 	}
 	if height > 1 && len(ns) > height-1 {
 		ns = ns[len(ns)-(height-1):]
@@ -338,11 +426,20 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 		if n.Project != "" {
 			line += dim.Render(n.Project + " · ")
 		}
-		text := n.Text
+		text := i18n.Present(n.Text) // 无码通知的正文是清洗过再存的，里面可能有中性打码标记
+		prefix := ""
+		if n.Code != "" {
+			text = deckclient.Text(n.Code, []any(n.Args), n.Text)
+		} else {
+			// 没有码的通知是旧记录（现在的通知都带码）：认得出的固定句子 deckstore.Open 已经补了码，
+			// 剩下的英文界面整条显示原文并加「旧记录」标签（段 3）
+			prefix = legacyPrefix(n.Text, true)
+		}
+		text = deckstore.Clip(text, 600)
 		if n.Kind == "decision" {
 			text = warn.Render(text)
 		}
-		b.WriteString(line + text + "\n")
+		b.WriteString(line + prefix + text + "\n")
 	}
 	return b.String()
 }
@@ -350,18 +447,16 @@ func RenderNotifications(ns []deckstore.Notification, height int) string {
 // RenderActivity 画「agent 在干嘛」：每个项目的会话与状态。
 func RenderActivity(ss []deckstore.Session, now time.Time) string {
 	var b strings.Builder
-	b.WriteString(title.Render("agent 在干嘛") + "\n")
+	b.WriteString(title.Render(i18n.T("act.title")) + "\n")
 	if len(ss) == 0 {
-		b.WriteString(dim.Render("还没有会话") + "\n")
+		b.WriteString(dim.Render(i18n.T("act.empty")) + "\n")
 	}
-	zh := map[string]string{deckstore.StatusLaunching: "启动中", deckstore.StatusRunning: "在跑", deckstore.StatusUncertain: "结果不明",
-		deckstore.StatusDone: "完成", deckstore.StatusFailed: "失败", deckstore.StatusStopped: "已停"}
 	for _, x := range ss {
-		role := "协作"
+		role := i18n.T("act.role.sub")
 		if x.Role == "main" {
-			role = "★主"
+			role = i18n.T("act.role.main")
 		}
-		st := zh[x.Status]
+		st := i18n.T(activityStatusKey[x.Status])
 		if x.Status == deckstore.StatusUncertain || x.Status == deckstore.StatusFailed {
 			st = warn.Render(st)
 		}
@@ -369,7 +464,7 @@ func RenderActivity(ss []deckstore.Session, now time.Time) string {
 		if name == "" {
 			name = x.Agent
 		}
-		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, deckstore.Clean(x.Title, 80), name, st))
+		b.WriteString(fmt.Sprintf("%s %s %s · %s · %s\n", dim.Render(x.Project), role, deckstore.Display(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title), 80), name, st))
 	}
 	return b.String()
 }

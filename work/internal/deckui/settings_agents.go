@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 )
 
@@ -40,13 +41,34 @@ type modelInput struct {
 	text    string
 	all     []string // 候选（toolModelsMsg 填）
 	loading bool
-	note    string
-	cur     int // 候选里的光标；-1 = 用输入的文字
-	limit   int // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
-	req     int // 这个输入框发出的那次「问 CLI 有哪些模型」
+	note    lazyText // 输入框里的提示：存怎么取文字（返工 2，M1）
+	cur     int      // 候选里的光标；-1 = 用输入的文字
+	limit   int      // 最多列几个候选（随窗口高度缩减，n059；0 = 不列）
+	req     int      // 这个输入框发出的那次「问 CLI 有哪些模型」
 }
 
 type toolsMsg struct {
+	tools []ToolInfo
+	err   error
+}
+
+// toolsBgMsg 是后台取工具目录的结果（只用来判断「没装」标记）：失败不出声，照旧在本进程的 PATH 里找。
+type toolsBgMsg struct {
+	tools []ToolInfo
+	err   error
+}
+
+func (m *Settings) fetchToolsBg() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		t, err := m.API.Tools(ctx)
+		return toolsBgMsg{tools: t, err: err}
+	}
+}
+
+// pathRefreshMsg 是「刷新会话 PATH」键的结果：err 是请求没发成或读不到状态；tools 是读完（或等到上限）后的工具目录。
+type pathRefreshMsg struct {
 	tools []ToolInfo
 	err   error
 }
@@ -67,13 +89,69 @@ func (m *Settings) fetchTools() tea.Cmd {
 	}
 }
 
+// pathScoped：deckd 是不是在用会话 PATH（读到的工具带来源）。没有（测试、没开）就没有刷新键，也不显示相关提示。
+func (m *Settings) pathScoped() bool {
+	for _, t := range m.tools {
+		if t.PathSource != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// pathRefreshing：有一次读正在跑（本窗口按的，或 deckd 告诉我们别处按的、启动那次）。
+func (m *Settings) pathRefreshing() bool {
+	if m.pathBusy {
+		return true
+	}
+	for _, t := range m.tools {
+		if t.PathRefreshing {
+			return true
+		}
+	}
+	return false
+}
+
+// pathRefreshWait 是按键后等 deckd 读完的上限（一次读最多 5 秒探针加半秒收拾，留余量）；超过就不再等，下次打开这一页会重新取。
+const pathRefreshWait = 20 * time.Second
+
+// refreshPath 是「刷新会话 PATH」键（加入页、agent 页同一个键 p）：请 deckd 在后台重读一次登录 shell 的 PATH（会运行 owner 的登录启动文件），
+// 读的时候界面照常可用，读完更新已装与版本。本窗口已经在等就忽略（连按不叠加）；deckd 那边几个窗口同时按也只读一次。
+func (m *Settings) refreshPath() tea.Cmd {
+	rf, ok := m.API.(pathRefresher)
+	if !ok || !m.pathScoped() || m.pathBusy {
+		return nil
+	}
+	m.pathBusy = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pathRefreshWait+10*time.Second)
+		defer cancel()
+		if err := rf.RefreshPath(ctx); err != nil {
+			return pathRefreshMsg{err: err}
+		}
+		deadline := time.Now().Add(pathRefreshWait)
+		for { // 先轮询「读完没有」（便宜的状态请求），读完再取一次工具目录
+			busy, err := rf.PathRefreshing(ctx)
+			if err != nil {
+				return pathRefreshMsg{err: err}
+			}
+			if !busy || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		t, err := m.API.Tools(ctx)
+		return pathRefreshMsg{tools: t, err: err}
+	}
+}
+
 func (m *Settings) openAgent(id string) tea.Cmd {
-	m.sub, m.msg = &subView{kind: subAgent, agent: id}, ""
+	m.sub, m.msg = &subView{kind: subAgent, agent: id}, nil
 	return m.fetchTools()
 }
 
 func (m *Settings) openAdd() tea.Cmd {
-	m.sub, m.msg = &subView{kind: subAdd}, T("add.loading")
+	m.sub, m.msg = &subView{kind: subAdd}, later(func() string { return T("add.loading") })
 	return m.fetchTools()
 }
 
@@ -81,7 +159,7 @@ func (m *Settings) openTier(t deckstore.Tier) tea.Cmd {
 	if m.project() == nil {
 		return nil
 	}
-	m.sub, m.msg = &subView{kind: subTier, tier: t}, ""
+	m.sub, m.msg = &subView{kind: subTier, tier: t}, nil
 	return nil
 }
 
@@ -89,12 +167,30 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case toolsMsg:
 		if msg.err != nil {
-			m.msg = T("tools.fail", errLong(msg.err))
+			err := msg.err
+			m.msg = later(func() string { return T("tools.fail", errLong(err)) })
 			return nil
 		}
-		m.tools = msg.tools
+		m.tools, m.deckTools = msg.tools, msg.tools
 		if m.sub != nil && m.sub.kind == subAdd {
-			m.msg = ""
+			m.msg = nil
+		}
+	case pathRefreshMsg:
+		m.pathBusy = false
+		if msg.err != nil {
+			err := msg.err
+			m.msg = later(func() string { return T("path.refresh.fail", errLong(err)) })
+			return nil
+		}
+		m.tools, m.deckTools = msg.tools, msg.tools
+		still := false
+		for _, t := range msg.tools {
+			still = still || t.PathRefreshing
+		}
+		if still {
+			m.msg = later(func() string { return T("path.refresh.slow") })
+		} else if m.sub != nil && (m.sub.kind == subAdd || m.sub.kind == subAgent) {
+			m.msg = later(func() string { return T("path.refresh.done") })
 		}
 	case toolModelsMsg:
 		if m.sub == nil || m.sub.input == nil {
@@ -111,23 +207,77 @@ func (m *Settings) subMsg(msg tea.Msg) tea.Cmd {
 		// 只替换「正在问」：等候选时按 ⏎ 被拒的原因不抹掉（attempt 3 自查）
 		asking := false
 		if t, ok := m.toolInfo(msg.tool); ok {
-			asking = in.note == T("input.asking", t.Binary)
+			asking = in.note.String() == T("input.asking", t.Binary)
 		}
 		if msg.err != nil {
 			if asking {
-				in.note = T("input.listfail", oneLine(deckstore.Clean(errLong(msg.err), textCap)))
+				err := msg.err
+				in.note = later(func() string { return T("input.listfail", oneLine(deckstore.Display(errLong(err), textCap))) })
 			}
 			return nil
 		}
 		in.all = msg.models
 		if asking {
-			in.note = "" // 候选回来了就不再说「正在问」（attempt 3 自查）
+			in.note = nil // 候选回来了就不再说「正在问」（attempt 3 自查）
 			if len(msg.models) == 0 {
-				in.note = T("input.nolist")
+				in.note = later(func() string { return T("input.nolist") })
 			}
 		}
 	}
 	return nil
+}
+
+// pathNote 是「没取到会话 PATH、退回 deckd 自己的 PATH 找 CLI」的提示（n060 段 4）：deckd 回的是码与参数，这里按当前语言翻译。没有这回事就空。
+func (m *Settings) pathNote() string {
+	for _, t := range m.tools {
+		if t.NoteCode == "" && t.Note == "" {
+			continue
+		}
+		note := t.Note
+		if t.NoteCode != "" {
+			note = deckclient.Text(t.NoteCode, t.NoteArgs, t.Note)
+		}
+		return oneLine(deckstore.Display(note, textCap))
+	}
+	return ""
+}
+
+// pathNoteLines 把 pathNote 折成几行（橙色，行首留两格）；没有提示就没有行。
+func (m *Settings) pathNoteLines() string {
+	n := m.pathNote()
+	if n == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, l := range m.wrap(n, 2) {
+		b.WriteString(orange + "  " + l + reset + "\n")
+	}
+	return b.String()
+}
+
+// pathRefreshLines 是加入页与 agent 页上「刷新会话 PATH」的状态与说明（只在 deckd 用会话 PATH 时显示）：
+// 正在刷新时说明（界面照常可用、先用旧结果）；启动时没读到就提示按 p 重试；平时一行说明这个键会运行登录启动文件。
+func (m *Settings) pathRefreshLines() string {
+	if !m.pathScoped() {
+		return ""
+	}
+	var b strings.Builder
+	if m.pathRefreshing() {
+		b.WriteString(m.note(T("path.refreshing")))
+		return b.String()
+	}
+	startupFail := false
+	for _, t := range m.tools {
+		if t.PathSource == "process" && (t.NoteCode != "" || t.Note != "") { // 退回了 deckd 自己的 PATH（启动时没读到、或之后的刷新也没成）
+			startupFail = true
+		}
+	}
+	if startupFail {
+		b.WriteString(m.note(T("path.retry")))
+	} else {
+		b.WriteString(m.note(T("path.help")))
+	}
+	return b.String()
 }
 
 func (m *Settings) toolInfo(tool string) (ToolInfo, bool) {
@@ -214,6 +364,9 @@ func (m *Settings) subKey(msg tea.KeyMsg) tea.Cmd {
 // ---------------- 加入 agent ----------------
 
 func (m *Settings) addKey(k string) tea.Cmd {
+	if k == "p" {
+		return m.refreshPath()
+	}
 	opts := m.addable()
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	if (k != "enter" && k != " ") || len(opts) == 0 {
@@ -221,11 +374,13 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	}
 	t := opts[m.sub.cur]
 	if !t.Installed {
-		m.msg = T("add.missing", t.Name, t.Binary)
+		name, binary := t.Name, t.Binary
+		m.msg = later(func() string { return T("add.missing", name, binary) })
 		return nil
 	}
 	if !deckstore.ValidID(t.Tool) || m.agentPtr(t.Tool) != nil {
-		m.msg = T("add.taken", t.Tool)
+		tool := t.Tool
+		m.msg = later(func() string { return T("add.taken", tool) })
 		return nil
 	}
 	a := deckstore.AgentDef{ID: t.Tool, Name: t.Name, Tool: t.Tool, Binary: t.Binary, Agent: t.Agent,
@@ -233,7 +388,8 @@ func (m *Settings) addKey(k string) tea.Cmd {
 	m.set.Agents = append(m.set.Agents, a)
 	m.touch()
 	m.sub = &subView{kind: subAgent, agent: a.ID}
-	m.msg = T("add.done", t.Name)
+	name := t.Name
+	m.msg = later(func() string { return T("add.done", name) })
 	return nil
 }
 
@@ -241,7 +397,7 @@ func (m *Settings) addView() (string, []string) {
 	var b strings.Builder
 	b.WriteString(m.titleLine(" "+T("add.title"), T("add.keys")))
 	if m.tools == nil {
-		b.WriteString("  " + m.msg + "\n")
+		b.WriteString("  " + m.msg.String() + "\n")
 		return b.String(), nil
 	}
 	opts := m.addable()
@@ -250,7 +406,7 @@ func (m *Settings) addView() (string, []string) {
 	}
 	m.sub.cur = max(0, min(m.sub.cur, len(opts)-1))
 	for i, t := range opts {
-		state := green + "●" + reset + " " + dimOn + sanitizeFull(t.Path) + "  " + sanitizeFull(t.Version) + reset
+		state := green + "●" + reset + " " + dimOn + sanitizeFull(t.Path) + "  " + shownCleaned(t.Version) + reset
 		if !t.Installed {
 			state = dimOn + "○ " + T("agent.missing") + reset
 		}
@@ -267,6 +423,8 @@ func (m *Settings) addView() (string, []string) {
 		}
 	}
 	b.WriteString("\n" + m.note(T("add.about")))
+	b.WriteString(m.pathNoteLines())
+	b.WriteString(m.pathRefreshLines())
 	return b.String(), m.msgFoot()
 }
 
@@ -281,6 +439,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 	n := len(a.Models)
 	m.sub.cur = max(0, min(m.sub.cur, n-1))
 	switch k {
+	case "p":
+		return m.refreshPath()
 	case "enter", " ":
 		if n == 0 {
 			return nil
@@ -288,7 +448,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		md := &a.Models[m.sub.cur]
 		next := nextTier(md.Tier)
 		if users := m.projectsWithModel(md.ID); len(users) > 0 {
-			m.msg = T("model.inuse.tier", md.ID, strings.Join(users, T("sep.list")))
+			id := md.ID
+			m.msg = later(func() string { return T("model.inuse.tier", id, strings.Join(users, T("sep.list"))) })
 			return nil
 		}
 		md.Tier = next
@@ -298,7 +459,8 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		m.sub.input = in
 		if t, ok := m.toolInfo(a.Tool); ok && t.CanList {
 			m.modelReq++
-			in.loading, in.note, in.req = true, T("input.asking", t.Binary), m.modelReq
+			binary := t.Binary
+			in.loading, in.note, in.req = true, later(func() string { return T("input.asking", binary) }), m.modelReq
 			tool, req := a.Tool, m.modelReq
 			return func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -307,33 +469,35 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 				return toolModelsMsg{tool: tool, req: req, models: ms, err: err}
 			}
 		}
-		in.note = T("input.manual")
+		in.note = later(func() string { return T("input.manual") })
 	case "e":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
-		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: T("input.renamenote")}
+		m.sub.input = &modelInput{rename: id, text: id, cur: -1, note: later(func() string { return T("input.renamenote") })}
 	case "x", "delete":
 		if n == 0 {
 			return nil
 		}
 		id := a.Models[m.sub.cur].ID
 		if users := m.projectsWithModel(id); len(users) > 0 {
-			m.msg = T("model.inuse.del", id, strings.Join(users, T("sep.list")))
+			m.msg = later(func() string { return T("model.inuse.del", id, strings.Join(users, T("sep.list"))) })
 			return nil
 		}
 		a.Models = append(a.Models[:m.sub.cur], a.Models[m.sub.cur+1:]...)
 		m.touch()
-		m.msg = T("model.deleted", id)
+		m.msg = later(func() string { return T("model.deleted", id) })
 	case "r":
 		if users := m.projectsUsing(a.ID); len(users) > 0 {
-			m.msg = T("agent.inuse", strings.Join(users, T("sep.list")), a.Name)
+			aname := a.Name
+			m.msg = later(func() string { return T("agent.inuse", strings.Join(users, T("sep.list")), aname) })
 			return nil
 		}
 		if len(a.ExtraArgs) > 0 && !m.sub.confirm {
 			m.sub.confirm = true
-			m.msg = T("agent.remove.confirm", a.Name)
+			aname := a.Name
+			m.msg = later(func() string { return T("agent.remove.confirm", aname) })
 			return nil
 		}
 		name := a.Name
@@ -345,7 +509,7 @@ func (m *Settings) agentKey(k string) tea.Cmd {
 		}
 		m.set.Agents = keep
 		m.touch()
-		m.sub, m.msg = nil, T("agent.removed", name)
+		m.sub, m.msg = nil, later(func() string { return T("agent.removed", name) })
 	}
 	return nil
 }
@@ -371,12 +535,14 @@ func (m *Settings) agentView() (string, []string) {
 	cmd := T("agent.cmd", sanitizeFull(a.Binary))
 	if t, ok := m.toolInfo(a.Tool); ok {
 		if t.Installed {
-			cmd += "  " + sanitizeFull(t.Version)
+			cmd += "  " + shownCleaned(t.Version)
 		} else {
 			cmd += "  " + orange + T("agent.missing") + reset + dimOn
 		}
 	}
 	b.WriteString(dimOn + "  " + cmd + "  · " + T("agent.tool", sanitizeFull(a.Tool)) + reset + "\n")
+	b.WriteString(m.pathNoteLines())
+	b.WriteString(m.pathRefreshLines())
 	if len(a.ExtraArgs) > 0 {
 		var parts []string
 		for _, g := range a.ExtraArgs {
@@ -448,16 +614,16 @@ func (m *Settings) msgFoot() []string {
 	var out []string
 	switch { // 与页面底部（foot）同一顺序：正在重试时说「保存中」，不再说「没存上」（n059 自查 2）
 	case m.conflict:
-		out = append(out, orange+" "+m.saveErr+reset)
-	case m.saving || (m.dirty && m.saveErr == ""):
+		out = append(out, orange+" "+m.saveErr.String()+reset)
+	case m.saving || (m.dirty && m.saveErr.empty()):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
-	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
+	case !m.saveErr.empty():
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr.String(), msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.savedshort")+reset) // 子视图里也看得见存上了（n059 自查）
 	}
-	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
+	if !m.msg.empty() {
+		out = append(out, " "+oneLine(deckstore.Display(m.msg.String(), msgCap)))
 	}
 	return m.wrapFoot(out)
 }
@@ -525,7 +691,7 @@ func (m *Settings) inputKey(msg tea.KeyMsg) tea.Cmd {
 		if ms := in.matches(); in.cur >= 0 && in.cur < len(ms) {
 			id = ms[in.cur]
 		}
-		if err := m.applyModelInput(a, in.rename, id); err != "" {
+		if err := m.applyModelInput(a, in.rename, id); err != nil {
 			in.note = err
 			return nil
 		}
@@ -540,15 +706,15 @@ func (m *Settings) inputKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // applyModelInput 加一个模型（档位按光标所在模型的档位，没有就日常），或改一个模型的 id（项目档位清单里的一并改）。
-func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) string {
+func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) lazyText {
 	if a == nil {
-		return T("input.gone")
+		return later(func() string { return T("input.gone") })
 	}
 	if !deckstore.ValidModelID(id) {
-		return T("input.badid")
+		return later(func() string { return T("input.badid") })
 	}
 	if owner := m.ownerOf(id); owner != "" && !(rename == id) {
-		return T("input.taken", id, owner)
+		return later(func() string { return T("input.taken", id, owner) })
 	}
 	if rename != "" {
 		for i := range a.Models {
@@ -567,8 +733,8 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 			}
 		}
 		m.touch()
-		m.msg = T("model.renamed", rename, id)
-		return ""
+		m.msg = later(func() string { return T("model.renamed", rename, id) })
+		return nil
 	}
 	tier := deckstore.Balanced
 	if len(a.Models) > 0 {
@@ -577,8 +743,8 @@ func (m *Settings) applyModelInput(a *deckstore.AgentDef, rename, id string) str
 	a.Models = append(a.Models, deckstore.ModelDef{ID: id, Tier: tier})
 	m.sub.cur = len(a.Models) - 1
 	m.touch()
-	m.msg = T("model.added", id, tierName(tier))
-	return ""
+	m.msg = later(func() string { return T("model.added", id, tierName(tier)) })
+	return nil
 }
 
 func (m *Settings) inputView() string {
@@ -589,8 +755,8 @@ func (m *Settings) inputView() string {
 		title = T("input.rename", sanitizeFull(in.rename))
 	}
 	b.WriteString("  " + T("input.prompt", title) + bold + sanitizeFull(in.text) + caretMark + "\n")
-	if in.note != "" {
-		b.WriteString(m.note(oneLine(deckstore.Clean(in.note, msgCap))))
+	if !in.note.empty() {
+		b.WriteString(m.note(oneLine(deckstore.Display(in.note.String(), msgCap))))
 	}
 	if in.rename == "" {
 		for i, s := range in.matches() {

@@ -2,7 +2,7 @@ package agentdeck
 
 import (
 	"context"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
 	"strings"
@@ -20,7 +20,7 @@ import (
 // 边界：它数的是查询那一刻。查询之后、消息送达之前有人进来，这里看不见（见 test-report 已知限制）。
 func (c *Client) AttachedClients(ctx context.Context, sessionID string) (int, error) {
 	if sessionID == "" {
-		return 0, fmt.Errorf("没有会话号，查不了有没有人连着")
+		return 0, i18n.E("err.agentdeck.clientattachedclients.1")
 	}
 	tmuxSession, socket := "", ""
 	if menu, err := c.MenuSnapshot(ctx); err == nil {
@@ -31,15 +31,15 @@ func (c *Client) AttachedClients(ctx context.Context, sessionID string) (int, er
 	if tmuxSession == "" {
 		listed, err := c.ListSessions(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("取不到会话 %s 的 tmux 会话名：%w", sessionID, err)
+			return 0, i18n.E("err.agentdeck.clientattachedclients.2", sessionID, err)
 		}
 		s, ok := TmuxSessionOf(listed, sessionID)
 		if !ok {
-			return 0, fmt.Errorf("上游没有会话 %s 的 tmux 会话名", sessionID)
+			return 0, i18n.E("err.agentdeck.clientattachedclients.3", sessionID)
 		}
 		sock, err := ResolveSocketFor(ctx, s, sessionID)
 		if err != nil {
-			return 0, fmt.Errorf("找不到会话 %s 在哪个 tmux server 上：%w", sessionID, err)
+			return 0, i18n.E("err.agentdeck.clientattachedclients.4", sessionID, err)
 		}
 		tmuxSession, socket = s, sock
 	}
@@ -60,7 +60,7 @@ func listClientsOn(ctx context.Context, socket, tmuxSession string) (int, error)
 	list.Env = withoutTmux(os.Environ())
 	out, err := list.Output()
 	if err != nil {
-		return 0, fmt.Errorf("查不了 tmux 会话 %s 连着几个客户端：%w", tmuxSession, err)
+		return 0, i18n.E("err.agentdeck.listclientson.1", tmuxSession, err)
 	}
 	n := 0
 	for _, line := range strings.Split(string(out), "\n") {

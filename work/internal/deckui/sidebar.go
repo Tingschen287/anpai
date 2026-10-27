@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
@@ -133,27 +134,27 @@ func (d Data) Entries() []Entry {
 func status(x SessionInfo) (dot, text string) {
 	switch x.Status {
 	case deckstore.StatusLaunching:
-		return "\x1b[38;5;245m◌\x1b[0m", "启动中"
+		return "\x1b[38;5;245m◌\x1b[0m", T("side.status.launching")
 	case deckstore.StatusUncertain:
-		return "\x1b[38;5;214m◌\x1b[0m", "启动结果不明"
+		return "\x1b[38;5;214m◌\x1b[0m", T("side.status.uncertain")
 	case deckstore.StatusDone:
-		return "\x1b[38;5;242m○\x1b[0m", "已完成"
+		return "\x1b[38;5;242m○\x1b[0m", T("side.status.done")
 	case deckstore.StatusFailed:
-		return "\x1b[38;5;196m○\x1b[0m", "启动失败"
+		return "\x1b[38;5;196m○\x1b[0m", T("side.status.failed")
 	case deckstore.StatusStopped:
-		return "\x1b[38;5;242m○\x1b[0m", "已停止"
+		return "\x1b[38;5;242m○\x1b[0m", T("side.status.stopped")
 	}
 	switch x.Activity {
 	case "running":
-		return "\x1b[38;5;42m●\x1b[0m", "在跑"
+		return "\x1b[38;5;42m●\x1b[0m", T("side.status.running")
 	case "waiting":
-		return "\x1b[38;5;220m●\x1b[0m", "等你输入"
+		return "\x1b[38;5;220m●\x1b[0m", T("side.status.waiting")
 	case "idle":
-		return "\x1b[38;5;245m●\x1b[0m", "空闲"
+		return "\x1b[38;5;245m●\x1b[0m", T("side.status.idle")
 	case "error":
-		return "\x1b[38;5;196m●\x1b[0m", "出错"
+		return "\x1b[38;5;196m●\x1b[0m", T("side.status.error")
 	}
-	return "\x1b[38;5;242m○\x1b[0m", "状态未知"
+	return "\x1b[38;5;242m○\x1b[0m", T("side.status.unknown")
 }
 
 // Sidebar 是左侧会话栏。
@@ -338,7 +339,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 		}
 		body = append(body, row{text: Fit(fmt.Sprintf("%s\x1b[1m ▾ %s\x1b[22m\x1b[38;5;242m · %d\x1b[0m", hb, sanitize(g.Name), len(g.Sessions)), w), idx: -1, proj: g.ID})
 		if len(g.Sessions) == 0 {
-			body = append(body, row{text: Fit("\x1b[38;5;242m   按 m 起主 agent\x1b[0m", w), idx: -1})
+			body = append(body, row{text: Fit("\x1b[38;5;242m"+T("side.empty")+"\x1b[0m", w), idx: -1})
 		}
 		for _, x := range g.Sessions {
 			dot, st := status(x)
@@ -350,7 +351,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 				bg = "\x1b[48;5;236m"
 			}
 			lg := s.logoLines(x.Tool)
-			title := sanitize(x.Title)
+			title := sanitize(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title))
 			if x.Role == "main" {
 				title = "\x1b[38;5;220m★\x1b[0m" + bg + " " + title
 			}
@@ -364,9 +365,9 @@ func (s *Sidebar) Render(w, h int) Frame {
 			sub := sanitize(x.Tool) + " · " + st
 			switch {
 			case s.Data.IsTaken(x):
-				sub += " · \x1b[38;5;214m接管中\x1b[0m\x1b[38;5;245m"
+				sub += " · \x1b[38;5;214m" + T("side.taken") + "\x1b[0m\x1b[38;5;245m"
 			case s.Data.IsPending(x):
-				sub += " · \x1b[38;5;214m待交还\x1b[0m\x1b[38;5;245m"
+				sub += " · \x1b[38;5;214m" + T("side.pending") + "\x1b[0m\x1b[38;5;245m"
 			}
 			content := w - 1 - logoCols - 1 - 2
 			r1 := bar + lg[0] + bg + " " + Fit(dot+bg+" "+title, content) + bg + " " + eye + "\x1b[0m"
@@ -380,7 +381,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 		}
 		body = append(body, row{idx: -1})
 	}
-	footer := []string{Fit("\x1b[38;5;242m ↑↓ 选  ⏎ 打开  h 放回后台\x1b[0m", w), Fit("\x1b[38;5;242m m 起主 agent\x1b[0m", w)}
+	footer := []string{Fit("\x1b[38;5;242m"+T("side.keys.1")+"\x1b[0m", w), Fit("\x1b[38;5;242m"+T("side.keys.2")+"\x1b[0m", w)}
 	// 结果与出错说明可能比侧栏宽（例如「停在目录信任确认上……」）：折行显示，最多 4 行（n055 端到端：一行截断看不全）
 	if s.Data.Info != "" {
 		footer = append(wrapLines(s.Data.Info, w, "\x1b[38;5;42m"), footer...)
@@ -446,6 +447,6 @@ func wrapLines(text string, w int, color string) []string {
 
 // sanitize 去掉会话标题里的控制字符与疑似密钥（标题来自模型，可能夹带转义序列），
 // 并压成一行：Clean 为多行报告保留换行与制表符，单行字段里它们会挪动行列、错开点击区域。
-func sanitize(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 80)) }
+func sanitize(s string) string { return oneLine(deckstore.Display(strings.TrimSpace(s), 80)) }
 
 func oneLine(s string) string { return strings.NewReplacer("\n", " ", "\t", " ").Replace(s) }

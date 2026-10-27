@@ -12,12 +12,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // ReadOnlyCommands 是本包允许执行的全部子命令。
@@ -39,8 +40,11 @@ func isReadOnly(command string) bool {
 // ErrWriteCommandRefused 表示有人试图通过本包执行一个会写文件的子命令。
 type ErrWriteCommandRefused struct{ Command string }
 
-func (e *ErrWriteCommandRefused) Error() string {
-	return fmt.Sprintf("拒绝执行非只读子命令 %q：Work Deck 对 Graph 控制器只读，唯一的写入口是派工前的 Start", e.Command)
+func (e *ErrWriteCommandRefused) Error() string { return e.I18n().Error() }
+
+// I18n 交出码：英文界面按码翻译。
+func (e *ErrWriteCommandRefused) I18n() *i18n.Error {
+	return i18n.E("err.projectctl.refused", e.Command)
 }
 
 // Client 执行 projectctl 并把输出翻译成 Work Deck 的类型。
@@ -71,17 +75,17 @@ func NewClient(project, script string) *Client {
 func DefaultScript() (string, error) {
 	if p := os.Getenv("WORKDECK_PROJECTCTL"); p != "" {
 		if _, err := os.Stat(p); err != nil {
-			return "", fmt.Errorf("WORKDECK_PROJECTCTL 指向的文件不可用：%w", err)
+			return "", i18n.E("err.projectctl.defaultscript.1", err)
 		}
 		return p, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("无法确定用户主目录：%w", err)
+		return "", i18n.E("err.projectctl.defaultscript.2", err)
 	}
 	candidate := filepath.Join(home, "ai", "01.assets", "project-control", "projectctl.py")
 	if _, err := os.Stat(candidate); err != nil {
-		return "", fmt.Errorf("找不到 projectctl.py，请用 WORKDECK_PROJECTCTL 指定：%w", err)
+		return "", i18n.E("err.projectctl.defaultscript.3", "projectctl.py", err)
 	}
 	return candidate, nil
 }
@@ -112,18 +116,19 @@ func (c *Client) run(ctx context.Context, command string, args ...string) (json.
 	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
+	// 子进程的输出是外部原文：伪造的打码标记在这里换掉（返工 4）
+	outBytes, errText := i18n.NeutralizeBytes(stdout.Bytes()), i18n.Neutralize(stderr.String())
 
 	// verify-chain 审计不过时退出码是 2，但 stdout 仍是合法结果，要照常解析。
 	var env envelope
-	if jsonErr := json.Unmarshal(stdout.Bytes(), &env); jsonErr != nil {
+	if jsonErr := i18n.UnmarshalExternal(outBytes, &env); jsonErr != nil { // 解码之后再中和：JSON 转义写法的伪造标记（段 3）
 		if runErr != nil {
-			return nil, fmt.Errorf("projectctl %s 执行失败：%w（stderr: %s）",
-				command, runErr, truncate(stderr.String(), 400))
+			return nil, i18n.E("err.projectctl.run.1", command, runErr, truncate(errText, 400))
 		}
-		return nil, fmt.Errorf("projectctl %s 的输出不是合法 JSON：%w", command, jsonErr)
+		return nil, i18n.E("err.projectctl.run.2", command, jsonErr)
 	}
 	if !env.OK {
-		return nil, fmt.Errorf("projectctl %s 返回失败：%s", command, truncate(env.Error, 400))
+		return nil, i18n.E("err.projectctl.run.3", command, truncate(env.Error, 400))
 	}
 	return env.Result, nil
 }
@@ -184,15 +189,18 @@ const reconcileTimeout = time.Minute
 //
 // 开工前核对不了账本就不开工：出岔子时没法对账。
 func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error) {
-	for name, v := range map[string]string{"节点": r.NodeID, "actor": r.Actor, "role": r.Role,
-		"route class": r.RouteClass, "model": r.Model, "reason": r.Reason} {
-		if strings.TrimSpace(v) == "" {
-			return StartResult{}, &ErrStartNotStarted{fmt.Errorf("开工缺少 %s，不调 projectctl start", name)}
+	for _, f := range []struct {
+		name any
+		v    string
+	}{{i18n.E("err.projectctl.start.node"), r.NodeID}, {"actor", r.Actor}, {"role", r.Role},
+		{"route class", r.RouteClass}, {"model", r.Model}, {"reason", r.Reason}} {
+		if strings.TrimSpace(f.v) == "" {
+			return StartResult{}, &ErrStartNotStarted{i18n.E("err.projectctl.start.missing", f.name)}
 		}
 	}
 	before, err := c.VerifyChain(ctx)
 	if err != nil {
-		return StartResult{}, &ErrStartNotStarted{fmt.Errorf("开工前核对不了账本（%v），不开工：开工出岔子时没法对账", err)}
+		return StartResult{}, &ErrStartNotStarted{i18n.E("err.projectctl.start.noverify", err)}
 	}
 	runCtx := ctx
 	if c.Timeout > 0 {
@@ -208,27 +216,28 @@ func (c *Client) Start(ctx context.Context, r StartRequest) (StartResult, error)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+	outBytes, errText := i18n.NeutralizeBytes(stdout.Bytes()), i18n.Neutralize(stderr.String()) // 子进程的输出是外部原文（返工 4）
 	reconcile := func(cause error) (StartResult, error) { return c.reconcileStart(ctx, r, before.Events, cause) }
 	var env envelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+	if err := i18n.UnmarshalExternal(outBytes, &env); err != nil {
 		if runErr != nil {
-			return reconcile(fmt.Errorf("projectctl start 执行失败：%w（stderr: %s）", runErr, truncate(stderr.String(), 400)))
+			return reconcile(i18n.E("err.projectctl.run.1", StartCommand, runErr, truncate(errText, 400)))
 		}
-		return reconcile(fmt.Errorf("projectctl start 的输出不是合法 JSON：%w", err))
+		return reconcile(i18n.E("err.projectctl.run.2", StartCommand, err))
 	}
 	if !env.OK {
-		return reconcile(fmt.Errorf("projectctl start 返回失败：%s", truncate(env.Error, 400)))
+		return reconcile(i18n.E("err.projectctl.run.3", StartCommand, truncate(env.Error, 400)))
 	}
 	// 回执说 ok、进程却非零退出：两边对不上就不信，不拿这个 attempt 去派（n042 attempt 1 评审次要项）。
 	if runErr != nil {
-		return reconcile(fmt.Errorf("projectctl start 回执说成功，但进程退出失败：%w（stderr: %s）", runErr, truncate(stderr.String(), 400)))
+		return reconcile(i18n.E("err.projectctl.start.exitbad", runErr, truncate(errText, 400)))
 	}
 	var res StartResult
-	if err := json.Unmarshal(env.Result, &res); err != nil {
-		return reconcile(fmt.Errorf("解析 projectctl start 回执失败：%w", err))
+	if err := i18n.UnmarshalExternal(env.Result, &res); err != nil {
+		return reconcile(i18n.E("err.projectctl.start.badreceipt", err))
 	}
 	if res.Attempt <= 0 || res.NodeID != r.NodeID {
-		return reconcile(fmt.Errorf("projectctl start 回执对不上：节点 %q attempt %d", res.NodeID, res.Attempt))
+		return reconcile(i18n.E("err.projectctl.start.mismatch", res.NodeID, res.Attempt))
 	}
 	return res, nil
 }
@@ -239,14 +248,14 @@ func (c *Client) reconcileStart(ctx context.Context, r StartRequest, before int,
 	defer cancel()
 	after, err := c.VerifyChain(rctx)
 	if err != nil {
-		return StartResult{}, fmt.Errorf("%w；开工后也核对不了账本（%v）：开工结果不明，可能已经开工", cause, err)
+		return StartResult{}, i18n.E("err.projectctl.reconcile.noverify", cause, err)
 	}
 	if after.Events == before {
-		return StartResult{}, &ErrStartNotStarted{fmt.Errorf("%w（账本事件数开工前后都是 %d：确定没开工）", cause, before)}
+		return StartResult{}, &ErrStartNotStarted{i18n.E("err.projectctl.reconcile.notstarted", cause, before)}
 	}
 	p, err := LoadProjection(c.Project)
 	if err == nil && p.States[r.NodeID] == StateRunning && p.Actors[r.NodeID] == r.Actor && p.Attempts[r.NodeID] > 0 {
 		return StartResult{NodeID: r.NodeID, State: string(StateRunning), Attempt: p.Attempts[r.NodeID], Reconciled: true}, nil
 	}
-	return StartResult{}, fmt.Errorf("%w；账本事件数从 %d 变成 %d，但状态投影里对不上这次开工：开工结果不明，可能已经开工", cause, before, after.Events)
+	return StartResult{}, i18n.E("err.projectctl.reconcile.unknown", cause, before, after.Events)
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
 )
@@ -125,7 +126,12 @@ func TestViewMachineOnRealCenter(t *testing.T) {
 	}
 	var notes []string
 	m := viewstate.New(w.center, l, func(id string) (viewstate.Target, bool) { x, ok := targets[id]; return x, ok },
-		func(s string) error { notes = append(notes, s); return nil }, nil)
+		func(n *i18n.Error) error {
+			if n != nil {
+				notes = append(notes, n.Error())
+			}
+			return nil
+		}, nil)
 	state := func() agentdeck.TmuxClient {
 		cl, err := w.center.client()
 		if err != nil {

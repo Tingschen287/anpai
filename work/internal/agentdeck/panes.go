@@ -3,7 +3,7 @@ package agentdeck
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
 	"strconv"
@@ -22,6 +22,7 @@ type TmuxPane struct {
 func ListTmuxPanes(ctx context.Context, socket string) ([]TmuxPane, error) {
 	cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{session_name}")
 	out, err := cmd.Output()
+	out = i18n.NeutralizeBytes(out)
 	if err != nil {
 		if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
 			return nil, nil
@@ -30,7 +31,7 @@ func ListTmuxPanes(ctx context.Context, socket string) ([]TmuxPane, error) {
 		if errors.As(err, &ee) && (strings.Contains(string(ee.Stderr), "no server running") || strings.Contains(string(ee.Stderr), "error connecting")) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("列 tmux 窗格失败（%s）：%w", socket, err)
+		return nil, i18n.E("err.agentdeck.listtmuxpanes.1", socket, err)
 	}
 	var panes []TmuxPane
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

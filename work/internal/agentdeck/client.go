@@ -12,8 +12,8 @@ package agentdeck
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/sessionenv"
 	"io"
 	"net/http"
 	"os"
@@ -108,9 +108,10 @@ func depthOf(first string) int {
 // ErrSubcommandNotAllowed 表示有人想通过本包跑一条清单之外的上游子命令。
 type ErrSubcommandNotAllowed struct{ Subcommand string }
 
-func (e *ErrSubcommandNotAllowed) Error() string {
-	return fmt.Sprintf("拒绝执行上游子命令 %q：不在 agentdeck 包的允许清单内（%s）",
-		e.Subcommand, strings.Join(Subcommands, " / "))
+func (e *ErrSubcommandNotAllowed) Error() string { return e.I18n().Error() }
+
+func (e *ErrSubcommandNotAllowed) I18n() *i18n.Error {
+	return i18n.E("err.agentdeck.errsubcommand", e.Subcommand, strings.Join(Subcommands, " / "))
 }
 
 // Client 持有连上一个 upstream agent-deck 实例所需的全部信息。
@@ -135,12 +136,12 @@ type Client struct {
 // NewClient 构造一个客户端。profile 必须显式给出。
 func NewClient(binary, profile, addr, token string) (*Client, error) {
 	if binary == "" {
-		return nil, fmt.Errorf("必须指定 upstream agent-deck 可执行文件路径")
+		return nil, i18n.E("err.agentdeck.newclient.1")
 	}
 	if profile == "" {
 		// 上游自己的事故记录（2025-12-11）就是测试跑在真实 profile 上，
 		// 一次覆盖掉 36 个生产会话。这里不接受默认值。
-		return nil, fmt.Errorf("必须显式指定 profile：留空会落到上游默认 profile，可能覆盖真实会话")
+		return nil, i18n.E("err.agentdeck.newclient.2")
 	}
 	return &Client{
 		Binary:     binary,
@@ -191,21 +192,26 @@ func (c *Client) execWithStdin(ctx context.Context, stdin io.Reader, sub string,
 	}
 	cmd := exec.CommandContext(ctx, c.Binary, append([]string{sub}, args...)...)
 	cmd.Env = c.env()
+	if sp, ok := SessionPathOf(ctx); ok && sub == "launch" {
+		// 会话的 PATH 就是启动 agent-deck 的进程的 PATH（n060 段 4 实测）：把派工时查 CLI 用的那份交给它，
+		// 会话里实际跑的才是 trust 门记下的那个可执行文件
+		cmd.Env = sessionenv.Env(cmd.Env, sp)
+	}
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// 外部命令的输出是外部原文：伪造的打码标记在这里换掉（返工 4）
 	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("upstream agent-deck %s 执行失败：%w（stderr: %s）",
-			sub, err, truncate(stderr.String(), 400))
+		return i18n.NeutralizeBytes(stdout.Bytes()), i18n.E("err.agentdeck.clientexecwithstdin.1", sub, err, truncate(i18n.Neutralize(stderr.String()), 400))
 	}
-	return stdout.Bytes(), nil
+	return i18n.NeutralizeBytes(stdout.Bytes()), nil
 }
 
 // get 请求 headless 服务的一个 JSON 端点。
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	if c.Addr == "" {
-		return fmt.Errorf("没有配置 upstream agent-deck 的服务地址")
+		return i18n.E("err.agentdeck.clientget.1")
 	}
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -221,13 +227,18 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("请求 upstream agent-deck %s 失败：%w", path, err)
+		return i18n.E("err.agentdeck.clientget.2", path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upstream agent-deck %s 返回 HTTP %d", path, resp.StatusCode)
+		return i18n.E("err.agentdeck.clientget.3", path, resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// 上游的 HTTP 响应是外部原文：先整体读进来换掉伪造的标记再解码（返工 4）
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return i18n.E("err.agentdeck.clientget.2", path, err)
+	}
+	return i18n.DecodeExternal(data, out) // 解码之后再中和：JSON 转义写法的伪造标记只有解码后才出现（段 3）
 }
 
 func truncate(s string, n int) string {

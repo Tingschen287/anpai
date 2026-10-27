@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 )
 
@@ -54,15 +55,15 @@ func (t *Tabs) Hint() string {
 	x, ok := t.Focused()
 	switch {
 	case len(t.Data.View.Open) == 0:
-		return "\x1b[38;5;242m左栏点一个会话打开它\x1b[0m"
+		return "\x1b[38;5;242m" + T("tabs.empty") + "\x1b[0m"
 	case !ok:
 		return ""
 	case t.Data.IsPending(x):
-		return "\x1b[38;5;214m⏸ 交还没完成 · F2 再接管\x1b[0m"
+		return "\x1b[38;5;214m" + T("tabs.pending") + "\x1b[0m"
 	case t.Data.IsTaken(x):
-		return "\x1b[38;5;214m✋ 你在操作 · 离开即交还\x1b[0m"
+		return "\x1b[38;5;214m" + T("tabs.taken") + "\x1b[0m"
 	case x.Role == "sub":
-		return "\x1b[38;5;242m只读 · F2 接管\x1b[0m"
+		return "\x1b[38;5;242m" + T("tabs.readonly") + "\x1b[0m"
 	}
 	return ""
 }
@@ -86,7 +87,7 @@ func (t *Tabs) Render(w int) Frame {
 		x, ok := t.find(id)
 		title, tool := sanitize(id), ""
 		if ok {
-			title, tool = sanitize(x.Title), x.Tool
+			title, tool = sanitize(deckclient.Text(x.TitleCode, []any(x.TitleArgs), x.Title)), x.Tool
 		}
 		mark := ""
 		if ok && t.Data.IsTaken(x) {

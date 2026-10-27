@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,10 +39,10 @@ type ErrAmbiguousTmuxTarget struct {
 	Sockets []string
 }
 
-func (e *ErrAmbiguousTmuxTarget) Error() string {
-	return fmt.Sprintf(
-		"会话 %s 同时存在于 %d 个 tmux server 上（%v），说不清该连哪一个，拒绝直连",
-		e.Session, len(e.Sockets), e.Sockets)
+func (e *ErrAmbiguousTmuxTarget) Error() string { return e.I18n().Error() }
+
+func (e *ErrAmbiguousTmuxTarget) I18n() *i18n.Error {
+	return i18n.E("err.agentdeck.errambiguous", e.Session, len(e.Sockets), e.Sockets)
 }
 
 // tmuxSocketDir 是本用户 tmux socket 的存放目录。
@@ -84,8 +85,8 @@ const (
 type probe struct {
 	socket  string
 	verdict probeVerdict
-	gotID   string // 只在 probeIdentityMismatch 时有意义
-	why     string // 只在 probeUnavailable 时有意义
+	gotID   string      // 只在 probeIdentityMismatch 时有意义
+	why     *i18n.Error // 只在 probeUnavailable 时有意义。Error() 仍是原来的中文
 }
 
 // classifyHasSession 把 `has-session` 的失败分门别类。
@@ -96,10 +97,10 @@ type probe struct {
 func classifyHasSession(socket string, ctxErr error, err error, stderr string) probe {
 	if ctxErr != nil {
 		return probe{socket: socket, verdict: probeUnavailable,
-			why: fmt.Sprintf("探测超时或被取消：%v", ctxErr)}
+			why: i18n.E("err.agentdeck.classifyhassession.1", ctxErr)}
 	}
 	if errors.Is(err, exec.ErrNotFound) {
-		return probe{socket: socket, verdict: probeUnavailable, why: "本机找不到 tmux 可执行文件"}
+		return probe{socket: socket, verdict: probeUnavailable, why: i18n.E("err.agentdeck.classifyhassession.4")}
 	}
 	msg := strings.ToLower(stderr)
 	switch {
@@ -115,10 +116,10 @@ func classifyHasSession(socket string, ctxErr error, err error, stderr string) p
 		// tmux 以非零码退出却什么都没说。它对「没有这个会话」一向是会说话的，
 		// 所以这里不替它断言，只如实记下。
 		return probe{socket: socket, verdict: probeUnavailable,
-			why: fmt.Sprintf("tmux 退出码 %d，没有给出原因", exitErr.ExitCode())}
+			why: i18n.E("err.agentdeck.classifyhassession.2", exitErr.ExitCode())}
 	}
 	return probe{socket: socket, verdict: probeUnavailable,
-		why: fmt.Sprintf("探测失败：%v", err)}
+		why: i18n.E("err.agentdeck.classifyhassession.3", err)}
 }
 
 // instanceIDOf 读一个 tmux 会话里的 AGENTDECK_INSTANCE_ID。
@@ -143,7 +144,7 @@ func instanceIDOf(ctx context.Context, socket, tmuxSession string) (string, bool
 	if err != nil {
 		return "", false
 	}
-	line := strings.TrimSpace(string(out))
+	line := strings.TrimSpace(i18n.Neutralize(string(out)))
 	// 形如 AGENTDECK_INSTANCE_ID=<id>；变量不存在时 tmux 会输出 -AGENTDECK_INSTANCE_ID。
 	_, value, ok := strings.Cut(line, "=")
 	if !ok || strings.HasPrefix(line, "-") {
@@ -165,7 +166,7 @@ func probeSocket(ctx context.Context, socket, tmuxSession, wantInstanceID string
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return classifyHasSession(socket, probeCtx.Err(), err, strings.TrimSpace(stderr.String()))
+		return classifyHasSession(socket, probeCtx.Err(), err, strings.TrimSpace(i18n.Neutralize(stderr.String())))
 	}
 	if wantInstanceID == "" {
 		return probe{socket: socket, verdict: probeMatch}
@@ -191,7 +192,7 @@ func scanSockets(ctx context.Context, tmuxSession, wantInstanceID string) ([]pro
 	dir := tmuxSocketDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("读不到 tmux socket 目录 %s：%w", dir, err)
+		return nil, i18n.E("err.agentdeck.scansockets.1", dir, err)
 	}
 	probes := make([]probe, 0, len(entries))
 	for _, e := range entries {
@@ -218,7 +219,7 @@ func scanSockets(ctx context.Context, tmuxSession, wantInstanceID string) ([]pro
 // 空串沿用本包一贯的「空即默认」约定。
 func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (string, error) {
 	if tmuxSession == "" {
-		return "", fmt.Errorf("没有 tmux 会话名，无从扫描")
+		return "", i18n.E("err.agentdeck.resolvesocketfor.1")
 	}
 	probes, err := scanSockets(ctx, tmuxSession, wantInstanceID)
 	if err != nil {
@@ -266,41 +267,30 @@ func ResolveSocketFor(ctx context.Context, tmuxSession, wantInstanceID string) (
 // 顺序是有讲究的：越具体、越该阻止人做错事的，越先说。
 func noMatchError(tmuxSession, wantInstanceID string, mismatched, unknown, unavailable []probe) error {
 	if len(mismatched) > 0 {
-		var parts []string
+		var parts []any
 		for _, p := range mismatched {
-			parts = append(parts, fmt.Sprintf("%s 上那个的身份是 %s", p.socket, p.gotID))
+			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.1", p.socket, p.gotID))
 		}
-		return fmt.Errorf(
-			"有叫 %s 的 tmux 会话，但身份都不是 %s（%s）——同名的是别人，不能连",
-			tmuxSession, wantInstanceID, strings.Join(parts, "；"))
+		return i18n.E("err.agentdeck.nomatcherror.2", tmuxSession, wantInstanceID, i18n.ListOf("sep.semi", parts...))
 	}
 	if len(unknown) > 0 {
 		var sockets []string
 		for _, p := range unknown {
 			sockets = append(sockets, p.socket)
 		}
-		return fmt.Errorf(
-			"有叫 %s 的 tmux 会话（在 %v 上），但读不到它的 AGENTDECK_INSTANCE_ID，"+
-				"证明不了就是 %s：可能那个 tmux server 没响应，也可能这个会话不是上游建的。"+
-				"宁可不连",
-			tmuxSession, sockets, wantInstanceID)
+		return i18n.E("err.agentdeck.nomatcherror.3", tmuxSession, sockets, wantInstanceID)
 	}
 	if len(unavailable) > 0 {
-		var parts []string
+		var parts []any
 		for _, p := range unavailable {
-			parts = append(parts, fmt.Sprintf("%s（%s）", p.socket, p.why))
+			parts = append(parts, i18n.E("err.agentdeck.nomatcherror.part", p.socket, p.why))
 		}
 		// 注意措辞：**没查出来**，不是「不在」。
 		// 说成「会话已结束」会让人去查一个根本没发生的问题。
-		return fmt.Errorf(
-			"有 %d 个 tmux server 探测失败，查不出会话 %s 在不在：%s。"+
-				"先把探测本身修好再说",
-			len(unavailable), tmuxSession, strings.Join(parts, "；"))
+		return i18n.E("err.agentdeck.nomatcherror.4", len(unavailable), tmuxSession, i18n.ListOf("sep.semi", parts...))
 	}
 	if wantInstanceID != "" {
-		return fmt.Errorf(
-			"socket 目录下没有任何 tmux server 上有会话 %s 且身份对得上 %s：它可能已经结束了",
-			tmuxSession, wantInstanceID)
+		return i18n.E("err.agentdeck.nomatcherror.5", tmuxSession, wantInstanceID)
 	}
-	return fmt.Errorf("socket 目录下没有任何 tmux server 上有会话 %s，它可能已经结束了", tmuxSession)
+	return i18n.E("err.agentdeck.nomatcherror.6", tmuxSession)
 }

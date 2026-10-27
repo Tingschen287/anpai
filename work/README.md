@@ -163,14 +163,16 @@ deck reports deliver-now [--project <id>]
 
 ## F9 设置（n057、n059）
 
-布局里按 F9 在布局 server 的新窗口里打开设置（`deck settings`），三页，`1` `2` `3` 或 `Tab` 换页，`q` 或 `Esc` 关闭：
+布局里按 F9 在布局 server 的新窗口里打开设置（`deck settings`），四页，`1` `2` `3` `4` 或 `Tab` 换页，`q` 或 `Esc` 关闭：
 
 - **项目**：每个项目勾选用哪些 agent（空格）、主 agent（空格轮换）、三档各一个有顺序的模型清单（`⏎` 打开多选，`[` `]` 调顺序）；`←→` 换项目；`n` 选目录新建项目（从 `deck up` 所在的目录开始）。
 - **全局 agent**：全局可用的 agent（`a` 从本机装了的 CLI 里加入，`⏎` 打开改模型与档位、移出）。
 - **授权**：撤销记住的 Codex 授权（`d`，再按一次确认）。
+- **通用**：界面语言（中文 / English，空格或 `⏎` 切换，存上就立刻换，不用重启）。
 
 `R` 重新读取。改动自动保存，对之后起的会话生效，已在跑的会话不变；存不上时 `s` 重试。档位在界面里叫最强、日常、便宜，
 文件、命令行 `--tier` 与 deckd 接口仍用 `frontier`、`balanced`、`economy`。
+界面语言在「通用」页切换（中文 / English）；全新安装第一次运行跟随系统语言（`LC_ALL`、`LC_MESSAGES`、`LANG` 里第一个非空值以 `zh` 开头用中文，`C`、`POSIX`、`C.UTF-8` 用英文），并把它写进 `agents.yaml` 的 `ui_lang`；升级的老用户（`agents.yaml` 已存在、没有 `ui_lang`）保持中文，文件不改。升级二进制后要先关掉布局再重新 `deck up`：旧的 deckd 不认 `ui_lang`，语言切换要等新 deckd 起来才生效。
 
 ### 配置文件
 
@@ -185,11 +187,32 @@ deck reports deliver-now [--project <id>]
   只说档位派活时按顺序取第一个额度没显示用尽的（看板确知用尽才跳过，未知照常用）；frontier 全都用尽时照用第一个、交给额度门上报 owner，其他档位说明原因、不派。
   点名某个模型时不看清单：勾选的 agent 的模型都能点名用。主 agent 用它那一档清单里它自己的第一个模型。`deck agent` 起子 agent 前问 deckd（`GET /v1/resolve`）这一档现在会派哪个。
 - 模型 id 只能是字母数字和 `. _ / : @ + -`（它会进 CLI 的命令行），保存时与派工时都查。
-- 默认 `agents.yaml` 含 claude、codex、grok、antigravity（`agy`）、opencode、kimi 六项。设置里「加入」认识的 CLI 是 claude、codex、opencode、grok、`agy`、gemini
-  （kimi 不在里面：它的模型参数没核实过，上游也不接受自定义工具的 `--model`）。加模型时 grok、agy、opencode 会跑一次它们自己的 `models` 列出候选（20 秒为限），claude、codex、gemini 没有列模型的命令，手填。
+- 默认 `agents.yaml`（只有这个文件不存在时才生成，已有的设置文件一个字节都不改）含 claude、codex、grok、antigravity（`agy`）、opencode、kimi 六项；
+  codex 的默认三档是 `gpt-6-astra`（最强）、`gpt-6.1-sol`（日常）、`gpt-6-luna`（便宜），kimi 是 `kimi-code/k3`（日常）与 `kimi-for-coding`（便宜）。
+  设置里「加入」认识的 CLI 是 claude、codex、opencode、grok、`agy`、kimi、gemini。加模型时 codex 会跑一次 `codex debug models` 列出候选（只列 `visibility` 为 `list` 的），
+  grok、agy、opencode 会跑一次它们自己的 `models`（都是 20 秒为限；列不出来就退回手填并说明原因），claude、kimi、gemini 没有列模型的命令，手填。
   命令（binary）、agent 标记、启动额外参数不在界面里改，只显示；要改手改 `agents.yaml`。
-- **grok、Antigravity** 不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），
-  只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。
+- **找 CLI 用的 PATH（会话 PATH）**：agent-deck 起的会话用的是启动它的进程（deckd）的 PATH，不读 rc 文件、也不读 tmux server 的环境。
+  `deck daemon` 因此在**启动时后台读一次**登录交互 shell 的 PATH（`$SHELL -l -i -c`，5 秒超时，结束时清理探针原进程组里的后台进程，rc 里的杂音不会被当成结果），
+  与自己进程的 PATH 合并（登录 shell 里 deckd 没有的目录加在最前面，deckd 自己的目录保持原来的顺序跟在后面），得到一份快照。
+  设置里显示的「已装」「路径」「版本」、Codex trust 门查的可执行文件与版本、列模型都按这份快照查，起会话时也把这份 PATH 交给 `agent-deck launch`。
+  「能不能执行」按当前进程的有效身份判断（与 Go 的 `exec.LookPath`、shell 的查找一致，unix 上走 `faccessat(X_OK)`），不是「任意一类用户有执行位」：
+  文件被改成 `0645`（属主不能执行、其他人能）时它不算找到，设置里的「已装」、trust 门、启动前的绑定核对都会跳过它，三处用的是同一个判断。
+  - **什么时候会运行你的登录启动文件（rc）：只有两个时机。** ① deckd 启动时后台读一次；② 你在 F9 的加入页或 agent 页按 **p**（「刷新会话 PATH」）。
+    其余一律不运行：打开设置窗口、进加入页和 agent 页、派工、列模型，用的都是当前快照；快照不会过期、不会自己重读（以前的「成功 5 分钟、失败 30 秒、设置里 10 秒」过期重读已去掉）。
+    装了新 CLI 或改了 PATH 之后，在这两页按一次 p 即可；页面上有一行说明这个键会运行登录启动文件。
+  - **按 p 之后：** 在后台重读一次（界面照常可用，读的时候继续显示旧结果并说「正在刷新」），读完更新已装与版本。读的过程中再按（同一窗口连按、几个窗口同时按）合并为同一次，一次只允许一个读在跑。
+    刷新失败时保留上一份好快照，页面显示失败原因；deckd 启动时读失败则退回 deckd 自己的 PATH，两页上橙色一行写明原因，并提示按 p 重试。
+  - **会不会因此卡住派工：** 不会。读在 deckd 自己的后台 goroutine 里，派工、列模型、显示只读当前快照，不等正在跑的读；一次派工取一份快照，trust 门与 launch 用同一份。
+    **最坏等待**只有 deckd 刚启动、第一次读还没完成时有人用快照：等这一次，上限 5 秒探针超时加 0.5 秒收拾，约 5.5 秒；之后任何时候都不等。
+  - **trust 门核准的文件就是启动的文件：** launch 只带工具名，上游按名字在交给它的 PATH 里再找一次，所以「PATH 字符串相同」并不保证找到同一个文件。
+    Codex 授权通过后，deckd 把**核准文件所在的目录放到交给上游的 PATH 最前面**（其余目录顺序不变），并在启动前核对：按这份 PATH 找到的必须就是核准的那个文件，不是就拒绝启动。
+    这样核准之后、启动之前，更靠前的目录里新装的同名文件顶替不了它。副作用：该目录里的其他命令在这一次启动的会话里也排到前面。
+    **只绑定路径**：核准的那个路径上的文件被替换（内容换了、符号链接被改指别处）是既有的信任边界——授权一直以（项目、工具、目录、路径、版本）为界，不核对文件内容，这里不管。
+  - **能力边界：** 探针清理的是原进程组；rc 里自己 `setsid`、双 fork 脱离进程组的后代清不掉，不承诺清掉整棵派生树。
+  不改你的 shell 配置；rc 里要避开 deck 的解析，可以判断环境变量 `ANPAI_PATH_PROBE`。
+- **grok、Antigravity、Kimi Code** 不是 agent-deck 内置工具，要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`）、`[tools.kimi]`（`command = "kimi"`），
+  只写 `command`（可加 `icon`），不写 `dangerous_mode`、`wrapper`、`compatible_with`。模型经 `-c "<工具> --model <模型>"` 传给 CLI（上游 `launch` 不接受自定义工具的 `--model`）。
 - **升级前自查**：项目 `path` 要求规整的绝对路径、不超过 300 字节、不含换行与制表符等控制字符。旧配置不满足时 deckd 启动失败并说明原因；先跑 `deck settings -check`。
 
 ## 与 upstream agent-deck 的对接

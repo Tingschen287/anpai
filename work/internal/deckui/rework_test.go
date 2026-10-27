@@ -79,7 +79,7 @@ func TestSingleLineFieldsDropNewlinesAndTabs(t *testing.T) {
 	m.set.Agents[0].Name = "Claude\nCode"
 	m.set.Projects[0].Name = "Agent\tDeck"
 	m.trust[0].Dir = "/tmp/a\nb"
-	m.msg = "出错\n第二行"
+	m.msg = lit("出错\n第二行")
 	if v := m.View(); strings.Contains(v, "Claude\nCode") || strings.Contains(v, "Agent\tDeck") || strings.Contains(v, "a\nb") || strings.Contains(v, "出错\n") {
 		t.Fatalf("设置界面的单行字段带换行或制表符：\n%s", v)
 	}
@@ -142,8 +142,8 @@ func TestConflictStopsAutosaveUntilReload(t *testing.T) {
 		t.Fatal("冲突后不再自动保存（会盖掉别处的改动）")
 	}
 	press(m, "R")
-	if !strings.Contains(m.msg, "再按一次 R") {
-		t.Fatalf("有没存上的改动时 R 要确认：%q", m.msg)
+	if !strings.Contains(m.msg.String(), "再按一次 R") {
+		t.Fatalf("有没存上的改动时 R 要确认：%q", m.msg.String())
 	}
 	press(m, "R")
 	if m.conflict || m.dirty || picked(m.project(), "codex") {

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 状态投影落后账本多久就不能再信。
@@ -73,7 +75,7 @@ func (r *Reader) loadCache(events int) {
 		return
 	}
 	var f cacheFile
-	if err := json.Unmarshal(data, &f); err != nil {
+	if err := i18n.UnmarshalExternal(data, &f); err != nil {
 		return
 	}
 	// 缓存是按项目存的，换了项目就不能用。
@@ -198,7 +200,7 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 
 	graph, err := LoadGraph(r.root)
 	if err != nil {
-		snap.Problems = append(snap.Problems, err.Error())
+		snap.problem(err)
 		snap.GraphRevision = Unknown[int]("读不到 work-graph.yaml")
 		snap.Health = Unknown[string]("读不到 work-graph.yaml")
 		return snap
@@ -208,7 +210,7 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 
 	chain, err := r.client.VerifyChain(ctx)
 	if err != nil {
-		snap.Problems = append(snap.Problems, "账本体检失败："+err.Error())
+		snap.problem(i18n.E("err.projectctl.snapshot.chainfail", err))
 		chain.LastEventAt = Unknown[time.Time]("verify-chain 执行失败")
 		chain.LagDays = Unknown[float64]("verify-chain 执行失败")
 	}
@@ -219,12 +221,12 @@ func (r *Reader) snapshot(ctx context.Context, probe bool) Snapshot {
 
 	proj, err := LoadProjection(r.root)
 	if err != nil {
-		snap.Problems = append(snap.Problems, err.Error())
+		snap.problem(err)
 	}
 	snap.Health = proj.Health
 	snap.Fresh = freshness(proj, chain)
 
-	snap.Nodes = r.nodes(ctx, graph, proj, snap.Fresh, probe, &snap.Problems)
+	snap.Nodes = r.nodes(ctx, graph, proj, snap.Fresh, probe, &snap)
 	snap.Budgets = budgets(graph, proj, snap.Fresh)
 	if probe {
 		// 问过一轮就把终态记到盘上，下次开就不用再问了。
@@ -263,7 +265,7 @@ func freshness(p Projection, chain ChainStatus) Freshness {
 //
 // 状态按三步取，一步比一步贵：投影里写明的直接用，记住的终态直接用，
 // 剩下的才去问控制器。probe 为 false 时最后一步不做，那些节点标成「查询中」。
-func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, probe bool, problems *[]string) []Node {
+func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, probe bool, snap *Snapshot) []Node {
 	out := make([]Node, len(g.Nodes))
 	now := time.Now()
 	var mu sync.Mutex
@@ -344,7 +346,7 @@ func (r *Reader) nodes(ctx context.Context, g Graph, p Projection, f Freshness, 
 			defer mu.Unlock()
 			if err != nil {
 				out[idx].State = Unknown[State]("取不到状态：" + err.Error())
-				*problems = append(*problems, fmt.Sprintf("节点 %s 状态取不到：%v", id, err))
+				snap.problem(i18n.E("err.projectctl.snapshot.nodefail", id, err))
 				return
 			}
 			out[idx].State = Known(state)
@@ -381,13 +383,13 @@ func budgets(g Graph, p Projection, f Freshness) []BudgetLine {
 	}
 
 	return []BudgetLine{
-		{Label: "worker rounds", Used: used("worker_rounds"), Limit: limit(pb.MaxWorkerRounds), Unit: "轮"},
-		{Label: "frontier calls", Used: used("frontier_calls"), Limit: limit(pb.MaxFrontierCalls), Unit: "次"},
+		{Label: "worker rounds", Used: used("worker_rounds"), Limit: limit(pb.MaxWorkerRounds), Unit: "轮", UnitKey: "round"},
+		{Label: "frontier calls", Used: used("frontier_calls"), Limit: limit(pb.MaxFrontierCalls), Unit: "次", UnitKey: "call"},
 		{
 			Label: "elapsed",
 			Used:  Unknown[float64]("projectctl 不导出 elapsed 已用量，编一个数出来是推测值"),
 			Limit: limit(pb.MaxElapsedHours),
-			Unit:  "小时",
+			Unit:  "小时", UnitKey: "hour",
 		},
 		{Label: "tokens", Used: used("tokens"), Limit: limit(pb.SoftTokenBudget), Unit: ""},
 	}

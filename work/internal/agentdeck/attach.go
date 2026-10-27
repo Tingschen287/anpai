@@ -2,7 +2,7 @@ package agentdeck
 
 import (
 	"context"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os/exec"
 	"strings"
 )
@@ -37,7 +37,7 @@ func interactiveCommand(name string, args ...string) *exec.Cmd {
 // 这里不用它，是因为没必要，不是因为取不到。）
 func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("没有会话号，无法进入")
+		return nil, i18n.E("err.agentdeck.clientattachcommand.1")
 	}
 	if !isAllowedSubcommand("session", "attach") {
 		return nil, &ErrSubcommandNotAllowed{Subcommand: "session attach"}
@@ -70,7 +70,7 @@ func (c *Client) AttachCommand(ctx context.Context, sessionID string) (*exec.Cmd
 // 拼进 shell 就等于让它决定要跑什么。
 func (c *Client) DirectTmuxAttachCommand(ctx context.Context, tmuxSession, socketName string) (*exec.Cmd, error) {
 	if tmuxSession == "" {
-		return nil, fmt.Errorf("上游没有给出 tmux 会话名，无法直连")
+		return nil, i18n.E("err.agentdeck.clientdirecttmuxattachcommand.1")
 	}
 	args := []string{}
 	if socketName != "" {
@@ -101,7 +101,7 @@ func (m MenuEvent) TmuxTargetOf(sessionID string) (session, socket string, ok bo
 // 不发按键，不改会话状态。
 func (c *Client) PaneOutput(ctx context.Context, sessionID string) (string, error) {
 	if sessionID == "" {
-		return "", fmt.Errorf("没有会话号，无法预览")
+		return "", i18n.E("err.agentdeck.clientpaneoutput.1")
 	}
 	out, err := c.exec(ctx, "session", "output", sessionID, "-pane")
 	if err != nil {
@@ -158,13 +158,12 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 	return stripANSI(raw), nil
 }
 
-
 // DirectAttachCommand 造一条直连会话所在 tmux 的命令，界面上对应按 T。
 //
 // 两处取数，顺序有讲究：
 //
-//	1. `GET /api/menu`——它同时给 tmux 会话名和 socket 名，是最准的一份。
-//	2. 菜单里没有这个会话时，退到 CLI `list --json`。
+//  1. `GET /api/menu`——它同时给 tmux 会话名和 socket 名，是最准的一份。
+//  2. 菜单里没有这个会话时，退到 CLI `list --json`。
 //
 // 第 2 步不是可有可无的保险，它正是这条路存在的理由。上游 headless 服务对
 // 菜单快照做内存缓存，只在服务自己的写接口或 hook 状态文件 watcher 触发时失效；
@@ -187,7 +186,7 @@ func (c *Client) PaneOutputPlain(ctx context.Context, sessionID string) (string,
 // 实测两条来源的差异：TestIntegrationListSeesWhatTheCachedMenuCannot。
 func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*exec.Cmd, string, error) {
 	if sessionID == "" {
-		return nil, "", fmt.Errorf("没有会话号，无法直连")
+		return nil, "", i18n.E("err.agentdeck.clientdirectattachcommand.1")
 	}
 
 	// 先问菜单。拿得到就用它，socket 名也在里面。
@@ -203,13 +202,13 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	listed, listErr := c.ListSessions(ctx)
 	if listErr != nil {
 		if menuErr != nil {
-			return nil, "", fmt.Errorf("菜单读不到（%v），list 也读不到：%w", menuErr, listErr)
+			return nil, "", i18n.E("err.agentdeck.clientdirectattachcommand.2", menuErr, listErr)
 		}
-		return nil, "", fmt.Errorf("菜单里没有会话 %s，list 也读不到：%w", sessionID, listErr)
+		return nil, "", i18n.E("err.agentdeck.clientdirectattachcommand.3", sessionID, listErr)
 	}
 	tmuxSession, ok := TmuxSessionOf(listed, sessionID)
 	if !ok {
-		return nil, "", fmt.Errorf("菜单和 list 里都没有会话 %s 的 tmux 会话名，无法直连", sessionID)
+		return nil, "", i18n.E("err.agentdeck.clientdirectattachcommand.4", sessionID)
 	}
 
 	// list 给得出会话名，给不出 socket 名。**不能就这么连。**
@@ -223,20 +222,15 @@ func (c *Client) DirectAttachCommand(ctx context.Context, sessionID string) (*ex
 	// 身份一并传下去：会话名只当查找键，认不认这个会话由 AGENTDECK_INSTANCE_ID 说了算。
 	socketName, err := ResolveSocketFor(ctx, tmuxSession, sessionID)
 	if err != nil {
-		return nil, "", fmt.Errorf(
-			"菜单里没有这个会话（多半是服务的菜单缓存），list 给出了 tmux 会话名 %s，"+
-				"但拿不到 socket 名，扫描也证明不了目标就是它：%w。"+
-				"重启一下上游 headless 服务让菜单刷新，再按 T 就能拿到 socket 名",
-			tmuxSession, err)
+		return nil, "", i18n.E("err.agentdeck.clientdirectattachcommand.5", tmuxSession, err)
 	}
 
 	cmd, err := c.DirectTmuxAttachCommand(ctx, tmuxSession, socketName)
-	where := "默认 tmux server"
+	// 「默认 server」是本地写的句子，留成码交给嵌套，不先 .Error() 压成中文再当参数。
+	var where any = i18n.E("err.agentdeck.clientdirectattachcommand.7")
 	if socketName != "" {
 		where = "socket " + socketName
 	}
-	note := fmt.Sprintf(
-		"菜单里没有这个会话，多半是上游服务的菜单缓存；已改从 list 取 tmux 会话名，"+
-			"并扫描本用户 tmux socket 目录下的 server，按会话身份确认目标只在一处，连的是 %s。", where)
+	note := i18n.E("err.agentdeck.clientdirectattachcommand.6", where).Error()
 	return cmd, note, err
 }

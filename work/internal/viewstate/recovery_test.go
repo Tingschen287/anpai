@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/lease"
 )
 
@@ -80,7 +81,7 @@ func TestRestartRestoresTakenSessionsAndRetryHandsBack(t *testing.T) {
 	w := newWorld(t)
 	w.m.Open("subA")
 	w.m.Takeover("subA")
-	w.m = New(w.c, w.l, w.m.lookup, func(string) error { return nil }, nil)
+	w.m = New(w.c, w.l, w.m.lookup, func(*i18n.Error) error { return nil }, nil)
 	if st := w.m.State(); !pending(st, "subA") {
 		t.Fatalf("重启后应恢复为等待交还：%+v", st)
 	}
@@ -99,7 +100,7 @@ func TestStoppedDuringHandbackDoesNotOpenMainInput(t *testing.T) {
 	w := newWorld(t)
 	w.m.Open("subA")
 	w.m.Takeover("subA")
-	w.m.notify = func(string) error { w.stopErr = errors.New("持久化失败"); return w.stopErr }
+	w.m.notify = func(*i18n.Error) error { w.stopErr = errors.New("持久化失败"); return w.stopErr }
 	err := w.m.Open("main")
 	if err == nil || isHandback(err) {
 		t.Fatalf("存储停了应直接拒绝：%v", err)
@@ -243,7 +244,7 @@ func TestRetakeEndsTheRestoredWaiver(t *testing.T) {
 	w := newWorld(t)
 	w.m.Open("subA")
 	w.m.Takeover("subA")
-	w.m = New(w.c, w.l, w.m.lookup, func(string) error { return nil }, nil)
+	w.m = New(w.c, w.l, w.m.lookup, func(*i18n.Error) error { return nil }, nil)
 	w.m.Open("subA")
 	if err := w.m.Takeover("subA"); err != nil {
 		t.Fatal(err)

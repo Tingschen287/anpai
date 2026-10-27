@@ -6,7 +6,7 @@
 用 tmux 拼出一个四区布局（左侧按项目列会话的侧栏、中间是 agent 自己的原生 CLI、右侧决策与额度面板、下方通知），
 由后台服务 `deckd` 记账。每个项目有一个主 agent，它按你设好的档位（最强、日常、便宜）把活派给子 agent；
 超出预算要先建一个决定、等你批准；配置、推送、分歧这类事主 agent 也用 `deck agent escalate` 上报。
-这些都排进右侧的「需要你决策」面板等你拍板。agent 与模型在 F9 设置里管。
+这些都排进右侧的「需要你决策」面板等你拍板。agent 与模型在 F9 设置里管；设置的「通用」页可切换界面语言（中文 / English）；全新安装第一次运行跟随系统语言，升级的老用户保持中文。升级二进制后要先关掉布局再重新 `deck up`：旧的 deckd 不认 `ui_lang`，语言切换要等新 deckd 起来才生效。
 
 命令是 `deck`（Go 写的，在 [`work/`](work/)）；后台服务 `deckd` 不是单独的可执行文件，是 `deck daemon` 子命令，平时由 `deck up` 替你起。仓库里还留着两个早先的 Python 启动器 `ai` 与 `host`，
 见本文最后的「旧启动器」一节。
@@ -27,7 +27,7 @@
 | Linux 内核 6.5 或更新 | `deckd` 用 `SO_PEERPIDFD` 绑定调用者的进程。内核不支持时 `deckd` 不给任何调用者身份：未知调用者只能读健康状态、`whoami` 与额度，侧栏、设置、决策与通知面板都会被拒，布局基本用不了（不是只读模式）。用 `uname -r` 看内核版本；较新的 WSL 2 内核通常已经满足 |
 | tmux | 开发与实测用 3.4；代码里没有版本检查 |
 | upstream agent-deck | 命令名 `agent-deck`，要在 `PATH` 里（或用环境变量 `WORKDECK_AGENTDECK_BIN` 指路）。对接并逐条核对过的是 v1.15.0（提交 `01c011b`），按上游项目自己的说明安装 |
-| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`gemini`；在 F9 设置里按本机装了的加入。`grok` 与 `agy` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`），写法见 [`work/README.md`](work/README.md) |
+| 至少一个 agent CLI | `claude`、`codex`、`opencode`、`grok`、`agy`（Antigravity）、`kimi`（Kimi Code）、`gemini`；在 F9 设置里按本机装了的加入。`grok`、`agy`、`kimi` 不是 agent-deck 的内置工具，除了装好 CLI，还要在 agent-deck 的 `config.toml` 里登记 `[tools.grok]`（`command = "grok"`）、`[tools.antigravity]`（`command = "agy"`）、`[tools.kimi]`（`command = "kimi"`），写法见 [`work/README.md`](work/README.md)。deck 找这些 CLI 用的 PATH 与交给 agent-deck 起会话的是同一份起点（deckd 启动时读一次登录 shell 的 PATH，登录 shell 里 deckd 没有的目录加在最前面，deckd 自己的 PATH 顺序不变），所以装在 `~/.kimi-code/bin`、`~/.local/bin` 这类只有登录 shell 才有的目录里也认得到。登录启动文件（rc）只在 deckd 启动时运行一次，之后只有你在 F9 的加入页或 agent 页按 `p` 才会再运行（装了新 CLI、改了 PATH 后按一次），打开设置、派工、列模型都不会运行；细节见 [`work/README.md`](work/README.md) |
 
 deck 起会话前会检查 upstream agent-deck 的 `config.toml`（`$XDG_CONFIG_HOME/agent-deck/config.toml`，
 没设 `XDG_CONFIG_HOME` 就是 `~/.config/agent-deck/config.toml`；没有时回退 `~/.agent-deck/config.toml`），

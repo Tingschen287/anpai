@@ -6,17 +6,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Client 经 unix socket 调 deckd。
 type Client struct {
 	hc *http.Client
 	tr http.RoundTripper
+	// neutral 为真：请求带 i18n.MarkHeader，deckd 在线路上留着中性打码标记，界面按当前语言翻译。
+	neutral bool
+	// follow 为真：deckd 每个响应带的 i18n.LangHeader 就是本进程的界面语言，收到就 SetLang（n060 段 3，见 FollowLang）。
+	follow bool
 	// Socket 是 deckd 的 unix socket 路径（deck center 的栅栏据此找到同目录的单实例锁）。
 	Socket string
 }
@@ -29,6 +34,35 @@ func New(socket string) *Client {
 	return &Client{hc: &http.Client{Transport: tr, Timeout: DefaultTimeout}, tr: tr, Socket: socket}
 }
 
+// NewUI 建给界面用的客户端。界面会把线路上的中性打码标记按当前语言翻成「[已打码]」或「[redacted]」，
+// 所以请求带上 i18n.MarkHeader。deck agent 命令、模型、其他工具用 New：deckd 给它们的永远是中文「[已打码]」。
+func NewUI(socket string) *Client {
+	c := New(socket)
+	c.neutral = true
+	return c
+}
+
+// FollowLang 返回一个跟随 deckd 界面语言的副本（同一个 socket 与连接池）：每个响应（包括出错的）带的 i18n.LangHeader
+// 是 zh 或 en 就 SetLang。界面进程（侧栏、标签条、面板、设置、中间窗格、空闲页）用它，所以 owner 在设置里改了语言之后，
+// 各进程在下一次向 deckd 取数时就换过去，不用重启。只给界面进程用：deck agent 命令、模型用的客户端不跟，永远是中文。
+func (c *Client) FollowLang() *Client {
+	cp := *c
+	cp.follow = true
+	return &cp
+}
+
+// SyncLang 向 deckd 问一次界面语言并采用（界面进程启动时用，不必等第一个业务请求）。返回采用后的语言。
+// 连不上返回错误，语言不变。
+func (c *Client) SyncLang(ctx context.Context) (string, error) {
+	var out struct {
+		Lang string `json:"lang"`
+	}
+	if err := c.FollowLang().Get(ctx, "/v1/lang", &out); err != nil {
+		return i18n.Lang(), err
+	}
+	return i18n.Lang(), nil
+}
+
 // DefaultTimeout 是一般请求等 deckd 答复的上限。
 const DefaultTimeout = 30 * time.Second
 
@@ -37,16 +71,19 @@ const LongTimeout = 5 * time.Minute
 
 // WithTimeout 返回一个等答复上限为 d 的副本（同一个 socket 与连接池）。
 func (c *Client) WithTimeout(d time.Duration) *Client {
-	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket}
+	return &Client{hc: &http.Client{Transport: c.tr, Timeout: d}, tr: c.tr, Socket: c.Socket, neutral: c.neutral, follow: c.follow}
 }
 
 // Error 是 deckd 返回的错误。
+// Code 和 Args 是给界面翻译用的。旧客户端只读 Message。
 type Error struct {
 	Status  int
 	Message string
+	Code    string
+	Args    []any
 }
 
-func (e *Error) Error() string { return fmt.Sprintf("deckd %d：%s", e.Status, e.Message) }
+func (e *Error) Error() string { return i18n.E("err.deckclient.status", e.Status, e.Message).Error() }
 
 // Do 发一个请求，把 JSON 结果解到 out（可为 nil）。
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
@@ -65,6 +102,10 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if c.neutral {
+		req.Header.Set(i18n.MarkHeader, i18n.MarkNeutral)
+	}
+	seq := i18n.LangSeq() // 发出前的语言代次：回来时变了，响应头里的语言是更早的状态（见下）
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		var ne net.Error
@@ -72,24 +113,40 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		dial := errors.As(err, &op) && op.Op == "dial"
 		if !dial && (errors.As(err, &ne) && ne.Timeout() || errors.Is(err, context.DeadlineExceeded)) {
 			// 已经连上、只是等答复超时：操作可能还在 deckd 里进行，不能当成没发生
-			return fmt.Errorf("deckd 在 %s 内没有答复（%w）：操作可能仍在进行，先用 deck agent list 核对，不要直接重试", c.hc.Timeout, err)
+			return i18n.E("err.deckclient.timeout", c.hc.Timeout, err)
 		}
-		return fmt.Errorf("连不上 deckd（%w）：先运行 deck daemon", err)
+		return i18n.E("err.deckclient.dial", err)
 	}
 	defer resp.Body.Close()
+	if c.follow {
+		// 采用 deckd 的界面语言——但只在发出这个请求之后本进程没有换过语言时才采用（返工 2，M2）：
+		// 慢请求（取工具版本、起 agent）可能在 owner 刚存上新语言之前就被 deckd 处理了，它的语言头是那一刻的旧语言，
+		// 回来时不能把已经生效的新语言改回去。没采用的不要紧：下一次请求或设置进程的定时对时（Settings 每 2 秒）会对上。
+		// 「代次没变」和「设置新语言」是同一次条件更新（i18n.SetLangIf，同一把锁），两步之间别的 goroutine 换了语言也不会被改回去
+		i18n.SetLangIf(resp.Header.Get(i18n.LangHeader), seq)
+	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 300 {
 		var e struct {
 			Error string `json:"error"`
+			Code  string `json:"code"`
+			Args  []any  `json:"args"`
 		}
-		json.Unmarshal(data, &e)
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		_ = dec.Decode(&e)
 		if e.Error == "" {
 			e.Error = string(data)
 		}
-		return &Error{Status: resp.StatusCode, Message: e.Error}
+		return &Error{Status: resp.StatusCode, Message: e.Error, Code: e.Code, Args: e.Args}
 	}
 	if out != nil {
-		return json.Unmarshal(data, out)
+		// UseNumber 会把这段 JSON 里所有 interface{} 数字解成 json.Number，不单是错误参数。
+		// 有具体类型的字段（int、int64）仍按字段类型解，不受影响。
+		// 这样 args 再按 %d 打印时仍是整数，也不会丢过 2^53 的精度。
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		return dec.Decode(out)
 	}
 	return nil
 }

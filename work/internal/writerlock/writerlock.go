@@ -8,12 +8,13 @@ package writerlock
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // Holder 是锁文件里记下的持有者，给取不到锁的一方说明是谁占着。
@@ -36,12 +37,15 @@ type ErrHeld struct {
 	By      *Holder // 读不出来时为 nil
 }
 
-func (e *ErrHeld) Error() string {
-	who := "另一个进程"
+func (e *ErrHeld) Error() string { return e.I18n().Error() }
+
+// I18n 给英文界面用。持有者是嵌套码，中文 Error() 和以前逐字一样。
+func (e *ErrHeld) I18n() *i18n.Error {
+	who := i18n.E("err.writerlock.whounknown")
 	if e.By != nil {
-		who = fmt.Sprintf("%s（pid %d，%s 起）", e.By.Program, e.By.PID, e.By.Since.Format("2006-01-02 15:04"))
+		who = i18n.E("err.writerlock.who", e.By.Program, e.By.PID, e.By.Since.Format("2006-01-02 15:04"))
 	}
-	return fmt.Sprintf("agent-deck profile %q 的写入者是 %s：同一个 profile 只许一个写入者，本进程只读、不派工（锁 %s）", e.Profile, who, e.Path)
+	return i18n.E("err.writerlock.held", e.Profile, who, e.Path)
 }
 
 var safeProfile = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -62,7 +66,7 @@ func Dir() (string, error) {
 // Acquire 为 profile 取写入者锁，不阻塞。program 是写进锁文件的程序名（deckd 或 work）。
 func Acquire(profile, program string) (*Lock, error) {
 	if !safeProfile.MatchString(profile) {
-		return nil, fmt.Errorf("profile 名 %q 不能用作锁文件名", profile)
+		return nil, i18n.E("err.writerlock.badprofile", profile)
 	}
 	dir, err := Dir()
 	if err != nil {
@@ -74,7 +78,7 @@ func Acquire(profile, program string) (*Lock, error) {
 	path := filepath.Join(dir, profile+".lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("打不开写入者锁 %s：%w", path, err)
+		return nil, i18n.E("err.writerlock.open", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()

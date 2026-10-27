@@ -2,8 +2,7 @@ package agentdeck
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
 )
 
@@ -45,8 +44,8 @@ func (c *Client) ListSessions(ctx context.Context) ([]ListedSession, error) {
 		return nil, nil
 	}
 	var sessions []ListedSession
-	if err := json.Unmarshal(out, &sessions); err != nil {
-		return nil, fmt.Errorf("解析 list --json 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(out, &sessions); err != nil {
+		return nil, i18n.E("err.agentdeck.clientlistsessions.1", err)
 	}
 	return sessions, nil
 }

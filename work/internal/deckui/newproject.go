@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 设置界面里新建项目（n055）：按 n 打开目录浏览，从 deck up 所在的目录开始；选好目录后确认项目 id（按目录名生成，可改），
@@ -23,9 +24,9 @@ type projectForm struct {
 	subdirs []string // dir 下的子目录（不含隐藏目录）
 	cur     int      // 0 是「用这个目录」，其余是 subdirs[cur-1]
 	scroll  int
-	chosen  string // 选好的目录；空表示还在浏览
-	id      string // 项目 id（可改）
-	err     string
+	chosen  string   // 选好的目录；空表示还在浏览
+	id      string   // 项目 id（可改）
+	err     lazyText // 表单底部的报错：存怎么取文字（返工 2，M1）
 }
 
 func newProjectForm(start string) *projectForm {
@@ -39,7 +40,8 @@ func (f *projectForm) enter(dir string) {
 	dir = filepath.Clean(dir)
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		f.err = T("form.cantread", dir, errLong(err))
+		shown := i18n.Neutralize(dir) // 目录名是外部文字：显示用的副本先中和（段 3 返工 3，R2-1）；读目录仍用原 dir
+		f.err = later(func() string { return T("form.cantread", shown, errLong(err)) })
 		if f.dir == "" { // 起点就读不了：从家目录开始
 			if home, herr := os.UserHomeDir(); herr == nil && home != dir {
 				f.enter(home)
@@ -63,7 +65,7 @@ func (f *projectForm) enter(dir string) {
 		}
 	}
 	sort.Slice(subs, func(i, j int) bool { return strings.ToLower(subs[i]) < strings.ToLower(subs[j]) }) // 不分大小写
-	f.dir, f.subdirs, f.cur, f.scroll, f.err = dir, subs, 0, 0, ""
+	f.dir, f.subdirs, f.cur, f.scroll, f.err = dir, subs, 0, 0, nil
 }
 
 var idUnsafe = regexp.MustCompile(`[^a-z0-9_-]+`)
@@ -138,7 +140,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 	if f.chosen == "" { // 浏览目录
 		switch k {
 		case "esc", "q", "ctrl+c":
-			m.form, m.msg = nil, T("form.cancel")
+			m.form, m.msg = nil, later(func() string { return T("form.cancel") })
 		case "up", "k":
 			f.cur = max(0, f.cur-1)
 		case "down", "j":
@@ -168,7 +170,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	switch k { // 确认项目 id
 	case "esc", "ctrl+c":
-		f.chosen, f.err = "", "" // 回到目录浏览
+		f.chosen, f.err = "", nil // 回到目录浏览
 	case "enter":
 		return m.createProject()
 	case "backspace":
@@ -183,7 +185,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 	}
-	f.err = ""
+	f.err = nil
 	return nil
 }
 
@@ -191,7 +193,7 @@ func (m *Settings) formKey(msg tea.KeyMsg) tea.Cmd {
 func (m *Settings) choose(dir string) {
 	f := m.form
 	if err := deckstore.CheckPath(dir); err != nil {
-		f.err = T("form.badpath", errLong(err))
+		f.err = later(func() string { return T("form.badpath", errLong(err)) })
 		return
 	}
 	taken := map[string]bool{}
@@ -203,39 +205,43 @@ func (m *Settings) choose(dir string) {
 	}
 	for _, p := range m.set.Projects {
 		if real(p.Path) == real(dir) {
-			f.err = T("form.taken", sanitizeFull(p.Name))
+			// 只存原始的名字：显示清洗（去控制字符、对疑似密钥打码）和打码记号的语言都放进闭包，画的时候按当时的语言做（返工 3，R2-4）
+			name := p.Name
+			f.err = later(func() string { return T("form.taken", sanitizeFull(name)) })
 			return
 		}
 		taken[p.ID] = true
 	}
-	f.chosen, f.id, f.err = dir, projectIDFor(dir, taken), ""
+	f.chosen, f.id, f.err = dir, projectIDFor(dir, taken), nil
 }
 
 // createProject 按表单建项目：先在本地按 deckd 的同一套规则校验（不合规就说明、不写盘），通过后由自动保存整份保存。
 func (m *Settings) createProject() tea.Cmd {
 	f := m.form
 	if st, err := os.Stat(f.chosen); err != nil || !st.IsDir() {
-		f.err = T("form.gone", f.chosen)
+		chosen := i18n.Neutralize(f.chosen) // 显示用的副本先中和；f.chosen 本身（业务原值）不改（返工 3，R2-1）
+		f.err = later(func() string { return T("form.gone", chosen) })
 		return nil
 	}
 	next, err := cloneSettings(m.set)
 	if err != nil {
-		f.err = errLong(err)
+		f.err = errNote(err)
 		return nil
 	}
 	p := m.defaultProject(f.id, f.chosen)
 	next.Projects = append(next.Projects, p)
 	if err := next.Validate(); err != nil {
-		f.err = T("form.invalid", errLong(err))
+		f.err = later(func() string { return T("form.invalid", errLong(err)) })
 		return nil
 	}
 	m.set = next
 	m.switchPage(pageProject) // 先换页（各页光标各自记着），再把光标放到新项目第一行（n059 自查）
 	m.proj, m.cur = len(m.set.Projects)-1, 0
 	m.form = nil
-	m.touch() // Update 看到改动就自动保存（n059）
-	m.msg = T("form.created", sanitizeFull(p.Name))
-	m.hint, m.hintEdits = T("form.next", sanitizeFull(p.Name)), m.edits // 存上了含这个项目的那次保存才提示去侧栏
+	m.touch()      // Update 看到改动就自动保存（n059）
+	name := p.Name // 原始名字；清洗与打码记号在画的时候做（返工 3，R2-4）
+	m.msg = later(func() string { return T("form.created", sanitizeFull(name)) })
+	m.hint, m.hintEdits = later(func() string { return T("form.next", sanitizeFull(name)) }), m.edits // 存上了含这个项目的那次保存才提示去侧栏
 	return nil
 }
 
@@ -297,8 +303,8 @@ func (m *Settings) formView() string {
 
 // formFoot 是表单底部的报错：放在底部固定，目录长、子目录多要滚动时也看得见（n059 自查 3）。
 func (m *Settings) formFoot() []string {
-	if m.form.err == "" {
+	if m.form.err.empty() {
 		return nil
 	}
-	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Clean(m.form.err, msgCap)) + "\x1b[0m"}
+	return []string{"\x1b[38;5;196m " + oneLine(deckstore.Display(m.form.err.String(), msgCap)) + "\x1b[0m"}
 }

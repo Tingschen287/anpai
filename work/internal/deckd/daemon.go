@@ -3,7 +3,7 @@ package deckd
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net"
 	"net/http"
 	"os"
@@ -89,15 +89,16 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 	}
 	defer lf.Close()
 	if err := flockRetry(lf, 2*time.Second); err != nil {
-		return fmt.Errorf("deckd 已经在运行（%s 被占用）", lockPath)
+		return i18n.E("err.deckd.run.1", lockPath)
 	}
 	wl, err := writerlock.Acquire(cfg.Profile, "deckd")
 	if err != nil {
-		return fmt.Errorf("不启动：%w", err)
+		return i18n.E("err.deckd.run.2", err)
 	}
 	defer wl.Release()
 
-	store, err := deckstore.Open(cfg.Dirs)
+	cfg.startSessionEnv(ctx) // n060 段 4：会话 PATH（deck daemon 才开）
+	store, err := deckstore.OpenWithLang(cfg.Dirs, cfg.SystemLang)
 	if err != nil {
 		return err
 	}
@@ -116,10 +117,13 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 				return viewstate.Target{}, false
 			}
 			return viewstate.Target{Session: x.AgentDeckID, Tmux: x.TmuxSession, Role: x.Role, BriefConfirmed: x.BriefConfirmed,
-				AwaitingOwner: x.AwaitingOwner != "", Title: x.Title}, true
+				AwaitingOwner: x.AwaitingOwner != "", Title: x.Title, TitleCode: x.TitleCode, TitleArgs: []any(x.TitleArgs)}, true
 		}
-		notify := func(text string) error {
-			_, err := store.Notify("", "view", text, "deckd")
+		notify := func(n *i18n.Error) error {
+			if n == nil {
+				return nil
+			}
+			_, err := store.NotifyCoded("", "view", n, "deckd")
 			return err
 		}
 		view = viewstate.New(center, leases, lookup, notify, store.Broken)
@@ -140,7 +144,7 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		if cfg.Projectctl != "" {
 			gs = projectctlGraphStart(cfg.Projectctl)
 		}
-		srv.WithAgents(up, leases, agentdeck.ToolInfo, gs)
+		srv.WithAgents(up, leases, scopedToolInfo, gs)
 		if cfg.Projectctl != "" {
 			script := cfg.Projectctl
 			srv.agents.graphState = func(ctx context.Context, p deckstore.ProjectDef, node string) (projectctl.State, error) {
@@ -167,12 +171,12 @@ func Run(ctx context.Context, cfg Config, center viewstate.Center) error {
 		go func() { defer close(rdone); srv.runReports(rctx) }()
 		defer func() { rcancel(); <-rdone; srv.WaitBackground() }()
 	} else {
-		store.Notify("", "deckd", "没接上 agent-deck，开子 agent 不可用："+err.Error(), "deckd")
+		store.NotifyCoded("", "deckd", i18n.E("err.deckd.run.4", err), "deckd")
 	}
 
 	sock := SocketPath(cfg.Dirs)
 	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("清理残留 socket 失败：%w", err)
+		return i18n.E("err.deckd.run.3", err)
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -210,16 +214,20 @@ type Progress struct {
 	Unknown       int            `json:"unknown"`
 	Budgets       []BudgetView   `json:"budgets"`
 	Problems      []string       `json:"problems,omitempty"`
-	TakenAt       time.Time      `json:"taken_at"`
+	// ProblemsCoded 和 Problems 一一对应：能翻译的是嵌套码，Problems 仍是中文原文。没有码的那一条 Code 为空。
+	ProblemsCoded []i18n.Nest `json:"problems_coded,omitempty"`
+	TakenAt       time.Time   `json:"taken_at"`
 }
 
 // BudgetView 是一行预算；读不到的维度 Used/Limit 为 nil，并给出原因。
 type BudgetView struct {
-	Label  string   `json:"label"`
-	Used   *float64 `json:"used"`
-	Limit  *float64 `json:"limit"`
-	Unit   string   `json:"unit"`
-	Reason string   `json:"reason,omitempty"`
+	Label string   `json:"label"`
+	Used  *float64 `json:"used"`
+	Limit *float64 `json:"limit"`
+	Unit  string   `json:"unit"`
+	// UnitKey 是单位的语言无关写法（round、call、hour），界面按语言翻译；Unit 仍是中文原文。
+	UnitKey string `json:"unit_key,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // graphProgress 用 projectctl 的快速快照读进度，只走只读命令。
@@ -228,6 +236,10 @@ func graphProgress(script string) ProgressFunc {
 		snap := projectctl.NewReader(p.GraphRoot, script).FastSnapshot(ctx)
 		counts, unknown := snap.Counts()
 		out := Progress{Project: p.ID, Graph: true, Counts: map[string]int{}, Unknown: unknown, Problems: snap.Problems, TakenAt: snap.TakenAt}
+		for _, e := range snap.ProblemErrs {
+			n, _ := i18n.WireArgs([]any{e})[0].(i18n.Nest)
+			out.ProblemsCoded = append(out.ProblemsCoded, n)
+		}
 		for st, n := range counts {
 			out.Counts[string(st)] = n
 		}
@@ -238,7 +250,7 @@ func graphProgress(script string) ProgressFunc {
 			out.Health = v
 		}
 		for _, b := range snap.Budgets {
-			bv := BudgetView{Label: b.Label, Unit: b.Unit}
+			bv := BudgetView{Label: b.Label, Unit: b.Unit, UnitKey: b.UnitKey}
 			if v, ok := b.Used.Get(); ok {
 				bv.Used = &v
 			} else {

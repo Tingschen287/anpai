@@ -4,8 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,8 +100,8 @@ func (c *Client) InboxExport(ctx context.Context) ([]InboxRecord, error) {
 		return nil, err
 	}
 	var records []InboxRecord
-	if err := json.Unmarshal(out, &records); err != nil {
-		return nil, fmt.Errorf("解析 inbox export --json 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(out, &records); err != nil {
+		return nil, i18n.E("err.agentdeck.clientinboxexport.1", err)
 	}
 	return records, nil
 }
@@ -119,8 +118,8 @@ func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
 		return WriterStatus{}, err
 	}
 	var st WriterStatus
-	if err := json.Unmarshal(out, &st); err != nil {
-		return WriterStatus{}, fmt.Errorf("解析 inbox writer-status --json 输出失败：%w", err)
+	if err := i18n.UnmarshalExternal(out, &st); err != nil {
+		return WriterStatus{}, i18n.E("err.agentdeck.clientinboxwriterstatus.1", err)
 	}
 	return st, nil
 }
@@ -133,8 +132,7 @@ func (c *Client) InboxWriterStatus(ctx context.Context) (WriterStatus, error) {
 // 记录属于别的 profile 时直接拒绝，说清原因。
 func (c *Client) DeliverAnswer(ctx context.Context, p lease.Permit, rec InboxRecord, message string) error {
 	if rec.Profile != "" && rec.Profile != c.Profile {
-		return fmt.Errorf("会话 %s 属于 profile %q，Work Deck 只向自己的 profile %q 投递，不代投",
-			rec.ChildSessionID, rec.Profile, c.Profile)
+		return i18n.E("err.agentdeck.clientdeliveranswer.1", rec.ChildSessionID, rec.Profile, c.Profile)
 	}
 	return c.SendMessage(ctx, p, rec.ChildSessionID, message)
 }
@@ -151,7 +149,7 @@ var procRoot = "/proc"
 func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return false, fmt.Errorf("读不了进程表 %s：%w", procRoot, err)
+		return false, i18n.E("err.agentdeck.clientnotifydaemonrunning.1", procRoot, err)
 	}
 	for _, e := range entries {
 		if ctx.Err() != nil {
@@ -164,7 +162,7 @@ func (c *Client) NotifyDaemonRunning(ctx context.Context) (bool, error) {
 		if err != nil || len(raw) == 0 {
 			continue // 进程已经没了，或是内核线程
 		}
-		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		argv := strings.Split(strings.TrimRight(i18n.Neutralize(string(raw)), "\x00"), "\x00")
 		if !strings.Contains(filepath.Base(argv[0]), "agent-deck") {
 			continue
 		}

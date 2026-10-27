@@ -1,9 +1,10 @@
 package lease
 
 import (
-	"fmt"
 	"sync"
 	"time"
+
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // 许可种类。
@@ -82,10 +83,10 @@ func (p Permit) Begin(sessionID string) (release func(), err error) {
 // Allows 在投递那一刻核对许可仍然有效。零值 Permit 恒为无效。
 func (p Permit) Allows(sessionID string) error {
 	if p.store == nil {
-		return fmt.Errorf("没有投递许可：只有写入权记账能签发许可，自己构造的不算")
+		return i18n.E("err.lease.allows.none")
 	}
 	if p.sessionID != sessionID {
-		return fmt.Errorf("投递许可是给会话 %s 的，不能用于会话 %s", p.sessionID, sessionID)
+		return i18n.E("err.lease.allows.session", p.sessionID, sessionID)
 	}
 	p.store.mu.Lock()
 	defer p.store.mu.Unlock()
@@ -97,25 +98,25 @@ func (p Permit) Kind() string { return p.kind }
 
 func (s *Store) checkLocked(sessionID, kind string, now time.Time) error {
 	if s.broken != nil {
-		return fmt.Errorf("写入权记账已停用（%v），一律不投递", s.broken)
+		return i18n.E("err.lease.check.broken", s.broken)
 	}
 	if sessionID == "" {
-		return fmt.Errorf("没有会话号，不投递")
+		return i18n.E("err.lease.check.nosession")
 	}
 	l, ok := s.leases[sessionID]
 	switch kind {
 	case KindAutomatic:
 		switch {
 		case !ok:
-			return fmt.Errorf("会话 %s 没有写入权记录：不是 Work Deck 派出、或记录丢失，持有者未知，不自动投递", sessionID)
+			return i18n.E("err.lease.check.norecord", sessionID)
 		case l.Holder == HolderOwner && l.PendingHandback != nil:
-			return fmt.Errorf("会话 %s 等你确认交还（%s 回来），确认前不自动投递", sessionID, l.PendingHandback.ReturnedAt.Local().Format("01-02 15:04"))
+			return i18n.E("err.lease.check.pending", sessionID, l.PendingHandback.ReturnedAt.Local().Format("01-02 15:04"))
 		case l.Holder == HolderOwner:
-			return fmt.Errorf("会话 %s 正由 owner 接管（%s 起），不自动投递", sessionID, l.Since.Local().Format("01-02 15:04"))
+			return i18n.E("err.lease.check.owner", sessionID, l.Since.Local().Format("01-02 15:04"))
 		case l.Holder != HolderWorkbench:
-			return fmt.Errorf("会话 %s 的持有者 %q 不认识，不自动投递", sessionID, l.Holder)
+			return i18n.E("err.lease.check.holderauto", sessionID, l.Holder)
 		case l.ExpiresAt.IsZero() || !now.Before(l.ExpiresAt):
-			return fmt.Errorf("会话 %s 的租约已于 %s 过期，需要 owner 确认续约后才自动投递", sessionID, l.ExpiresAt.Local().Format("01-02 15:04"))
+			return i18n.E("err.lease.check.expired", sessionID, l.ExpiresAt.Local().Format("01-02 15:04"))
 		}
 		return nil
 	case KindManual:
@@ -124,13 +125,13 @@ func (s *Store) checkLocked(sessionID, kind string, now time.Time) error {
 		}
 		switch {
 		case l.PendingHandback != nil:
-			return fmt.Errorf("会话 %s 你刚接管完还没确认交还，先看介入摘要并确认（按 H）", sessionID)
+			return i18n.E("err.lease.check.manualpending", sessionID)
 		case l.Holder == HolderOwner:
-			return fmt.Errorf("会话 %s 登记为你正在接管，先回来再回答", sessionID)
+			return i18n.E("err.lease.check.manualowner", sessionID)
 		case l.Holder != HolderWorkbench:
-			return fmt.Errorf("会话 %s 的持有者 %q 不认识，不投递", sessionID, l.Holder)
+			return i18n.E("err.lease.check.holdermanual", sessionID, l.Holder)
 		}
 		return nil
 	}
-	return fmt.Errorf("许可种类 %q 不认识，不投递", kind)
+	return i18n.E("err.lease.check.kind", kind)
 }

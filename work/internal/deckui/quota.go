@@ -21,7 +21,7 @@ import (
 func QuotaFrame(qs []dashquota.ToolQuota, err error, w, h int, mode string, sixelOf func(tool string, rows int) string) Frame {
 	if err != nil {
 		// 错误文本可能带上游内容：显示前清洗（同 n050 评审 B7）
-		return Frame{Lines: []string{"\x1b[1m额度\x1b[0m", "\x1b[38;5;203m取不到：" + oneLine(deckstore.Clean(err.Error(), 300)) + "\x1b[0m"}}
+		return Frame{Lines: []string{"\x1b[1m" + T("quota.title") + "\x1b[0m", "\x1b[38;5;203m" + T("ui.loadfail") + oneLine(deckstore.Display(deckclient.Show(err), 300)) + "\x1b[0m"}}
 	}
 	lines, logos := panels.QuotaLines(qs, w, mode)
 	var ims []Image

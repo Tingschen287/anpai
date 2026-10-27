@@ -3,7 +3,7 @@ package deckstore
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 )
@@ -65,12 +65,12 @@ func writeAtomic(path string, data []byte) error {
 	// 同步父目录，rename 才算真正落盘；任何一步失败都算写失败（存储随之停止，n050 评审 S3）
 	d, err := os.Open(filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("打不开目录做落盘同步：%w", err)
+		return i18n.E("err.deckstore.writeatomic.1", err)
 	}
 	serr := d.Sync()
 	cerr := d.Close()
 	if serr != nil {
-		return fmt.Errorf("目录落盘同步失败：%w", serr)
+		return i18n.E("err.deckstore.writeatomic.2", serr)
 	}
 	return cerr
 }
@@ -101,7 +101,7 @@ func readJSON(path string, v any) (bool, error) {
 		return false, err
 	}
 	if err := json.Unmarshal(data, v); err != nil {
-		return false, fmt.Errorf("%s 解析不了（%v）；不当成空的打开", path, err)
+		return false, i18n.E("err.deckstore.readjson.1", path, err)
 	}
 	return true, nil
 }

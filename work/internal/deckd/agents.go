@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"net/http"
 	"strings"
 	"sync"
@@ -94,7 +95,7 @@ func (s *Server) notCodex(tool string) bool {
 // upstreamConfigNoBypass：上游配置会不会给这个工具加跳过权限的参数。
 func (s *Server) upstreamConfigNoBypass(tool string) error {
 	if s.agents.bypass.Config == nil {
-		return fmt.Errorf("deckd 没接上上游配置检查，确认不了 agent-deck 不会加跳过权限的参数，不开")
+		return i18n.E("err.deckd.serverupstreamconfignobypass.1")
 	}
 	return s.agents.bypass.Config(tool)
 }
@@ -148,7 +149,7 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agents == nil {
-		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck，不能开子 agent")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverpostagents.1"))
 		return
 	}
 	if err := s.stopped(); err != nil {
@@ -156,19 +157,21 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b spawnBody
-	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+	if err := readBodyRaw(r, &b); err != nil { // 指纹是客户端对原文算的：planSpawn 里先核对指纹，再中和（返工 4）
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
+	raw := b
+	neutralizeValue(&b)
 	project := b.Project
 	if c.Role == RoleMain {
 		if project != "" && project != c.Project {
-			fail(w, http.StatusForbidden, "主 agent 只能在自己的项目 %s 里开子 agent", c.Project)
+			writeErr(w, http.StatusForbidden, i18n.E("err.deckd.serverpostagents.3", c.Project))
 			return
 		}
 		project = c.Project
 	}
-	plan, err := s.planSpawn(r.Context(), c, project, b)
+	plan, err := s.planSpawn(r.Context(), c, project, b, raw)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
@@ -182,18 +185,20 @@ func (s *Server) postAgents(w http.ResponseWriter, r *http.Request) {
 func detached(r *http.Request) context.Context { return context.WithoutCancel(r.Context()) }
 
 // planSpawn 解析 agent 与模型，做全部硬拒绝。
-func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spawnBody) (spawnPlan, error) {
+// b 是中和过伪造标记的请求，raw 是原样的请求：只有核对客户端对原文算的指纹时才用 raw（返工 4）。
+func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b, raw spawnBody) (spawnPlan, error) {
 	var plan spawnPlan
+
 	set := s.store.Settings()
 	p, ok := set.Project(project)
 	if !ok {
-		return plan, fmt.Errorf("没有项目 %q", project)
+		return plan, i18n.E("err.deckd.serverplanspawn.1", project)
 	}
 	var res deckstore.Resolved
 	var err error
 	switch {
 	case b.Model != "" && b.Tier != "":
-		return plan, fmt.Errorf("档位与模型只给一个")
+		return plan, i18n.E("err.deckd.serverplanspawn.2")
 	case b.Model != "":
 		res, err = set.ResolveModel(project, b.Model)
 	default:
@@ -203,11 +208,11 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 		return plan, err
 	}
 	if b.Agent != "" && b.Agent != res.Agent.ID {
-		return plan, fmt.Errorf("模型 %s 属于 agent %s，不是请求里的 %s", res.Model, res.Agent.ID, b.Agent)
+		return plan, i18n.E("err.deckd.serverplanspawn.3", res.Model, res.Agent.ID, b.Agent)
 	}
 	a := res.Agent
 	if !deckstore.ValidModelID(res.Model) {
-		return plan, fmt.Errorf("模型 id %q 不合规（只能是字母数字和 . _ / : @ + -）：它会进 CLI 的命令行，不派；请在设置里改", res.Model)
+		return plan, i18n.E("err.deckd.serverplanspawn.4", res.Model)
 	}
 	if err := agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model, b.Title); err != nil {
 		return plan, err
@@ -225,31 +230,34 @@ func (s *Server) planSpawn(ctx context.Context, c Caller, project string, b spaw
 		return plan, err
 	}
 	if strings.TrimSpace(b.Task) == "" {
-		return plan, fmt.Errorf("任务是空的：说不清要子 agent 做什么，就别开")
+		return plan, i18n.E("err.deckd.serverplanspawn.5")
 	}
 	if len(b.Task) > maxTaskBytes {
-		return plan, fmt.Errorf("任务正文超过 %d 字节", maxTaskBytes)
+		return plan, i18n.E("err.deckd.serverplanspawn.6", maxTaskBytes)
 	}
 	dir := b.Dir
 	if dir == "" {
 		dir = p.Path
 	}
 	if err := deckstore.CheckPath(dir); err != nil {
-		return plan, fmt.Errorf("工作目录：%w", err)
+		return plan, i18n.E("err.deckd.serverplanspawn.7", err)
 	}
-	if b.TaskSHA256 != TaskSHA256(b.Task) {
-		return plan, fmt.Errorf("task_sha256 与任务正文对不上")
+	rawDir := raw.Dir
+	if rawDir == "" {
+		rawDir = p.Path
 	}
-	if want := SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, b.Title, dir, b.GraphNode); b.ArgsSHA256 != want {
-		return plan, fmt.Errorf("args_sha256 与启动参数对不上（agent、档位、模型、标题、目录、Graph 节点按 deckd 解析的结果算；" +
-			"只说档位时，若额度在这期间变了，挑到的模型会不同：重新运行一次 deck agent spawn 即可）")
+	if b.TaskSHA256 != TaskSHA256(raw.Task) {
+		return plan, i18n.E("err.deckd.serverplanspawn.8")
+	}
+	if want := SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, raw.Title, rawDir, raw.GraphNode); b.ArgsSHA256 != want {
+		return plan, i18n.E("err.deckd.serverplanspawn.9")
 	}
 	x := deckstore.Session{Project: project, Role: "sub", Parent: c.Session, Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model,
 		Tier: res.Tier, Title: b.Title, CreatedBy: creatorOf(c), RequestID: b.RequestID, Dir: dir,
 		TaskSHA256: b.TaskSHA256, ArgsSHA256: b.ArgsSHA256}
 	if b.GraphNode != "" {
 		if p.GraphRoot == "" {
-			return plan, fmt.Errorf("项目 %s 没有配置 Graph 根目录，不能走 Graph 通道", project)
+			return plan, i18n.E("err.deckd.serverplanspawn.10", project)
 		}
 		x.Graph = &deckstore.GraphLink{Node: b.GraphNode}
 	}
@@ -266,28 +274,38 @@ func creatorOf(c Caller) string {
 // runSpawn 过两道门、预留、启动。plan.x.Role 决定是开子 agent 还是主 agent。
 func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, plan spawnPlan, exception, graphNode string) {
 	x, p := plan.x, plan.project
+	// 这次派工只取一份会话 PATH：trust 门查可执行文件与版本、agent-deck launch 起会话都用它（n060 段 4）
+	ctx, _, _ = s.sessionScope(ctx)
 	// Codex trust 门（§14.3）
 	if trust := agentdeck.CheckCodexTrust(x.Tool); trust != agentdeck.CodexTrustNo && !(trust == agentdeck.CodexTrustMaybe && s.notCodex(x.Tool)) {
 		path, version, err := s.agents.toolInfo(ctx, plan.agent.Binary)
 		if err != nil {
-			fail(w, http.StatusBadRequest, "确认不了 %s 的可执行文件与版本（Codex trust 门要按它们记住授权）：%v", plan.agent.Binary, err)
+			writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverrunspawn.1", plan.agent.Binary, err))
 			return
 		}
 		if !s.store.TrustValid(x.Project, x.Tool, p.Path, x.Dir, path, version) {
 			d, err := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCodexTrust,
-				Summary: fmt.Sprintf("启动 %s 会让上游整份改写 ~/.codex/config.toml（加入 %s 的信任）。批准后记住：同一项目、工具、目录、可执行文件与版本以后不再问", plan.agent.Name, x.Dir),
+				SummaryErr: i18n.E("err.deckd.serverrunspawn.2", plan.agent.Name, x.Dir),
 				Scope: map[string]string{"action": "codex_trust", "project": x.Project, "tool": x.Tool, "project_dir": p.Path, "dir": x.Dir,
 					"tool_path": path, "tool_version": version, "request_id": x.RequestID},
 				Recommend: deckstore.OptApprove, CreatedBy: creatorOf(c)})
 			if err != nil {
-				fail(w, http.StatusConflict, "生成 Codex trust 决定失败：%v", err)
+				writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.3", err))
 				return
 			}
 			writeJSON(w, http.StatusAccepted, map[string]any{"pending": deckstore.KindCodexTrust, "decision": d,
-				"next": "owner 批准后用新的 request_id 再开一次"})
+				"next": i18n.E("err.deckd.serverrunspawn.28").Error()})
 			return
 		}
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("按已记住的授权启动 %s，~/.codex/config.toml 会被上游改写", plan.agent.Name), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.4", plan.agent.Name), "deckd")
+		// 授权依据的是 path 这个文件：把它所在的目录放到交给上游的 PATH 最前面，并核对按这份 PATH 找到的就是它（n060 段 4 返工，R1）。
+		// 之后上游按工具名再找一次时，更靠前的目录里新装的同名文件顶替不了它；同一路径上的文件被替换是既有的信任边界，这里不管。
+		bctx, berr := bindLaunchPath(ctx, plan.agent.Binary, path)
+		if berr != nil {
+			writeErr(w, bindStatus, berr)
+			return
+		}
+		ctx = bctx
 	}
 	// 主 agent：每个项目同时只能有一个。旧主 agent 的 tmux 会话已经不在（退出或被关掉）就记为已结束、放行
 	// （n051 自查：此前没有任何路径结束主 agent，它一退出，这个项目就再也起不了主 agent）。
@@ -295,11 +313,11 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		for _, y := range s.store.Sessions(x.Project) {
 			if y.Role == "main" && (y.Status == deckstore.StatusLaunching || y.Status == deckstore.StatusRunning || y.Status == deckstore.StatusUncertain) {
 				if s.mainGone(ctx, y) {
-					s.store.SetSessionStatus(y.Key, deckstore.StatusStopped, "tmux 会话 "+y.TmuxSession+" 已不在，deck 记为已结束")
-					s.store.Notify(x.Project, "spawn", fmt.Sprintf("旧主 agent「%s」的会话已不在，记为已结束", y.Title), "deckd")
+					s.store.SetSessionStatus(y.Key, deckstore.StatusStopped, i18n.E("err.deckd.serverrunspawn.29", y.TmuxSession).Error())
+					s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.5", y.TitleArg()), "deckd")
 					continue
 				}
-				fail(w, http.StatusConflict, "项目 %s 已有主 agent %s（%s），它的会话还在或确认不了；先在 agent-deck 里停掉它再起", x.Project, y.Key, y.Status)
+				writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.6", x.Project, y.Key, y.Status))
 				return
 			}
 		}
@@ -309,89 +327,95 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	quotaGate := x.Role == "sub" && x.Tier == deckstore.Frontier && s.quotaUnsure(ctx, x.Tool)
 	if quotaGate && exception == "" {
 		// 同一个批准随后也会被预留当作超额例外用掉：包络也超了就在同一条决定里写明，owner 一次看清两个原因
-		summary := fmt.Sprintf("额度未知或已用尽时启动 frontier：请求开 %s（%s · %s）「%s」", plan.agent.Name, x.Tier, x.Model, x.Title)
+		summary := i18n.E("err.deckd.serverrunspawn.7", plan.agent.Name, x.Tier, x.Model, x.TitleArg())
 		if u := s.store.Slots(x.Project); u.Subagents >= p.Envelope.MaxSubagents || u.Frontier >= p.Envelope.MaxFrontier {
-			summary = fmt.Sprintf("额度未知或已用尽，且超出预算包络（已用 %d/%d 个子 agent、%d/%d 个 frontier）：请求开 %s（%s · %s）「%s」",
-				u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.Title)
+			summary = i18n.E("err.deckd.serverrunspawn.8", u.Subagents, p.Envelope.MaxSubagents, u.Frontier, p.Envelope.MaxFrontier, plan.agent.Name, x.Tier, x.Model, x.TitleArg())
 		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			Summary: summary,
-			Scope:   deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
+			SummaryErr: summary,
+			Scope:      deckstore.SpawnScope(x, p), Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
-			fail(w, http.StatusConflict, "额度未知时启动 frontier 要 owner 批准，生成 cost 决定失败：%v", derr)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.9", derr))
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"pending": deckstore.KindCost, "decision": d,
-			"next": "owner 批准后带同一个请求（同一 request_id、任务、参数）与 exception=" + d.ID + " 再开一次"})
+			"next": i18n.E("err.deckd.serverrunspawn.30", d.ID).Error()})
 		return
 	}
 	// 预算包络：预留名额；超出生成 cost 决定
 	if exception != "" {
 		if _, err := s.store.BeginExecute(exception, deckstore.SpawnScope(x, p)); err != nil {
-			fail(w, http.StatusConflict, "超额例外不能用：%v", err)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.10", err))
 			return
 		}
 	}
 	res, err := s.store.Reserve(x, exception)
 	var over *deckstore.ErrOverEnvelope
 	if errors.As(err, &over) {
+		whyOver := any(over.Reason)
+		if over.Why != nil {
+			whyOver = over.Why
+		}
 		d, derr := s.store.CreateDecision(deckstore.NewDecision{Project: x.Project, Kind: deckstore.KindCost,
-			Summary:   fmt.Sprintf("超出预算包络：%s。请求开 %s（%s · %s）「%s」", over.Reason, plan.agent.Name, x.Tier, x.Model, x.Title),
-			Scope:     deckstore.SpawnScope(x, p),
-			Recommend: deckstore.OptReject, CreatedBy: creatorOf(c)})
+			SummaryErr: i18n.E("err.deckd.serverrunspawn.11", whyOver, plan.agent.Name, x.Tier, x.Model, x.TitleArg()),
+			Scope:      deckstore.SpawnScope(x, p),
+			Recommend:  deckstore.OptReject, CreatedBy: creatorOf(c)})
 		if derr != nil {
-			fail(w, http.StatusConflict, "%v；生成 cost 决定也失败：%v", err, derr)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.12", err, derr))
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"pending": deckstore.KindCost, "decision": d,
-			"next": "owner 批准后带同一个请求（同一 request_id、任务、参数）与 exception=" + d.ID + " 再开一次"})
+			"next": i18n.E("err.deckd.serverrunspawn.30", d.ID).Error()})
 		return
 	}
 	if err != nil {
 		if exception != "" {
-			s.store.FinishExecute(exception, deckstore.StateFailed, "预留失败："+err.Error())
+			s.store.FinishExecute(exception, deckstore.StateFailed, i18n.E("err.deckd.serverrunspawn.31", err).Error())
 		}
-		fail(w, http.StatusConflict, "预留名额失败：%v", err)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.13", err))
 		return
 	}
 	key := res.Key
 	if exception != "" {
 		// 批准后名额又够了：Reserve 没消耗例外，它会一直停在 executing（n051 自查）。收尾为已执行、作废，不能再用
 		if d, ok := s.store.Decision(exception); ok && d.State == deckstore.StateExecuting {
-			why := "名额已够用，本次没有消耗这个例外；它已作废，不能再用"
+			why := i18n.E("err.deckd.serverrunspawn.32").Error()
 			if quotaGate {
-				why = "已按批准在额度未知时启动 frontier；这个例外已用掉，不能再用"
+				why = i18n.E("err.deckd.serverrunspawn.33").Error()
 			}
 			s.store.FinishExecute(exception, deckstore.StateApplied, why)
 		}
 	}
 	if graphNode != "" && s.agents.graphStart == nil {
-		s.store.LaunchFailed(key, false, "deckd 没配置 projectctl")
-		fail(w, http.StatusServiceUnavailable, "deckd 没配置 projectctl，不能走 Graph 通道")
+		s.store.LaunchFailed(key, false, i18n.E("err.deckd.serverrunspawn.34").Error())
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.14"))
 		return
 	}
 	// 启动
-	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: x.Title, Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true,
+	lr := agentdeck.LaunchRequest{ProjectPath: x.Dir, Title: i18n.PresentZH(x.Title), // 给上游命令行的标题：中性标记换成中文记号
+		Group: x.Project, Tool: x.Tool, Model: x.Model, NoWait: true,
 		Extra: plan.agent.ExtraArgs} // owner 声明的额外参数随启动传上去（n055）；启动后照旧按白名单核对实际命令行
 	out, lerr := s.agents.upstream.Launch(ctx, lr)
 	id, uncertain, why := launchOutcome(out, lerr)
 	if id == "" {
-		s.store.LaunchFailed(key, uncertain, why)
+		s.store.LaunchFailed(key, uncertain, textOf(why))
 		code := http.StatusBadGateway
-		writeJSON(w, code, map[string]any{"error": "启动失败：" + why, "session": key, "uncertain": uncertain})
+		failErr := i18n.E("err.deckd.serverrunspawn.35", why)
+		wcode, wargs, _ := i18n.Wire(failErr)
+		writeJSON(w, code, map[string]any{"error": failErr.Error(), "code": wcode, "args": wargs, "session": key, "uncertain": uncertain})
 		return
 	}
-	// 模型经命令传的自定义工具（grok、antigravity）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
+	// 模型经命令传的自定义工具（grok、antigravity、kimi）：上游没登记这个工具时会把它认成别的工具起（认不出就是 shell，n057），
 	// 那样起的不是 owner 选的 agent，停掉、不送任务
 	if agentdeck.ToolsModelViaCommand[x.Tool] != "" && out.Tool != x.Tool {
-		why := fmt.Sprintf("上游把 %s 起成了 %q：agent-deck 的配置里要先登记 [tools.%s]", x.Tool, out.Tool, x.Tool)
-		s.stopLaunched(ctx, key, id, x, "启动后核对："+why, false, "起成了别的工具")
-		fail(w, http.StatusBadGateway, "会话 %s %s，已停掉、不送任务", id, why)
+		why := i18n.E("err.deckd.serverrunspawn.15", x.Tool, out.Tool, x.Tool)
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", why), false, i18n.E("err.deckd.serverrunspawn.37"))
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverrunspawn.16", id, why))
 		return
 	}
 	if err := agentdeck.CheckLaunchedTakesTaskText(out); err != nil {
-		s.store.LaunchFailed(key, true, "上游起的不是 agent："+err.Error())
-		fail(w, http.StatusBadGateway, "上游起的不是 agent，不送任务：%v（会话 %s 留在 agent-deck 里，请 owner 处理）", err, id)
+		s.store.LaunchFailed(key, true, i18n.E("err.deckd.serverrunspawn.38", err).Error())
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverrunspawn.17", err, id))
 		return
 	}
 	tmux := ""
@@ -400,8 +424,8 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	}
 	// 启动后按实际在跑的命令行再核一次：上游自己加了绕过参数（或核对不了）就停掉会话、不送 brief
 	if err := s.processesNoBypass(ctx, tmux, plan.agent); err != nil {
-		s.stopLaunched(ctx, key, id, x, "启动后核对："+err.Error(), false, "起来后带着跳过权限的参数（或核对不了）")
-		fail(w, http.StatusBadGateway, "会话 %s 起来后带着跳过权限的参数（或核对不了），已停掉、不送任务：%v", id, err)
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.36", err), false, i18n.E("err.deckd.serverrunspawn.39"))
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverrunspawn.18", id, err))
 		return
 	}
 	// Graph 通道：会话起来并核过之后才开一轮（n051 自查：先开一轮再启动，启动失败时账本里会留下没人干活的 attempt）。
@@ -411,37 +435,37 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 		if err != nil {
 			var notStarted *projectctl.ErrStartNotStarted
 			unknown := !errors.As(err, &notStarted)
-			what := "Graph 节点 " + graphNode + " 没开成一轮"
+			what := i18n.E("err.deckd.serverrunspawn.40", graphNode)
 			if unknown {
-				what = "Graph 节点 " + graphNode + " 开没开成一轮不确定，请核对账本"
+				what = i18n.E("err.deckd.serverrunspawn.41", graphNode)
 			}
-			s.stopLaunched(ctx, key, id, x, "projectctl start："+err.Error(), unknown, what)
-			fail(w, http.StatusConflict, "Graph 节点 %s 开工失败，刚起的会话已停掉、不送任务：%v", graphNode, err)
+			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.projectctl", err), unknown, what)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverrunspawn.19", graphNode, err))
 			return
 		}
 		if err := s.store.SetGraphAttempt(key, graphNode, attempt); err != nil {
-			s.stopLaunched(ctx, key, id, x, fmt.Sprintf("记不下 Graph attempt %s#%d：%v", graphNode, attempt, err), true,
-				fmt.Sprintf("Graph 节点 %s 已开第 %d 轮，但 deck 记不下，请核对账本", graphNode, attempt))
-			fail(w, http.StatusServiceUnavailable, "记不下 Graph attempt：%v", err)
+			s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.20", graphNode, attempt, err), true,
+				i18n.E("err.deckd.serverrunspawn.21", graphNode, attempt))
+			writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.22", err))
 			return
 		}
 	}
 	// 先记「启动期」再让会话对外可见：登记成 running 之后、看完画面之前，推送与发话都不能往它打字（n055 评审 1 B2）
 	if err := s.store.MarkStarting(key); err != nil {
 		// 记不下启动期就不能保证这期间没有别的写入：停掉刚起的会话、不送任务（attempt 2 自查）
-		s.stopLaunched(ctx, key, id, x, "记不下启动状态："+err.Error(), false, "记不下启动状态")
-		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下启动状态，已停掉：%v", id, err)
+		s.stopLaunched(ctx, key, id, x, i18n.E("err.deckd.serverrunspawn.42", err), false, i18n.E("err.deckd.serverrunspawn.43"))
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.23", id, err))
 		return
 	}
 	if err := s.store.LaunchSucceeded(key, id, tmux); err != nil {
-		fail(w, http.StatusServiceUnavailable, "会话 %s 起来了，但记不下：%v", id, err)
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverrunspawn.24", id, err))
 		return
 	}
 	// 写入权与第一条 brief：子 agent 登记给工作台（自动派送）；主 agent 由 owner 持有，用 owner 许可
 	var permit lease.Permit
 	if x.Role == "sub" {
-		if err := s.agents.leases.Grant(id, "deck 派出（"+creatorOf(c)+"）"); err != nil {
-			s.store.SetSessionStatus(key, deckstore.StatusRunning, "登记写入权失败："+err.Error())
+		if err := s.agents.leases.Grant(id, i18n.E("err.deckd.serverrunspawn.44", creatorOf(c)).Error()); err != nil {
+			s.store.SetSessionStatus(key, deckstore.StatusRunning, i18n.E("err.deckd.serverrunspawn.45", err).Error())
 		}
 		permit, err = s.agents.leases.Automatic(id)
 	} else {
@@ -450,32 +474,32 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 	if x.Role == "main" {
 		// 接管已结束主 agent 留下的子 agent 与待送汇报（旧主 agent 退出后由 owner 起的新主 agent）
 		if subs, reps, err := s.store.AdoptOrphans(x.Project, key); err != nil {
-			s.store.Notify(x.Project, "spawn", "新主 agent 接管旧主 agent 的子 agent 失败："+deckstore.Clean(err.Error(), 160), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.46", deckstore.Arg(err, 160)), "deckd")
 		} else if subs > 0 || reps > 0 {
-			s.store.Notify(x.Project, "spawn", fmt.Sprintf("新主 agent 接管了旧主 agent 留下的 %d 个子 agent、%d 条待送汇报", subs, reps), "deckd")
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.25", subs, reps), "deckd")
 		}
 	}
 	delivered := false
-	note := ""
-	dialog := ""
+	var noteErr *i18n.Error
+	var dialog *i18n.Error
 	if err == nil {
 		// 先看画面：CLI 停在启动确认（目录信任等）上、或认不出输入框，就不送，在后台等（n055）
 		dialog = s.settleScreen(ctx, id, x.Tool)
 	}
 	if err != nil {
-		note = "不能送 brief：" + err.Error()
+		noteErr = i18n.E("err.deckd.serverrunspawn.47", err)
 		s.store.FinishStart(key)
-	} else if dialog != "" {
+	} else if dialog != nil {
 		got, _ := s.store.Session(key)
-		note = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
+		noteErr = s.holdForOwner(got, key, id, dialog, plan.brief, permit)
 	} else if derr := s.sendFirstMessage(ctx, key, permit, id, plan.brief); derr != nil {
-		note = "brief " + deckstore.Clean(derr.Error(), 200)
+		noteErr = i18n.E("err.deckd.serverrunspawn.brief", deckstore.Arg(derr, 200))
 		// 上游送完了但证实不了提交（Codex 实测 delivery=unverified）：打字已经结束，不会与 owner 的输入交错，
 		// 主 agent 照常放开输入；记下并请 owner 看一眼（没提交的话，brief 留在输入框里看得见）
 		if x.Role == "main" && agentdeck.IsDeliveryUnconfirmed(derr) {
 			s.store.ConfirmBrief(key)
-			note = "brief 已送出，上游没证实提交，请 owner 在中间窗格看一眼：" + deckstore.Clean(derr.Error(), 160)
-			s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」的第一条 brief 已送出，但上游没证实提交，请在中间窗格看一眼", x.Title), "deckd")
+			noteErr = i18n.E("err.deckd.serverrunspawn.48", deckstore.Arg(derr, 160))
+			s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.26", x.TitleArg()), "deckd")
 		} else {
 			s.store.FinishStart(key)
 		}
@@ -487,23 +511,34 @@ func (s *Server) runSpawn(w http.ResponseWriter, ctx context.Context, c Caller, 
 			s.store.FinishStart(key)
 		}
 	}
+	note := ""
+	if noteErr != nil {
+		note = noteErr.Error()
+	}
 	if note != "" {
 		s.store.SetSessionStatus(key, deckstore.StatusRunning, note)
 	}
 	if x.Role == "main" && s.view != nil {
 		s.view.OpenMainInput(id) // 主 agent 若已显示在中间：按最新状态放开输入（原先要等下一次切换）
 	}
-	who := "owner"
+	var who any = "owner"
 	if c.Role == RoleMain {
-		who = "主 agent"
+		who = i18n.E("err.deckd.serverrunspawn.49")
 	}
-	what := "子 agent"
+	var what any = i18n.E("err.deckd.serverrunspawn.50")
 	if x.Role == "main" {
-		what = "主 agent"
+		what = i18n.E("err.deckd.serverrunspawn.49")
 	}
-	s.store.Notify(x.Project, "spawn", fmt.Sprintf("%s开了%s「%s」（%s · %s）", who, what, x.Title, plan.agent.Name, x.Model), creatorOf(c))
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverrunspawn.27", who, what, x.TitleArg(), plan.agent.Name, x.Model), creatorOf(c))
 	got, _ := s.store.Session(key)
-	writeJSON(w, http.StatusCreated, map[string]any{"session": got, "brief_delivered": delivered, "note": note})
+	body := map[string]any{"session": got, "brief_delivered": delivered, "note": note}
+	if noteErr != nil {
+		if c, a, ok := i18n.Wire(noteErr); ok {
+			body["note_code"] = c
+			body["note_args"] = deckstore.CleanArgs(a, 300)
+		}
+	}
+	writeJSON(w, http.StatusCreated, body)
 }
 
 // quotaUnsure：这个工具的额度是否未知或已用尽（取不到看板也算未知）。
@@ -551,49 +586,76 @@ func (s *Server) mainGone(ctx context.Context, y deckstore.Session) bool {
 
 func (s *Server) processesNoBypass(ctx context.Context, tmux string, a deckstore.AgentDef) error {
 	if s.agents.bypass.Processes == nil {
-		return fmt.Errorf("deckd 没接上启动后的命令行核对")
+		return i18n.E("err.deckd.serverprocessesnobypass.1")
 	}
 	return s.agents.bypass.Processes(ctx, tmux, agentdeck.LaunchArgs{Tool: a.Tool, Binary: a.Binary, Extra: a.ExtraArgs})
 }
 
 // stopLaunched 停掉刚起、但不能交任务的会话（带绕过参数、Graph 开不成一轮等）：先把写入权登记给工作台，用自动许可停。
 // 停成了且 keep 为假，释放名额；没停成或 keep 为真（例如账本结果不明），标结果不明、继续占名额，交给 owner 处理。都通知 owner。
-func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.Session, why string, keep bool, what string) {
-	stopErr := s.agents.leases.Grant(id, "deck 停掉不能交任务的会话")
+func (s *Server) stopLaunched(ctx context.Context, key, id string, x deckstore.Session, why any, keep bool, what any) {
+	stopErr := s.agents.leases.Grant(id, i18n.E("err.deckd.serverstoplaunched.3").Error())
 	if stopErr == nil {
 		var permit lease.Permit
 		if permit, stopErr = s.agents.leases.Automatic(id); stopErr == nil {
 			stopErr = s.agents.upstream.StopSession(ctx, permit, id)
 		}
 	}
-	note := deckstore.Clean(why, 300)
+	note := i18n.PresentZH(deckstore.Clean(textOf(why), 300)) // 记到会话上的中文，不带中性标记
 	if stopErr != nil {
-		note += "；停会话失败：" + deckstore.Clean(stopErr.Error(), 200)
+		note += i18n.E("err.deckd.serverstoplaunched.4", deckstore.Arg(stopErr, 200)).Error()
 		s.store.LaunchFailed(key, true, note)
-		s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s，deck 没能停掉它（%s），请 owner 立即处理 agent-deck 会话 %s", x.Title, what, deckstore.Clean(stopErr.Error(), 120), id), "deckd")
+		s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.1", x.TitleArg(), what, deckstore.Arg(stopErr, 120), id), "deckd")
 		return
 	}
 	s.store.LaunchFailed(key, keep, note)
-	s.store.Notify(x.Project, "spawn", fmt.Sprintf("「%s」%s，deck 已停掉它、没送任务：%s", x.Title, what, deckstore.Clean(why, 200)), "deckd")
+	s.store.NotifyCoded(x.Project, "spawn", i18n.E("err.deckd.serverstoplaunched.2", x.TitleArg(), what, nestOrText(why, 200)), "deckd")
+}
+
+// textOf 取错误的中文原文。普通字符串原样返回。
+func textOf(v any) string {
+	if v == nil {
+		return ""
+	}
+	if e, ok := v.(interface{ Error() string }); ok {
+		return e.Error()
+	}
+	return fmt.Sprint(v)
+}
+
+// nestOrText 把停止原因收成参数。中文 Error() 仍是截断后的原文。
+// 超长时也留下码，英文不再显示截断后的中文。
+func nestOrText(v any, max int) any {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case error:
+		return deckstore.Arg(x, max)
+	case string:
+		return deckstore.ArgText(x, max)
+	}
+	return v
 }
 
 // launchOutcome 判断启动结果：拿到会话号就算起来了；上游明确报错（有错误码或错误文字）是失败，释放名额；
 // 其余（超时、回执读不懂）是结果不明，继续占着名额，交给 owner 核对。
-func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain bool, why string) {
+func launchOutcome(out agentdeck.LaunchResult, err error) (id string, uncertain bool, why any) {
 	id = out.SessionID
 	if id == "" {
 		id = out.ID
 	}
 	if err == nil {
 		if id == "" {
-			return "", true, "上游没回会话号"
+			return "", true, i18n.E("err.deckd.launchoutcome.nosession")
 		}
 		return id, false, ""
 	}
+	// 有码就留下码。没有码的上游原文清洗后仍是字符串。
+	why = deckstore.Arg(err, 300)
 	if out.Error != "" || out.Code != "" {
-		return "", false, deckstore.Clean(err.Error(), 300)
+		return "", false, why
 	}
-	return "", true, deckstore.Clean(err.Error(), 300)
+	return "", true, why
 }
 
 // DeckCommand 是 brief 里写给 agent 的 deck 命令（daemon 换成 deckd 自己的可执行文件绝对路径）。
@@ -620,7 +682,7 @@ func subBrief(p deckstore.ProjectDef, x deckstore.Session, task string) string {
 - 只做这一件事；需要 owner 决定的事（花额度、改电脑设置、推送代码、和别人意见不一、偏离 owner 的决定）先停下，在汇报里写明，由主 agent 上报。
 - 不要使用跳过权限确认的参数。
 - 做完（或做不下去）时运行：deck agent report --done --text "<结论、改了什么、证据在哪、还有什么没做>"
-`), p.Name, x.Title, task)
+`), p.Name, i18n.PresentZH(x.Title), task) // 给模型读：标题里的中性标记换成中文记号
 }
 
 // MainBrief 是送给主 agent 的第一条消息：项目、工具用法与规矩（§5）。
@@ -651,7 +713,7 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agents == nil {
-		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck，不能起主 agent")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverpostmain.1"))
 		return
 	}
 	if err := s.stopped(); err != nil {
@@ -662,13 +724,13 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		RequestID string `json:"request_id"`
 	}
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	set := s.store.Settings()
 	p, ok := set.Project(r.PathValue("id"))
 	if !ok {
-		fail(w, http.StatusNotFound, "没有项目 %q", r.PathValue("id"))
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.serverplanspawn.1", r.PathValue("id")))
 		return
 	}
 	// 主 agent：在这一档清单里取它自己的、额度没确知用尽的第一个模型（n057）；全都用尽时 owner 亲自起，照用第一个
@@ -678,12 +740,12 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		res, err = all.First, nil
 	}
 	if err != nil || res.Agent.ID != p.MainAgent.Agent {
-		fail(w, http.StatusBadRequest, "项目 %s 的主 agent 设置解析不出（%v）", p.ID, err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostmain.2", p.ID, err))
 		return
 	}
 	a := res.Agent
 	if !deckstore.ValidModelID(res.Model) {
-		fail(w, http.StatusBadRequest, "主 agent 的模型 id %q 不合规（只能是字母数字和 . _ / : @ + -）：它会进 CLI 的命令行，不起；请在设置里改", res.Model)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostmain.3", res.Model))
 		return
 	}
 	for _, check := range []error{agentdeck.CheckNoBypass(a.Tool, a.Binary, res.Model), agentdeck.CheckExtraArgs(a.Tool, a.ExtraArgs), s.upstreamConfigNoBypass(a.Tool), agentdeck.CheckToolModel(a.Tool, false),
@@ -698,9 +760,11 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 		reqID = fmt.Sprintf("main-%s-%d", p.ID, time.Now().UnixNano())
 	}
 	brief := MainBrief(p)
-	title := "主 agent · " + p.Name
+	titleErr := i18n.E("err.deckd.serverpostmain.4", p.Name)
+	title := titleErr.Error()
+	titleCode, titleArgs, _ := i18n.Wire(titleErr) // 标题是本项目拼的，英文界面按码翻译
 	x := deckstore.Session{Project: p.ID, Role: "main", Agent: res.Agent.ID, Tool: a.Tool, Model: res.Model, Tier: res.Tier,
-		Title: title, CreatedBy: "owner", RequestID: reqID, Dir: p.Path, TaskSHA256: TaskSHA256(brief),
+		Title: title, TitleCode: titleCode, TitleArgs: i18n.Args(titleArgs), CreatedBy: "owner", RequestID: reqID, Dir: p.Path, TaskSHA256: TaskSHA256(brief),
 		ArgsSHA256: SpawnArgsSHA256(res.Agent.ID, string(res.Tier), res.Model, title, p.Path, "")}
 	s.runSpawn(w, detached(r), c, spawnPlan{project: p, agent: a, x: x, brief: brief}, "", "")
 }
@@ -709,15 +773,15 @@ func (s *Server) postMain(w http.ResponseWriter, r *http.Request) {
 func (s *Server) agentTarget(w http.ResponseWriter, c Caller, id string) (deckstore.Session, bool) {
 	x, ok := s.store.Session(id)
 	if !ok {
-		fail(w, http.StatusNotFound, "没有会话 %q", id)
+		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.serveragenttarget.1", id))
 		return x, false
 	}
 	if c.Role == RoleMain && x.Project != c.Project {
-		fail(w, http.StatusForbidden, "主 agent 不能操作其他项目的会话")
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.serveragenttarget.2"))
 		return x, false
 	}
 	if x.AgentDeckID == "" {
-		fail(w, http.StatusConflict, "会话 %s 还没起来（%s）", x.Key, x.Status)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.serveragenttarget.3", x.Key, x.Status))
 		return x, false
 	}
 	return x, true
@@ -730,7 +794,7 @@ func (s *Server) getAgentOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agents == nil {
-		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetagentoutput.1"))
 		return
 	}
 	x, ok := s.agentTarget(w, c, r.PathValue("id"))
@@ -739,7 +803,7 @@ func (s *Server) getAgentOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.agents.upstream.PaneOutputPlain(r.Context(), x.AgentDeckID)
 	if err != nil {
-		fail(w, http.StatusBadGateway, "读不到输出：%v", err)
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.servergetagentoutput.2", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "output": deckstore.Clean(out, 20000)})
@@ -752,7 +816,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.agents == nil {
-		fail(w, http.StatusServiceUnavailable, "deckd 没接上 agent-deck")
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.servergetagentoutput.1"))
 		return
 	}
 	if err := s.stopped(); err != nil {
@@ -763,7 +827,7 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		Text string `json:"text"`
 	}
 	if err := readBody(r, &b); err != nil {
-		fail(w, http.StatusBadRequest, "请求体不对：%v", err)
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
 	x, ok := s.agentTarget(w, c, r.PathValue("id"))
@@ -771,11 +835,11 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if x.Role != "sub" {
-		fail(w, http.StatusForbidden, "不能向主 agent 发话（硬拒绝：主 agent 只和 owner 对接）")
+		writeErr(w, http.StatusForbidden, i18n.E("err.deckd.serverpostagentsend.1"))
 		return
 	}
 	if strings.TrimSpace(b.Text) == "" || len(b.Text) > maxTaskBytes {
-		fail(w, http.StatusBadRequest, "消息为空或太长")
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagentsend.2"))
 		return
 	}
 	// 同一个子 agent 的发话一次只走一条（attempt 3 自查：并发发话各自加代次、各自撤回，代次会错位）
@@ -785,37 +849,37 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 	// 只给停下来的子 agent 发新的话（owner 在 attempt 3 设计复审选 A'）：它还在做上一件时追加的话，与上一件的完成分不清先后，
 	// 「哪条报告属于哪件任务」就会错（attempt 3 自查 S1）。这里先按缓存的状态挡一下；真正的判断由上游在打字前一刻做（SendIfIdle）
 	if s.activity.of(x.TmuxSession) == "running" {
-		fail(w, http.StatusConflict, "%s", busySubText)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.busysubtext"))
 		return
 	}
 	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() && cur.BriefSending {
 		// deckd 重启时它的任务正在送：送没送到不确定，deck 不会补送（rev 117），等它出现空输入框前不往它写（评审 3 B1）。
 		// 不能说「会自动送」：没送到时主 agent 照提示不重发就会一直空等（attempt 5 自查）
-		fail(w, http.StatusConflict, "%s 的任务在 deckd 重启时正在送，送没送到不确定，deck 不会补送；它出现输入框之前不能发话，请 owner 在中间看一眼，没收到就停掉它重新派", x.Key)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverpostagentsend.3", x.Key))
 		return
 	}
 	if cur, ok := s.store.Session(x.Key); ok && cur.StartPending() {
 		// 它还在启动期，或 CLI 停在启动确认（目录信任等）上：确认只归 owner，打进去的字加回车就替 owner 选了（n055 自查 B1、评审 1 B2）。
 		// deck 会在 CLI 就绪、owner 处理完确认后自动送它的任务，不要重发
-		fail(w, http.StatusConflict, "%s 还在启动，或 CLI 停在启动确认上等 owner 处理；deck 会在之后自动把任务送进去，不要重发", x.Key)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverpostagentsend.4", x.Key))
 		return
 	}
 	permit, err := s.agents.leases.Automatic(x.AgentDeckID)
 	if err != nil {
-		fail(w, http.StatusConflict, "现在不能给它发话：%v", err)
+		writeErr(w, http.StatusConflict, i18n.E("err.deckd.serverpostagentsend.5", err))
 		return
 	}
 	// 发之前把任务代次加 1 并落盘：上游判定它停着、打进新的话之后，它的报告都属于新任务。记不下代次就不发
 	gen, err := s.store.BumpTaskGen(x.Key)
 	if err != nil {
-		fail(w, http.StatusServiceUnavailable, "记不下子 agent 的任务代次，没有发：%v", err)
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.serverpostagentsend.6", err))
 		return
 	}
 	err = s.agents.upstream.SendIfIdle(detached(r), permit, x.AgentDeckID, b.Text)
 	if err == nil || agentdeck.IsDeliveryUnconfirmed(err) {
 		// 发话返回：之后到的完成都属于新的一代（发的途中到的，按上一代有没有完成来归，见 deckstore EnqueueReport）
 		if eerr := s.store.EndSend(x.Key); eerr != nil {
-			s.store.Notify(x.Project, "report", "记不下发话已结束："+deckstore.Clean(eerr.Error(), 160), "deckd")
+			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.8", deckstore.Arg(eerr, 160)), "deckd")
 		}
 	}
 	switch {
@@ -823,18 +887,18 @@ func (s *Server) postAgentSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"session": x.Key, "delivered": true})
 	case agentdeck.IsDeliveryUnconfirmed(err):
 		// 话可能已打进去、只是没证实提交（Codex 总是这样）：新的一代保留
-		writeJSON(w, http.StatusAccepted, map[string]any{"session": x.Key, "delivered": false, "note": deckstore.Clean(err.Error(), 300)})
+		writeJSON(w, http.StatusAccepted, withNote(map[string]any{"session": x.Key, "delivered": false}, err, 300))
 	default:
 		// 没送成（还在跑，或上游投递失败）：撤回这一代。撤回前已经收到这一代的完成就不撤——那是上一件在这一刻做完的报告，
 		// 照常转告；下次发话再开新的一代
 		if _, rerr := s.store.RevertTaskGen(x.Key, gen); rerr != nil {
-			s.store.Notify(x.Project, "report", "发话没送成后撤回子 agent 的任务代次失败："+deckstore.Clean(rerr.Error(), 160), "deckd")
+			s.store.NotifyCoded(x.Project, "report", i18n.E("err.deckd.serverpostagentsend.9", deckstore.Arg(rerr, 160)), "deckd")
 		}
 		if errors.Is(err, agentdeck.ErrTargetBusy) {
-			fail(w, http.StatusConflict, "%s", busySubText)
+			writeErr(w, http.StatusConflict, i18n.E("err.deckd.busysubtext"))
 			return
 		}
-		fail(w, http.StatusBadGateway, "发话失败：%v", err)
+		writeErr(w, http.StatusBadGateway, i18n.E("err.deckd.serverpostagentsend.7", err))
 	}
 }
 
@@ -853,11 +917,11 @@ func (s *Server) executeCodexTrust(d deckstore.Decision) error {
 	err := s.store.GrantTrust(deckstore.TrustGrant{Project: sc["project"], Tool: sc["tool"], ProjectDir: sc["project_dir"], Dir: sc["dir"],
 		ToolPath: sc["tool_path"], ToolVersion: sc["tool_version"], ApprovedAt: time.Now()})
 	if err != nil {
-		s.store.FinishExecute(d.ID, deckstore.StateFailed, "记不下授权："+err.Error())
+		s.store.FinishExecute(d.ID, deckstore.StateFailed, i18n.E("err.deckd.serverexecutecodextrust.2", err).Error())
 		return err
 	}
-	s.store.FinishExecute(d.ID, deckstore.StateApplied, "已记住授权")
-	s.store.Notify(sc["project"], "trust", fmt.Sprintf("已记住 %s 在 %s 的 Codex 授权；可以重新开子 agent", sc["tool"], sc["dir"]), "owner")
+	s.store.FinishExecute(d.ID, deckstore.StateApplied, i18n.E("err.deckd.serverexecutecodextrust.3").Error())
+	s.store.NotifyCoded(sc["project"], "trust", i18n.E("err.deckd.serverexecutecodextrust.1", sc["tool"], sc["dir"]), "owner")
 	return nil
 }
 
@@ -866,7 +930,7 @@ func projectctlGraphStart(script string) GraphStartFunc {
 	return func(ctx context.Context, p deckstore.ProjectDef, node, actor, model string, route deckstore.Tier) (int, error) {
 		c := projectctl.NewClient(p.GraphRoot, script)
 		res, err := c.Start(ctx, projectctl.StartRequest{NodeID: node, Actor: actor, Role: "workbench_executor",
-			RouteClass: string(route), Model: model, Reason: "安排 Anpai 主 agent 派出"})
+			RouteClass: string(route), Model: model, Reason: i18n.E("err.deckd.projectctlgraphstart.1").Error()})
 		if err != nil {
 			return 0, err
 		}

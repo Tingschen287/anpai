@@ -4,11 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -122,14 +117,14 @@ func TestReview1CASInterleavings(t *testing.T) {
 		if second == nil || len(api.saved[0].Projects) != 1 || picked(&api.saved[0].Projects[0], "codex") {
 			t.Fatal("first snapshot was mutated, or pending save was lost")
 		}
-		if strings.Contains(m.msg, "按 m 起主 agent") {
+		if strings.Contains(m.msg.String(), "按 m 起主 agent") {
 			t.Fatal("new-project hint arrived before its own commit")
 		}
 		run(m, second)
 		if len(api.saved) != 2 || len(api.set.Projects) != 2 || api.set.Projects[1].ID != id || !picked(&api.set.Projects[0], "codex") || m.dirty {
 			t.Fatal("latest edits and the new project must both persist, in order")
 		}
-		if !strings.Contains(m.msg, "按 m 起主 agent") {
+		if !strings.Contains(m.msg.String(), "按 m 起主 agent") {
 			t.Fatal("missing post-commit hint")
 		}
 	})
@@ -201,7 +196,7 @@ func TestReview1LongModelListFailureNote(t *testing.T) {
 	press(m, "a", "down", "enter", "+") // Add grok, then ask its CLI for models.
 	// attempt 3：只有还在等候选时回来的结果才算数（迟到的不覆盖），这里先回到「正在问」的状态再让它报错
 	gt, _ := m.toolInfo("grok")
-	m.sub.input.loading, m.sub.input.note = true, T("input.asking", gt.Binary)
+	m.sub.input.loading, m.sub.input.note = true, lit(T("input.asking", gt.Binary))
 	m.Update(toolModelsMsg{tool: "grok", req: m.sub.input.req, err: errors.New(strings.Repeat("无法连接模型服务；", 80) + "请重试")})
 	v := plainView(m)
 	if n := len(strings.Split(v, "\n")); n > m.height {
@@ -238,8 +233,8 @@ func TestReview1MainMovedText(t *testing.T) {
 	m, _ := n057Fixture()
 	goRow(t, m, rowTier, "", deckstore.Frontier)
 	press(m, "enter", "enter")
-	if strings.Contains(m.msg, "%!") {
-		t.Fatalf("normal removal of the main model produces broken hint: %q", m.msg)
+	if strings.Contains(m.msg.String(), "%!") {
+		t.Fatalf("normal removal of the main model produces broken hint: %q", m.msg.String())
 	}
 }
 
@@ -368,36 +363,9 @@ func TestTallBlockOffsetResetsOnProjectSwitch(t *testing.T) {
 	}
 }
 
-// attempt 2：文字表每条的格式占位符个数与调用时给的参数个数一致（评审 1 已知问题 1：main.moved 少一个参数）。
-func TestTextFormatArgsMatch(t *testing.T) {
-	verb := regexp.MustCompile(`%[-+# 0]*[0-9]*(\.[0-9]+)?[a-zA-Z]`)
-	fset := token.NewFileSet()
-	for _, name := range settingsUIFiles {
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			x, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if id, ok := x.Fun.(*ast.Ident); !ok || id.Name != "T" || len(x.Args) == 0 || x.Ellipsis.IsValid() {
-				return true
-			}
-			lit, ok := x.Args[0].(*ast.BasicLit)
-			if !ok {
-				return true
-			}
-			key, _ := strconv.Unquote(lit.Value)
-			want := len(verb.FindAllString(strings.ReplaceAll(textZH[key], "%%", ""), -1))
-			if got := len(x.Args) - 1; got != want {
-				t.Errorf("%s：T(%q) 给了 %d 个参数，文字里有 %d 个占位符", fset.Position(x.Pos()), key, got, want)
-			}
-			return true
-		})
-	}
-}
+// 文字表每条的格式占位符个数与调用时给的参数个数一致（评审 1 已知问题 1：main.moved 少一个参数）。
+// n060：推广到本段覆盖的全部包，中英两种语言都查。
+func TestTextFormatArgsMatch(t *testing.T) { checkFormatArgs(t) }
 
 // attempt 2 自查：底部放不下（很长的保存报错）时，↑↓ 选行仍看得见光标行、每按一次光标就动一次；报错全文 PgDn 翻得到。
 func TestCursorStaysVisibleWhenFootOverflows(t *testing.T) {
@@ -501,7 +469,7 @@ func TestCandidatesKeptWhenFootOverflows(t *testing.T) {
 		cands = append(cands, fmt.Sprintf("cand-%02d", i))
 	}
 	m.sub.input.all = cands
-	m.saveErr = strings.Repeat("一时存不上的原因；", 70) + "到此为止"
+	m.saveErr = lit(strings.Repeat("一时存不上的原因；", 70) + "到此为止")
 	seen := ""
 	for i := 0; i < 14; i++ {
 		v := plainView(m)

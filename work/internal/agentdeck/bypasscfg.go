@@ -3,7 +3,7 @@ package agentdeck
 import (
 	"bufio"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,14 +41,14 @@ func AgentDeckConfigPath() (string, error) {
 func CheckUpstreamConfigNoBypass(tool string) error {
 	path, err := AgentDeckConfigPath()
 	if err != nil {
-		return fmt.Errorf("找不到 agent-deck 的配置文件，确认不了它不会加跳过权限的参数：%w", err)
+		return i18n.E("err.agentdeck.checkupstreamconfignobypass.1", err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("读不了 %s，确认不了 agent-deck 不会加跳过权限的参数：%w", path, err)
+		return i18n.E("err.agentdeck.checkupstreamconfignobypass.2", path, err)
 	}
-	if err := checkConfigText(tool, string(data)); err != nil {
-		return fmt.Errorf("%s：%w", path, err)
+	if err := checkConfigText(tool, i18n.Neutralize(string(data))); err != nil { // 上游配置文件是外部原文（返工 4）
+		return i18n.E("err.agentdeck.checkupstreamconfignobypass.3", path, err)
 	}
 	return nil
 }
@@ -89,22 +89,22 @@ func checkConfigText(tool, text string) error {
 		}
 		if toolSection(section, tool) {
 			if err := checkToolKey(key, strings.TrimSpace(strings.SplitN(line, "=", 2)[1])); err != nil {
-				return fmt.Errorf("第 %d 行 [%s] %w", n, section, err)
+				return i18n.E("err.agentdeck.checkconfigtext.1", n, section, err)
 			}
 		}
 		if section == "shell" && key == "exit_to_shell" && value != "false" {
-			return fmt.Errorf("第 %d 行：[shell] exit_to_shell 会让上游在 CLI 外面再套一个交互 shell，deck 核对不了，请 owner 去掉或改为 false", n)
+			return i18n.E("err.agentdeck.checkconfigtext.2", n)
 		}
 		switch {
 		case full == "claude" || strings.HasPrefix(full, "claude.") && section != "claude":
 			if k := strings.TrimPrefix(full, "claude."); k == "claude" || isSwitch(k) {
-				return fmt.Errorf("第 %d 行用点号或内联表写了 claude 的开关，deck 读不懂，确认不了不会加跳过权限的参数", n)
+				return i18n.E("err.agentdeck.checkconfigtext.3", n)
 			}
 		case section == "claude":
 			claude[key] = value
 		case strings.HasPrefix(section, "tools.") && (key == "dangerous_mode" || key == "yolo_mode") && value != "false":
 			// 上游自定义工具声明了 dangerous_mode 时，会把它的 dangerous_flag 加到命令上（n051 自查）
-			return fmt.Errorf("第 %d 行：[%s] %s 会让这个自定义工具跳过权限确认，请 owner 去掉或改为 false", n, section, key)
+			return i18n.E("err.agentdeck.checkconfigtext.4", n, section, key)
 		case section == "codex" || section == "gemini":
 			if key == "yolo_mode" {
 				yolo[section] = value
@@ -114,22 +114,21 @@ func checkConfigText(tool, text string) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("读配置失败：%w", err)
+		return i18n.E("err.agentdeck.checkconfigtext.5", err)
 	}
 	switch {
 	case tool == "claude":
 		if claude["dangerous_mode"] != "false" {
-			return errors.New("agent-deck 会给 Claude Code 加 --dangerously-skip-permissions（v1.15 的 [claude] dangerous_mode 不写时默认开启）。" +
-				"请 owner 在这个文件的 [claude] 下写 dangerous_mode = false 后再开")
+			return i18n.E("err.agentdeck.checkconfigtext.6")
 		}
 		for _, k := range []string{"allow_dangerous_mode", "auto_mode"} {
 			if claude[k] == "true" {
-				return fmt.Errorf("[claude] %s = true 会让 Claude Code 跳过权限确认，请 owner 改为 false 后再开", k)
+				return i18n.E("err.agentdeck.checkconfigtext.7", k)
 			}
 		}
 	case tool == "codex" || tool == "gemini":
 		if yolo[tool] == "true" {
-			return fmt.Errorf("[%s] yolo_mode = true 会让会话跳过权限确认，请 owner 改为 false 后再开", tool)
+			return i18n.E("err.agentdeck.checkconfigtext.8", tool)
 		}
 	}
 	return nil
@@ -150,17 +149,17 @@ func checkToolKey(key, raw string) error {
 		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
 			v = v[1 : len(v)-1]
 		} else {
-			return fmt.Errorf("command = %s：deck 只放行一个带引号的命令名或路径", raw)
+			return i18n.E("err.agentdeck.checktoolkey.1", raw)
 		}
 		if v == "" || strings.ContainsAny(v, " \t\\\"'$`;&|<>(){}") {
-			return fmt.Errorf("command = %s：只能是裸命令名或路径（上游把多出来的词原样接在命令行上），参数请写进 deck 设置的 extra_args 由 owner 逐字声明", raw)
+			return i18n.E("err.agentdeck.checktoolkey.2", raw)
 		}
 	case "extra_args":
 		if strings.ReplaceAll(raw, " ", "") != "[]" {
-			return fmt.Errorf("extra_args = %s：必须为空，额外参数请写进 deck 设置由 owner 逐字声明", raw)
+			return i18n.E("err.agentdeck.checktoolkey.3", raw)
 		}
 	case "wrapper":
-		return fmt.Errorf("wrapper = %s：上游会在 CLI 外面再套一层 shell，deck 核对不了，请 owner 去掉", raw)
+		return i18n.E("err.agentdeck.checktoolkey.4", raw)
 	}
 	return nil
 }
@@ -205,7 +204,7 @@ func CustomToolNotCodex(tool string) bool {
 	if err != nil {
 		return false
 	}
-	return customToolNotCodex(tool, string(data))
+	return customToolNotCodex(tool, i18n.Neutralize(string(data)))
 }
 
 func customToolNotCodex(tool, text string) bool {

@@ -3,7 +3,7 @@ package deckd
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +42,7 @@ func NewTmuxCenter(layoutSocket, agentSocket string) *TmuxCenter {
 }
 
 // ErrNoCenter 表示布局没起来，或中间窗格里没有连上的 client。
-var ErrNoCenter = errors.New("找不到中间窗格的 client（布局没起来，或中间窗格正在重连）")
+var ErrNoCenter = i18n.E("err.deckd.pkg.1")
 
 // client 找中间现在的 client；有绑定时还要求就是绑定的那个。
 func (c *TmuxCenter) client() (agentdeck.TmuxClient, error) {
@@ -65,7 +65,7 @@ func (c *TmuxCenter) find(bound int) (agentdeck.TmuxClient, error) {
 	for _, p := range panes {
 		if p.Role == "center" {
 			if centerPID != 0 {
-				return agentdeck.TmuxClient{}, errors.New("布局里有两个中间窗格，无法判定")
+				return agentdeck.TmuxClient{}, i18n.E("err.deckd.tmuxcenterfind.1")
 			}
 			centerPID = p.PID
 		}
@@ -96,12 +96,12 @@ func (c *TmuxCenter) find(bound int) (agentdeck.TmuxClient, error) {
 	}
 	switch {
 	case len(hits) > 1:
-		return agentdeck.TmuxClient{}, fmt.Errorf("中间窗格下有 %d 个 client，无法判定", len(hits))
+		return agentdeck.TmuxClient{}, i18n.E("err.deckd.tmuxcenterfind.2", len(hits))
 	case len(hits) == 0 && (bound == 0 || bound == viewstate.NoClient):
 		return agentdeck.TmuxClient{}, ErrNoCenter
 	case bound != 0 && (len(hits) == 0 || hits[0].PID != bound): // bound 为 NoClient 时，出现的任何 client 都不是这次的
 		// 重建的 client 与旧的共用中间窗格的 tty：不核对进程号就会把旧操作做到新 client 上（n049 评审 2 B1）
-		return agentdeck.TmuxClient{}, fmt.Errorf("%w（这次操作绑定的 client %d 已不在中间）", viewstate.ErrStaleClient, bound)
+		return agentdeck.TmuxClient{}, i18n.E("err.deckd.tmuxcenterfind.3", viewstate.ErrStaleClient, bound)
 	case len(hits) == 0:
 		return agentdeck.TmuxClient{}, ErrNoCenter
 	}
@@ -127,13 +127,13 @@ func (c *TmuxCenter) SetReadOnly(ro bool) error {
 	}
 	if st.PID != cl.PID {
 		// 翻转落到了共用 tty 的新 client 上（它还被切到了旧 client 的会话）：还原它
-		return c.replaced(ctx, "翻转只读", cl, st)
+		return c.replaced(ctx, i18n.E("err.deckd.tmuxcentersetreadonly.3"), cl, st)
 	}
 	if st.ReadOnly != ro {
-		return fmt.Errorf("只读标记读回不对（要 %v，得 %v）", ro, st.ReadOnly)
+		return i18n.E("err.deckd.tmuxcentersetreadonly.1", ro, st.ReadOnly)
 	}
 	if st.Session != cl.Session {
-		return fmt.Errorf("翻转只读时 client 被切走了（%s → %s）", cl.Session, st.Session)
+		return i18n.E("err.deckd.tmuxcentersetreadonly.2", cl.Session, st.Session)
 	}
 	return nil
 }
@@ -159,7 +159,7 @@ func (c *TmuxCenter) ReadOnly() (bool, error) {
 		return false, err
 	}
 	if st.PID != cl.PID {
-		return false, fmt.Errorf("%w（读只读标记时中间 client 被替换了：%d → %d）", viewstate.ErrStaleClient, cl.PID, st.PID)
+		return false, i18n.E("err.deckd.tmuxcenterreadonly.1", viewstate.ErrStaleClient, cl.PID, st.PID)
 	}
 	return st.ReadOnly, nil
 }
@@ -176,18 +176,33 @@ func (c *TmuxCenter) Switch(tmuxSession string) error {
 	}
 	st, err := agentdeck.ClientState(ctx, c.AgentSocket, cl.TTY)
 	if err != nil {
-		return fmt.Errorf("%w（切换后读不到中间 client：%v）", viewstate.ErrStaleClient, err)
+		return i18n.E("err.deckd.tmuxcenterswitch.1", viewstate.ErrStaleClient, err)
 	}
 	if st.PID != cl.PID {
-		return c.replaced(ctx, "切换", cl, st)
+		return c.replaced(ctx, i18n.E("err.deckd.tmuxcenterswitch.2"), cl, st)
 	}
 	return nil
+}
+
+// whyList 把还原中收集到的各条错误拼成一组参数，各条之间换行，Error() 和 errors.Join 逐字一样。
+// 每一条各自带码，英文界面不会留下中文标点。没有错误时返回 nil，和 errors.Join 一样。
+func whyList(errs ...error) any {
+	var parts []any
+	for _, e := range errs {
+		if e != nil {
+			parts = append(parts, e)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return i18n.ListOf("sep.nl", parts...)
 }
 
 // replaced：命令执行后读回发现落到了新 client 上（新旧 client 共用中间窗格的 tty，「找到 client」与「执行命令」
 // 之间新 client 恰好连上）。把新 client 还原到起点（deck-idle、只读），返回 ErrStaleClient（n049 评审 3 B1-A 的第二道）。
 // 新 client 自己的重连通知要等这次操作放锁后才执行，还原不会与它交错。
-func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentdeck.TmuxClient) error {
+func (c *TmuxCenter) replaced(ctx context.Context, what any, old, now agentdeck.TmuxClient) error {
 	var errs []error
 	if now.Session != viewstate.Idle {
 		errs = append(errs, agentdeck.SwitchClient(ctx, c.AgentSocket, now.TTY, viewstate.Idle))
@@ -198,15 +213,14 @@ func (c *TmuxCenter) replaced(ctx context.Context, what string, old, now agentde
 	// 还原要读回确认：还是这个新 client、在 deck-idle、只读，才算回到起点（n049 评审 4：还原命令可能失败）
 	st, err := agentdeck.ClientState(ctx, c.AgentSocket, now.TTY)
 	if err == nil && st.PID == now.PID && st.Session == viewstate.Idle && st.ReadOnly {
-		return fmt.Errorf("%w（%s时中间 client 被替换了：%d → %d；已把新 client 还原到起点）", viewstate.ErrStaleClient, what, old.PID, now.PID)
+		return i18n.E("err.deckd.tmuxcenterreplaced.1", viewstate.ErrStaleClient, what, old.PID, now.PID)
 	}
-	why := errors.Join(append(errs, err)...)
-	state := "读不回"
+	why := whyList(append(errs, err)...)
+	var state any = i18n.E("err.deckd.tmuxcenterreplaced.4")
 	if err == nil {
-		state = fmt.Sprintf("client %d 在 %s、只读 %v", st.PID, st.Session, st.ReadOnly)
+		state = i18n.E("err.deckd.tmuxcenterreplaced.2", st.PID, st.Session, st.ReadOnly)
 	}
-	return fmt.Errorf("%w：%w（%s时中间 client 被替换了：%d → %d；还原后%s；%v）",
-		viewstate.ErrStaleClient, viewstate.ErrRestoreUnconfirmed, what, old.PID, now.PID, state, why)
+	return i18n.E("err.deckd.tmuxcenterreplaced.3", viewstate.ErrStaleClient, viewstate.ErrRestoreUnconfirmed, what, old.PID, now.PID, state, why)
 }
 
 // LastInput 是 owner 最后一次在中间打字的时间（client_activity，精度 1 秒）。
@@ -226,7 +240,7 @@ func (c *TmuxCenter) LastInput() (time.Time, error) {
 // 按会话名抓，不看中间 client 正显示哪个（client 重建后它在 deck-idle 上）。
 func (c *TmuxCenter) Capture(session string, lines int) ([]string, error) {
 	if session == "" || session == viewstate.Idle {
-		return nil, fmt.Errorf("不抓占位会话 %q 当交还摘要", session)
+		return nil, i18n.E("err.deckd.tmuxcentercapture.1", session)
 	}
 	all, err := agentdeck.CaptureSession(context.Background(), c.AgentSocket, session)
 	if err != nil {

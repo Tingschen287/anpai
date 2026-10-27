@@ -19,6 +19,7 @@ import (
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 )
 
 // agent 设置界面（架构稿 §14.2，n049；n057 owner：「我没看到哪里可以配置我全局可用的agent和模型，还有每个主会话可用的agent和模型」）：
@@ -26,7 +27,7 @@ import (
 //   - 「全局 agent」页：从本机装了的 CLI 里加入、移出；每个 agent 的模型增删、改 id、标档位（⏎ 打开 agent）；
 //   - 「授权」页：撤销已记住的 Codex 授权。
 // n059（owner：「UIUE能不能再优化得更舒服一点。更简单点」）：分页（Tab 切换）、改完自动保存、档位用中文、
-// 底部一行随光标变化的说明、光标行整行高亮；界面文字都从文字表取（settings_text.go）。
+// 底部一行随光标变化的说明、光标行整行高亮；界面文字都从文字表取（internal/i18n，经 T）。
 // 数据与校验在 deckd（n050），这里只编辑并整份 PUT 回去（带上读到的代数，别处改过就拒绝）。
 // 启动额外参数（extra_args）、命令（binary）、agent 标记不在界面里改，只显示并说明去哪改。
 
@@ -52,10 +53,32 @@ type ToolInfo struct {
 	Error     string               `json:"error"`
 	Added     bool                 `json:"added"`
 	CanList   bool                 `json:"can_list"`
+	// 按哪份 PATH 查的（n060 段 4）：login-shell 是会话 PATH；process 是没取到会话 PATH、退回 deckd 自己的，此时 Note* 说明原因
+	PathSource string `json:"path_source,omitempty"`
+	Note       string `json:"note,omitempty"`
+	NoteCode   string `json:"note_code,omitempty"`
+	NoteArgs   []any  `json:"note_args,omitempty"`
+	// PathRefreshing：deckd 正在后台重读会话 PATH（启动那次、或有人按了刷新键），这里的路径与版本是上一份快照的结果
+	PathRefreshing bool `json:"path_refreshing,omitempty"`
 }
+
+// pathRefresher 是设置接口可选的能力：「刷新会话 PATH」键（POST /v1/tools/refresh，deckd 在后台重读一次登录 shell 的 PATH，会运行 owner 的登录启动文件）。
+// 真接口有；测试里的假接口按需加（没有它这个键什么都不做）。
+type pathRefresher interface {
+	RefreshPath(ctx context.Context) error
+	// PathRefreshing：deckd 的那次读还在不在跑（轮询用，不跑任何 CLI 的版本查询）
+	PathRefreshing(ctx context.Context) (bool, error)
+}
+
+// toolsPreloader 是设置接口可选的能力：读完设置后在后台取一次工具目录（deckd 按会话 PATH 查各 CLI 装没装），只用来决定「没装」的标记。
+// 真接口有；测试里的假接口按需加（没有它就不取，行为与以前一样）。
+type toolsPreloader interface{ PreloadTools() bool }
 
 // DeckSettingsAPI 走 deckd。
 type DeckSettingsAPI struct{ C *deckclient.Client }
+
+// PreloadTools：设置进程自己的 PATH 与会话的未必一样，装没装以 deckd 说的为准（n060 段 4）。
+func (a DeckSettingsAPI) PreloadTools() bool { return true }
 
 func (a DeckSettingsAPI) Load(ctx context.Context) (deckstore.Settings, []deckstore.TrustGrant, error) {
 	var s deckstore.Settings
@@ -71,13 +94,37 @@ func (a DeckSettingsAPI) Load(ctx context.Context) (deckstore.Settings, []deckst
 
 func (a DeckSettingsAPI) Save(ctx context.Context, s deckstore.Settings) (int, error) {
 	var out deckstore.Settings
-	err := a.C.Do(ctx, "PUT", "/v1/settings", map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}, &out)
+	body := map[string]any{"agents": s.Agents, "projects": s.Projects, "generation": s.Generation}
+	if s.UILang != "" {
+		body["ui_lang"] = s.UILang // 没选过语言就不带：deckd 当作「不动已存的」（n060 段 3）
+	}
+	err := a.C.Do(ctx, "PUT", "/v1/settings", body, &out)
 	return out.Generation, err
+}
+
+// SyncLang 向 deckd 对一次界面语言并采用（返工 2，M2：设置进程空闲时也要定期对，见 Settings.langTick）。
+func (a DeckSettingsAPI) SyncLang(ctx context.Context) error {
+	_, err := a.C.SyncLang(ctx)
+	return err
 }
 
 func (a DeckSettingsAPI) Revoke(ctx context.Context, project, tool string) error {
 	var out any
 	return a.C.Do(ctx, "DELETE", "/v1/trust?project="+url.QueryEscape(project)+"&tool="+url.QueryEscape(tool), nil, &out)
+}
+
+// RefreshPath：请 deckd 在后台重读一次会话 PATH，立即返回；读完与否看 Tools 里的 PathRefreshing。
+func (a DeckSettingsAPI) RefreshPath(ctx context.Context) error {
+	var out any
+	return a.C.Do(ctx, "POST", "/v1/tools/refresh", nil, &out)
+}
+
+func (a DeckSettingsAPI) PathRefreshing(ctx context.Context) (bool, error) {
+	var out struct {
+		Refreshing bool `json:"refreshing"`
+	}
+	err := a.C.Get(ctx, "/v1/tools/refresh", &out)
+	return out.Refreshing, err
 }
 
 func (a DeckSettingsAPI) Tools(ctx context.Context) ([]ToolInfo, error) {
@@ -102,6 +149,7 @@ const (
 	rowTrust                    // 一条记住的授权
 	rowGlobal                   // 全局可用的一个 agent（⏎ 打开编辑）
 	rowAddAgent                 // 「加入本机的 agent」
+	rowLang                     // 「界面语言」（n060 段 3）：在「通用」页，中文 / English，空格或 ⏎ 切换
 )
 
 type row struct {
@@ -118,10 +166,20 @@ const (
 	pageProject page = iota // 这个项目用哪些 agent、主 agent、三档模型
 	pageAgents              // 全局可用的 agent 与它们的模型
 	pageTrust               // 已记住的 Codex 授权
+	pageGeneral             // 通用（n060 段 3 返工：界面语言）。加在最后，前三页的顺序与数字键不变
 	pageCount
 )
 
-var pageText = [pageCount]string{"page.project", "page.agents", "page.trust"}
+var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust", "page.general"}
+
+// TextKeys 返回页签文字键。tabBar 用下标取，调用处不是字符串字面量。
+func TextKeys() []string {
+	out := make([]string, len(pageText))
+	for i, k := range pageText {
+		out[i] = string(k)
+	}
+	return out
+}
 
 // Settings 是设置界面的 Bubble Tea 模型。
 type Settings struct {
@@ -140,10 +198,19 @@ type Settings struct {
 	saving   bool        // 有一次保存在路上
 	pending  bool        // 保存在路上时又改了
 	conflict bool        // 别处改过（409）：不再自动保存，等 owner 按 R 重新读取
-	saveErr  string      // 上一次保存没成的原因
+	saveErr  lazyText    // 上一次保存没成的原因（存怎么取文字，切语言后下一帧就是新语言，返工 2）
 	saved    bool        // 存成过（底部显示「已保存」）
 	scr      scrollState // 画面滚动（n059 attempt 2）
 	reloads  int         // 按 R 重读的次数：重读之前发出的保存回来时认得出（n059 自查）
+	saves    int         // 发出过的保存次数（含手动 s 重试）：静默重读发出之后又保存过，它的回包就是旧的（段 3 返工 3，R2-2）
+	quietSeq int         // 静默重读的请求序号：只认最新发出的那一次（段 3 返工 3，R2-2）
+	// quietBusy：有一份静默读取在路上。同一时刻只允许一份：在途时轮询不发新读取、也不加序号，回包处理完（接受、丢弃、失败、
+	// 超时都算）才清掉，下一拍才能再读；否则读取比轮询周期慢（load 最长 5 秒，轮询 2 秒）时每份回包都被后来的序号作废，永远对不齐（段 3 返工 4，R3-1）
+	quietBusy bool
+	// langAt：最后一次与 deckd 对齐的权威语言（读设置时 deckd 说的语言；自己存上语言时是存下的那个）。"" 是还不知道，
+	// 此时用设置里的 ui_lang 代替；"?" 是读设置的那一刻别的请求正好换过语言，对不准。进程当前语言与它不一致，
+	// 不管是哪个请求换的，都要静默重读（段 3 返工 3，R2-3）
+	langAt string
 	// 再按一次确认：q（有没存上的改动时关闭）、R（丢掉没存上的改动重读）、d（撤销授权）各自确认（n057 自查：不能共用）
 	quitAsked   bool
 	reloadAsked bool
@@ -151,42 +218,67 @@ type Settings struct {
 	revokeAsked *deckstore.TrustGrant
 	// hintEdits：新建项目那一刻的改动计数；存上了含这次改动的保存才显示「去侧栏按 m」（n059 自查）
 	hintEdits int
-	msg       string
+	msg       lazyText // 底部的提示：存怎么取文字，不存译文（返工 2，M1）
 	loaded    bool
+	langArmed bool // Init 之后还没开定时对语言：第一次读完设置时开
 	width     int
 	height    int
 	// Start 是新建项目时目录浏览的起点（deck settings 进程的当前目录，即 deck up 所在的目录，n055）
 	Start string
 	form  *projectForm // 不为 nil：正在新建项目
-	hint  string       // 下一次保存成功后显示的提示（新建项目后的下一步）
+	hint  lazyText     // 下一次保存成功后显示的提示（新建项目后的下一步）
 	sub   *subView     // 不为 nil：正在编辑一个 agent、加入 agent、编辑某一档清单（n057）
 	tools []ToolInfo   // 工具目录（打开「加入」或 agent 时读）
+	// deckTools：deckd 说的各 CLI 装没装（第一次读完设置后在后台取一次，打开「加入」或 agent 时刷新）。
+	// 「没装」标记以它为准：deckd 按会话 PATH 查，设置进程自己的 PATH 与会话的未必一样（n060 段 4）。
+	deckTools []ToolInfo
+	toolsAsk  bool // 已经发出过后台取工具目录
+	// pathBusy：这个窗口按过「刷新会话 PATH」键、还在等 deckd 读完（连按忽略；deckd 那边多个窗口同时按也只读一次）
+	pathBusy bool
 }
 
 type loadedMsg struct {
 	set       deckstore.Settings
 	trust     []deckstore.TrustGrant
 	err       error
-	trustOnly bool // 只换授权列表，不动正在编辑的设置
-	force     bool // owner 按 R 重新读取：丢掉没存上的改动
-}
-type doneMsg struct {
-	what    string
-	err     error
-	save    bool // 是保存（不是撤销授权）
-	edits   int  // 保存时的改动计数
-	gen     int  // 保存时带的代数
-	saved   int  // 存下的代数（deckd 回的）
-	reloads int  // 发出时的重读次数
+	trustOnly bool   // 只换授权列表，不动正在编辑的设置
+	force     bool   // owner 按 R 重新读取：丢掉没存上的改动
+	lang      string // 读设置时 deckd 说的语言（读的过程中别的请求换过语言就是 "?"）
+	// quiet：语言变了之后的静默重读。stamp 记着发出那一刻的序号和编辑、保存、强制重读的计数；
+	// 回包时对不上（之后有过编辑、保存、强制重读，或出了更新的静默重读）就整个丢弃（段 3 返工 3，R2-2）
+	quiet bool
+	stamp quietStamp
 }
 
-func (m *Settings) Init() tea.Cmd { return m.load }
+// quietStamp 是静默重读发出那一刻的状态。
+type quietStamp struct{ seq, edits, reloads, saves int }
+type doneMsg struct {
+	what    lazyText // 动作的名字（撤销授权等），随语言重画
+	err     error
+	save    bool   // 是保存（不是撤销授权）
+	edits   int    // 保存时的改动计数
+	gen     int    // 保存时带的代数
+	saved   int    // 存下的代数（deckd 回的）
+	reloads int    // 发出时的重读次数
+	lang    string // 保存时带的界面语言（n060 段 3）：存上了才换语言
+}
+
+func (m *Settings) Init() tea.Cmd {
+	m.langArmed = true
+	return m.load
+}
 
 func (m *Settings) load() tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	seq := i18n.LangSeq()
 	s, g, err := m.API.Load(ctx)
-	return loadedMsg{set: s, trust: g, err: err}
+	lang := i18n.Lang()
+	if i18n.LangSeq() != seq {
+		// 读的过程中进程语言变过：可能是这次响应带来的，也可能是别的请求换的，分不清，不当成已对齐，之后的对时会再读一次（R2-3）
+		lang = "?"
+	}
+	return loadedMsg{set: s, trust: g, err: err, lang: lang}
 }
 
 // loadTrust 重读授权列表，保留界面上的设置。
@@ -202,6 +294,8 @@ func (m *Settings) touch() {
 	m.edits++
 }
 
+// installed 说明一个 agent 的命令装没装。顺序：测试注入的 Installed；deckd 按会话 PATH 查的结果（命令与工具目录里的一致时）；
+// 都没有（deckd 还没答复、旧 deckd、自定义命令）才在本进程的 PATH 里找（n060 段 4：本进程的 PATH 与会话的未必一样）。
 func (m *Settings) installed(a deckstore.AgentDef) bool {
 	bin := a.Binary
 	if bin == "" {
@@ -209,6 +303,11 @@ func (m *Settings) installed(a deckstore.AgentDef) bool {
 	}
 	if m.Installed != nil {
 		return m.Installed(bin)
+	}
+	for _, t := range m.deckTools {
+		if t.Tool == a.Tool && t.Binary == bin {
+			return t.Installed
+		}
 	}
 	_, err := exec.LookPath(bin)
 	return err == nil
@@ -244,6 +343,8 @@ func (m *Settings) rows() []row {
 		for _, g := range m.trust {
 			rs = append(rs, row{kind: rowTrust, trust: g})
 		}
+	case pageGeneral:
+		rs = append(rs, row{kind: rowLang})
 	}
 	return rs
 }
@@ -253,7 +354,7 @@ func (m *Settings) switchPage(to page) {
 	m.curs[m.page] = m.cur
 	m.page = (to%pageCount + pageCount) % pageCount
 	m.cur = m.curs[m.page]
-	m.msg = ""
+	m.msg = nil
 }
 
 func (m *Settings) agent(id string) (deckstore.AgentDef, bool) {
@@ -379,7 +480,7 @@ func (m *Settings) cycleMain() {
 	p := m.project()
 	opts := m.mainOptions(p)
 	if len(opts) == 0 {
-		m.msg = T("main.none")
+		m.msg = later(func() string { return T("main.none") })
 		return
 	}
 	next := opts[0]
@@ -392,13 +493,115 @@ func (m *Settings) cycleMain() {
 	m.touch()
 }
 
+// 设置进程持续跟随界面语言（n060 段 3 返工 2，M2）。
+//
+// 以前设置进程只在 owner 动作时向 deckd 发请求，闲着的时候从不对语言：别的设置窗口（或别的办法）改了语言，这个开着的窗口不会换，
+// 迟到的旧响应改回旧语言之后也没有人再把它对回来。现在第一次读到设置之后，每 settingsLangEvery 向 deckd 对一次
+// （GET /v1/lang；和面板、中间窗格暂停时的 2 秒同一节奏，侧栏与标签条是 1 秒），语言变了就重画；
+// 没有未存的改动时顺便静默重读设置，让「界面语言」那一行和代数跟上（有未存的改动就不动它们）。
+// 过时的响应不会把较新的语言改回去：见 deckclient.Client.Do 的语言代次。
+var settingsLangEvery = 2 * time.Second // var 只为让测试缩短它
+
+// 定时链只在 Init 之后的第一次读完设置时开（langArmed）：之后按 R 重读、静默重读、撤销授权后刷新授权列表，读完都不再开新链，
+// 所以同时只有一条链在转，也不会让测试里 run() 一路跟着命令走的写法（按 R 重读之类）掉进无限的 tick 里。
+type langTickMsg struct{}
+
+// langSyncedMsg 是一次对语言的结果：changed 为真表示这次对时本进程的语言变了。
+type langSyncedMsg struct{ changed bool }
+
+// langSyncer 是设置接口可选的能力：向 deckd 对一次界面语言。测试里的假接口可以没有它。
+type langSyncer interface {
+	SyncLang(ctx context.Context) error
+}
+
+func (m *Settings) langTick() tea.Cmd {
+	return tea.Tick(settingsLangEvery, func(time.Time) tea.Msg { return langTickMsg{} })
+}
+
+func (m *Settings) syncLangCmd() tea.Cmd {
+	return func() tea.Msg {
+		before := i18n.Lang()
+		if s, ok := m.API.(langSyncer); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			s.SyncLang(ctx) // 连不上就保持现有语言，下一轮再对
+		}
+		return langSyncedMsg{changed: i18n.Lang() != before}
+	}
+}
+
 func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	mm, cmd := m.update(msg)
+	switch msg := msg.(type) {
+	case loadedMsg:
+		if m.langArmed { // Init 之后的第一次读完（成功或失败）开始定时对语言，之后一直转下去
+			m.langArmed = false
+			cmd = tea.Batch(cmd, m.langTick())
+		}
+		if p, ok := m.API.(toolsPreloader); ok && p.PreloadTools() && msg.err == nil && !msg.quiet && !msg.trustOnly && !m.toolsAsk {
+			m.toolsAsk = true // 第一次读到设置：后台问一次 deckd 各 CLI 装没装（n060 段 4）
+			cmd = tea.Batch(cmd, m.fetchToolsBg())
+		}
+	case langTickMsg:
+		cmd = m.syncLangCmd()
+	case langSyncedMsg:
+		cmd = m.langTick()
+		// 不只看这一次对时前后语言有没有变：取工具、取候选这类请求也会先换语言（deckclient 采用响应头里的语言），
+		// 那样下一次对时前后都是新语言，changed 为假。所以另看进程语言与最后一次对齐的语言是否一致（R2-3）。
+		if (msg.changed || m.langDiverged()) && m.loaded && m.clean() && !m.quietBusy {
+			cmd = tea.Batch(cmd, m.reloadQuietCmd())
+		}
+	}
+	return mm, cmd
+}
+
+// clean 说明设置没有任何未存的改动、保存和冲突：这时才能让静默重读替换 m.set。
+func (m *Settings) clean() bool { return !m.dirty && !m.saving && !m.pending && !m.conflict }
+
+// langDiverged 说明进程当前语言与设置最后一次对齐的权威语言不一致。
+func (m *Settings) langDiverged() bool {
+	at := m.langAt
+	if at == "" && i18n.ValidLang(m.set.UILang) {
+		at = m.set.UILang
+	}
+	return at != "" && at != i18n.Lang()
+}
+
+// reloadQuietCmd 静默重读设置和授权（别处改了语言之后让本窗口的「界面语言」行和代数跟上；没有未存的改动时才用）。
+// 它有自己的请求序号，并记下发出时的编辑、保存、强制重读计数：回包时之后有过这些，或出了更新的静默重读，回包整个丢弃，
+// 不替换 m.set、不清 dirty、不回滚代数；按 R 的强制重读是另一回事，照旧（R2-2）。
+//
+// 同一时刻只允许一份在途（quietBusy）：有在途读取时调用方不再发新的，也不增加序号（段 3 返工 4，R3-1）。
+func (m *Settings) reloadQuietCmd() tea.Cmd {
+	m.quietSeq++
+	m.quietBusy = true
+	st := quietStamp{seq: m.quietSeq, edits: m.edits, reloads: m.reloads, saves: m.saves}
+	return func() tea.Msg {
+		msg := m.load().(loadedMsg)
+		msg.quiet, msg.stamp = true, st
+		return msg
+	}
+}
+
+// quietStale 说明一个静默重读的回包已经过时，必须丢弃。
+func (m *Settings) quietStale(st quietStamp) bool {
+	return st.seq != m.quietSeq || st.edits != m.edits || st.reloads != m.reloads || st.saves != m.saves || !m.clean()
+}
+
+func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
+		if msg.quiet && msg.stamp.seq == m.quietSeq {
+			m.quietBusy = false // 这份在途读取回来了（成功、失败、超时、过时都一样）：下一拍才能再读
+		}
+		if msg.quiet && m.quietStale(msg.stamp) {
+			return m, nil // 过时的静默回包（成功或失败）：什么也不动，也不冒出读取失败的提示
+		}
 		if msg.err != nil {
-			m.msg = T("load.fail", errLong(msg.err))
+			err := msg.err
+			m.msg = later(func() string { return T("load.fail", errLong(err)) })
 			return m, nil
 		}
 		if msg.trustOnly {
@@ -407,27 +610,34 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.set, m.trust, m.loaded, m.dirty = msg.set, msg.trust, true, false
+		m.langAt = msg.lang
 		if msg.force {
 			m.edits++   // 路上那次保存回来时不再当成「存上了现在的设置」
 			m.reloads++ // 路上那次保存回来时认得出是重读之前发的
-			m.sub, m.msg, m.hint = nil, T("reload.done"), ""
-			m.conflict, m.saveErr, m.pending, m.saved = false, "", false, false
+			m.sub, m.msg, m.hint = nil, later(func() string { return T("reload.done") }), nil
+			m.conflict, m.saveErr, m.pending, m.saved = false, nil, false, false
 			m.revokeAsked = nil
 		}
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
 		}
-	case toolsMsg, toolModelsMsg:
+	case toolsMsg, toolModelsMsg, pathRefreshMsg:
 		return m, m.subMsg(msg)
+	case toolsBgMsg:
+		if msg.err == nil {
+			m.deckTools = msg.tools
+		}
+		return m, nil
 	case doneMsg:
 		if msg.save {
 			return m, m.saveDone(msg)
 		}
-		if msg.err != nil {
-			m.msg = T("action.fail", msg.what, errLong(msg.err))
+		what, err := msg.what, msg.err
+		if err != nil {
+			m.msg = later(func() string { return T("action.fail", what, errLong(err)) })
 			return m, nil
 		}
-		m.msg = T("action.done", msg.what)
+		m.msg = later(func() string { return T("action.done", what) })
 		return m, m.loadTrust
 	case tea.KeyMsg:
 		switch k := msg.String(); k {
@@ -518,15 +728,16 @@ func (m *Settings) save() tea.Cmd {
 	set, err := cloneSettings(m.set)
 	if err != nil {
 		m.saving = false
-		m.saveErr = errLong(err)
+		m.saveErr = errNote(err)
 		return nil
 	}
+	m.saves++
 	edits, reloads := m.edits, m.reloads
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		saved, err := m.API.Save(ctx, set)
-		return doneMsg{what: T("save"), err: err, save: true, edits: edits, gen: set.Generation, saved: saved, reloads: reloads}
+		return doneMsg{what: later(func() string { return T("save") }), err: err, save: true, edits: edits, gen: set.Generation, saved: saved, reloads: reloads, lang: set.UILang}
 	}
 }
 
@@ -551,12 +762,12 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 	if msg.err != nil {
 		var de *deckclient.Error
 		if errors.As(msg.err, &de) && de.Status == http.StatusConflict {
-			m.hint = "" // 要重读，新项目会丢：不再提示去侧栏；一时存不上的留着，重试存上后照样提示（n059 自查 2）
+			m.hint = nil // 要重读，新项目会丢：不再提示去侧栏；一时存不上的留着，重试存上后照样提示（n059 自查 2）
 			m.conflict, m.pending = true, false
-			m.saveErr = T("save.conflict")
+			m.saveErr = later(func() string { return T("save.conflict") })
 			return nil
 		}
-		m.saveErr = errLong(msg.err)
+		m.saveErr = errNote(msg.err)
 		if m.pending && m.edits != msg.edits { // 之后的改动可能已经把它改对了
 			m.pending = false
 			return m.autosave()
@@ -564,12 +775,18 @@ func (m *Settings) saveDone(msg doneMsg) tea.Cmd {
 		m.pending = false
 		return nil
 	}
-	m.saveErr, m.saved = "", true
+	m.saveErr, m.saved = nil, true
+	if i18n.ValidLang(msg.lang) {
+		// 语言存上了才换（deckd 的响应头也会让本进程换到同一个语言；这里不依赖它，测试里的假 API 也一样）。
+		// 其他界面进程在下一次向 deckd 取数时跟着换：侧栏、标签条 1 秒内，面板 2 秒内
+		i18n.SetLang(msg.lang)
+		m.langAt = msg.lang // 自己存上的语言就是此刻的权威语言
+	}
 	if m.set.Generation == msg.gen {
 		m.set.Generation = msg.saved // 下一次保存带存下的代数（rev 127 起代数不是 +1，用 deckd 回的）
 	}
-	if m.hint != "" && msg.edits >= m.hintEdits {
-		m.msg, m.hint = m.hint, ""
+	if !m.hint.empty() && msg.edits >= m.hintEdits {
+		m.msg, m.hint = m.hint, nil
 	}
 	if msg.edits == m.edits {
 		m.dirty, m.pending = false, false
@@ -595,11 +812,14 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 	case "q", "esc", "ctrl+c":
 		if (m.dirty || m.saving) && !m.quitAsked && k != "ctrl+c" {
 			m.quitAsked = true
-			why := m.saveErr
-			if why == "" {
-				why = T("quit.saving")
-			}
-			m.msg = T("quit.unsaved", why)
+			saveErr := m.saveErr
+			m.msg = later(func() string {
+				why := saveErr.String()
+				if why == "" {
+					why = T("quit.saving")
+				}
+				return T("quit.unsaved", why)
+			})
 			return m, nil
 		}
 		return m, tea.Quit
@@ -607,7 +827,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		m.switchPage(m.page + 1)
 	case "shift+tab":
 		m.switchPage(m.page - 1)
-	case "1", "2", "3":
+	case "1", "2", "3", "4":
 		m.switchPage(page(k[0] - '1'))
 	case "up", "k":
 		m.cur = max(0, m.cur-1)
@@ -640,6 +860,8 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, m.openAgent(r.agent)
 		case rowAddAgent:
 			return m, m.openAdd()
+		case rowLang:
+			m.toggleLang()
 		}
 	case "a":
 		if m.loaded {
@@ -652,24 +874,25 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		g := rs[m.cur].trust
 		if a := m.revokeAsked; a == nil || a.Project != g.Project || a.Tool != g.Tool {
 			m.revokeAsked = &g
-			m.msg = T("trust.confirm", g.Project, g.Tool)
+			project, tool := g.Project, g.Tool
+			m.msg = later(func() string { return T("trust.confirm", project, tool) })
 			return m, nil
 		}
 		m.revokeAsked = nil
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			return doneMsg{what: T("trust.revoke", g.Project, g.Tool), err: m.API.Revoke(ctx, g.Project, g.Tool)}
+			return doneMsg{what: later(func() string { return T("trust.revoke", g.Project, g.Tool) }), err: m.API.Revoke(ctx, g.Project, g.Tool)}
 		}
 	case "s":
 		// 存不上（不是冲突，例如 deckd 一时连不上）时手动重试；平时改动自动保存，用不着它（n059 自查）
-		if m.dirty && !m.saving && !m.conflict && m.saveErr != "" {
+		if m.dirty && !m.saving && !m.conflict && !m.saveErr.empty() {
 			return m, m.autosave()
 		}
 	case "R":
 		if m.dirty && !m.reloadAsked {
 			m.reloadAsked = true
-			m.msg = T("reload.confirm")
+			m.msg = later(func() string { return T("reload.confirm") })
 			return m, nil
 		}
 		m.reloadAsked = false
@@ -686,7 +909,7 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		if start == "" {
 			start, _ = os.Getwd()
 		}
-		m.form, m.msg = newProjectForm(start), ""
+		m.form, m.msg = newProjectForm(start), nil
 	}
 	return m, nil
 }
@@ -725,7 +948,19 @@ func (m *Settings) fixMain(p *deckstore.ProjectDef) {
 	if opts := m.mainOptions(p); len(opts) > 0 {
 		p.MainAgent = opts[0]
 	}
-	m.msg = T("main.moved", m.agentName(old.Agent), tierName(old.Tier), m.agentName(old.Agent), m.mainText(p.MainAgent))
+	oldName, oldTier, now := m.agentName(old.Agent), old.Tier, m.mainTextFn(p.MainAgent)
+	m.msg = later(func() string { return T("main.moved", oldName, tierName(oldTier), oldName, now()) })
+}
+
+// mainTextFn 同 mainText，但名字现在取、档位名到画的时候才取（提示要随语言重画，名字不能引用以后会变的设置）。
+func (m *Settings) mainTextFn(ma deckstore.MainAgent) func() string {
+	name := m.agentName(ma.Agent) // 原始的名字：显示清洗（含打码记号的语言）放进下面的函数，画的时候按当时的语言做（返工 3，R2-4）
+	return func() string {
+		if ma.Agent == "" {
+			return T("main.unset")
+		}
+		return sanitizeFull(name) + " · " + tierName(ma.Tier)
+	}
 }
 
 // mainText 是「agent · 档位」的显示（未选时写明）。
@@ -825,10 +1060,24 @@ var sgrRe = regexp.MustCompile("\x1b\\[[0-9;:]*m")
 
 // sanitizeFull 是设置界面显示 owner 的数据（名字、模型 id、目录、路径、清单）用的清理：与侧栏的 sanitize 一样去控制字符、打码，
 // 但不按 80 个字截短，长的交给出口折行显示全（n059 自查 4：模型 id 可到 128 字、目录与清单更长，按 80 截就看不全）。
-func sanitizeFull(s string) string { return oneLine(deckstore.Clean(strings.TrimSpace(s), 1024)) }
+//
+// 入口先把输入里的标记字符中和（段 3 返工 3，R2-1）：这里显示的都是外部文字（文件系统里的目录名、配置里的名字、工具返回的路径），
+// 里面带的标记字符只可能是伪造的，不能被后面的 Display 当成真打码；真打码只由 Display 自己对疑似密钥打码时才产生，在画的这一刻按当时的语言换成记号。
+// deckd 已经 Clean 过的字段（工具版本）不在此列，走 shownCleaned（返工 4，R3-2）。
+func sanitizeFull(s string) string {
+	return oneLine(deckstore.Display(i18n.Neutralize(strings.TrimSpace(s)), 1024))
+}
+
+// shownCleaned 是显示「已经由 deckd 清洗过」的文字用的出口（段 3 返工 4，R3-2）：与 sanitizeFull 一样去控制字符、打码、不截短，
+// 但不在入口中和标记字符，里面真打码的标记留到画的时候按当时的语言换成记号。
+// 只给 deckd 已经 Clean 过的字段用（目前只有工具版本 ToolInfo.Version，deckd/tools.go 的 deckstore.Clean(ver, 80)）；
+// 外部原文（目录名、配置里的名字、工具路径……）一律走 sanitizeFull。
+func shownCleaned(s string) string {
+	return oneLine(deckstore.Display(strings.TrimSpace(s), 1024))
+}
 
 // errLong 把错误清洗成一行：与 errText 一样，但上限是 textCap 而不是 120（n059 自查 4：「先运行 deck daemon」这样的后半句被截掉）。
-func errLong(err error) string { return oneLine(deckstore.Clean(err.Error(), textCap)) }
+func errLong(err error) string { return oneLine(deckstore.Display(deckclient.Show(err), textCap)) }
 
 // wrap 把一行按窗口宽度折成几行（留出行首 lead 格）：在空格处折，单个词比一行还宽就硬折；不截短。
 func (m *Settings) wrap(s string, lead int) []string {
@@ -858,7 +1107,7 @@ func (m *Settings) note(s string) string {
 }
 
 // tierName 是档位的中文名（n059，owner：「先中文」）：文件、命令行 --tier 与 deckd 接口仍用英文。
-func tierName(t deckstore.Tier) string { return T("tier." + string(t)) }
+func tierName(t deckstore.Tier) string { return T(i18n.Key("tier." + string(t))) }
 
 // tierColor 是档位的颜色：三档一眼分得开。
 func tierColor(t deckstore.Tier) string {
@@ -885,13 +1134,13 @@ func (m *Settings) hl(s string) string {
 	return s + reset
 }
 
-// tabBar 是顶部：标题与三个页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
+// tabBar 是顶部：标题与各页页签，下面一条分隔线和一个空行（fitHeight 把空行以上当作固定的标题）。
 func (m *Settings) tabBar() string {
 	var tabs []string
-	for i, key := range pageText {
-		name := " " + T(key) + " "
+	for i := range pageText {
+		name := " " + T(pageText[i]) + " "
 		if page(i) == pageTrust && len(m.trust) > 0 {
-			name = " " + T(key) + fmt.Sprintf(" %d ", len(m.trust))
+			name = " " + T(pageText[i]) + fmt.Sprintf(" %d ", len(m.trust))
 		}
 		if page(i) == m.page {
 			tabs = append(tabs, tabOn+name+reset)
@@ -920,7 +1169,7 @@ func (m *Settings) View() string {
 	var b strings.Builder
 	b.WriteString(m.tabBar())
 	if !m.loaded {
-		b.WriteString("  " + m.msg + "\n")
+		b.WriteString("  " + m.msg.String() + "\n")
 		return m.fitScreen(m.fitWidth(b.String()), nil, 1) // 读不到设置的报错也折行（n059 自查 4）
 	}
 	line, lastSel := 0, false
@@ -947,6 +1196,8 @@ func (m *Settings) View() string {
 		m.agentsPage(&b, row, cont)
 	case pageTrust:
 		m.trustPage(&b, row, cont)
+	case pageGeneral:
+		m.generalPage(&b, row)
 	}
 	keep := 1
 	if m.page == pageProject && m.project() != nil {
@@ -1050,6 +1301,51 @@ func (m *Settings) agentsPage(b *strings.Builder, row, cont func(string) string)
 	b.WriteString(row(dimOn+"+ "+T("agents.add")+reset) + "\n")
 }
 
+// generalPage 是「通用」页（n060 段 3 返工，owner 定：界面语言单独一页）：现在只有界面语言一行。
+func (m *Settings) generalPage(b *strings.Builder, row func(string) string) {
+	b.WriteString(row(m.langRow()) + "\n")
+}
+
+// uiLang 是界面语言一行此刻选中的：owner 选过的；没选过（升级的老用户）就是此刻界面正在用的（deckd 说的，老用户是中文）。
+func (m *Settings) uiLang() string {
+	if i18n.ValidLang(m.set.UILang) {
+		return m.set.UILang
+	}
+	return i18n.Lang()
+}
+
+// toggleLang 在中文与 English 之间切换。改的是设置里的 ui_lang，和别的设置一样自动保存；存上之后界面才换语言（saveDone）。
+func (m *Settings) toggleLang() {
+	next := i18n.EN
+	if m.uiLang() == i18n.EN {
+		next = i18n.ZH
+	}
+	m.set.UILang = next
+	m.touch()
+}
+
+// langName 是语言的显示名：中文界面「中文 / English」，英文界面「Chinese / English」。
+func langName(code string) string {
+	if code == i18n.EN {
+		return T("settings.lang.en")
+	}
+	return T("settings.lang.zh")
+}
+
+// langRow 是「界面语言」一行：当前选中的亮着。
+func (m *Settings) langRow() string {
+	cur := m.uiLang()
+	var opts []string
+	for _, code := range []string{i18n.ZH, i18n.EN} {
+		if code == cur {
+			opts = append(opts, green+"●"+reset+" "+bold+langName(code)+reset)
+		} else {
+			opts = append(opts, dimOn+"○ "+langName(code)+reset)
+		}
+	}
+	return bold + T("settings.lang.label") + reset + "  " + strings.Join(opts, "   ")
+}
+
 // modelTokens 把一个 agent 的模型按档位从高到低分组：每组第一个带档位名，组内用「、」接，组间空三格。折行只在这些地方断。
 func modelTokens(a deckstore.AgentDef) []string {
 	var toks []string
@@ -1121,16 +1417,16 @@ func (m *Settings) foot() []string {
 	var out []string
 	switch {
 	case m.conflict:
-		out = append(out, orange+" "+m.saveErr+reset)
-	case m.saving || (m.dirty && m.saveErr == ""):
+		out = append(out, orange+" "+m.saveErr.String()+reset)
+	case m.saving || (m.dirty && m.saveErr.empty()):
 		out = append(out, dimOn+" "+T("status.saving")+reset)
-	case m.saveErr != "":
-		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Clean(m.saveErr, msgCap)))+reset)
+	case !m.saveErr.empty():
+		out = append(out, orange+" "+T("status.failed", oneLine(deckstore.Display(m.saveErr.String(), msgCap)))+reset)
 	case m.saved:
 		out = append(out, green+" "+T("status.saved")+reset)
 	}
-	if m.msg != "" {
-		out = append(out, " "+oneLine(deckstore.Clean(m.msg, msgCap)))
+	if !m.msg.empty() {
+		out = append(out, " "+oneLine(deckstore.Display(m.msg.String(), msgCap)))
 	}
 	if m.height <= 0 || m.height >= 13 {
 		if h := m.rowHelp(); h != "" {
@@ -1175,6 +1471,8 @@ func (m *Settings) rowHelp() string {
 		return T("help.agent")
 	case rowAddAgent:
 		return T("help.add")
+	case rowLang:
+		return T("help.lang")
 	case rowTrust:
 		return T("help.trust")
 	}
@@ -1188,6 +1486,8 @@ func (m *Settings) pageKeys() string {
 		return T("keys.project")
 	case pageAgents:
 		return T("keys.agents")
+	case pageGeneral:
+		return T("keys.general")
 	}
 	return T("keys.trust")
 }
