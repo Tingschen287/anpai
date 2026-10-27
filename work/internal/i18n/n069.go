@@ -1,0 +1,86 @@
+package i18n
+
+// n069 新增的文字：设置里的「面板」页、进度面板的跟随说明与分段条、挂拔面板的布局报错。
+var n069ZH = map[Key]string{
+	// 设置「面板」页
+	"page.panels":              "面板",
+	"keys.panels":              "Tab 换页  ↑↓ 选  空格或 ⏎ 挂上/拔掉  R 重读  q 关闭",
+	"help.panel":               "空格或 ⏎ 挂上或拔掉这块面板：立刻作用于正在运行的布局，不用重建，也存进 panels.yaml，下次 deck up 照样",
+	"panels.title":             "面板",
+	"panels.about":             "右栏与下栏的插件面板。挂上的显示在布局里；拔掉的程序会结束，额度面板拔掉不影响额度门。每块面板改一次存一次。",
+	"panels.loading":           "正在读面板……",
+	"panels.empty":             "面板注册表是空的（panels.yaml）",
+	"panels.unavailable":       "这个设置界面连不上面板接口",
+	"panels.load.fail":         "读不到面板：%s",
+	"panels.state.on":          "已挂上",
+	"panels.state.off":         "未挂",
+	"panels.region.right":      "右栏",
+	"panels.region.bottom":     "下栏",
+	"panels.set.on":            "已挂上「%s」，布局已更新",
+	"panels.set.off":           "已拔掉「%s」，布局已更新",
+	"panels.set.notapplied":    "「%s」的改动已保存，但布局没有跟上：%s（下次 deck up 会按保存的来）",
+	"panels.set.fail":          "「%s」没改成：%s",
+	"panel.name.decisions":     "需要你决策",
+	"panel.name.progress":      "项目进度",
+	"panel.name.quota":         "额度",
+	"panel.name.activity":      "agent 在干嘛",
+	"panel.name.notifications": "通知",
+	// 进度面板
+	"progress.heading":          "项目进度",
+	"progress.rest":             "其余",
+	"progress.follow.none":      "现在没有在看的会话。在左栏点一个会话，这里就显示它所在项目的进度",
+	"progress.follow.noproject": "正在看的会话不属于任何项目，没有进度可显示",
+	// 布局：挂拔面板
+	"err.layout.removepanel":            "拔不掉面板 %s：%w",
+	"err.layout.attachpanel":            "挂不上面板 %s：%w",
+	"err.layout.nocenter":               "布局里没有中间窗格",
+	"err.layout.region":                 "没有 %q 这一栏",
+	"err.layout.restore.tabs":           "标签条接不回原位（它还在后台窗口里照常运行）：%w",
+	"err.layout.restore.side":           "侧栏接不回原位（它还在后台窗口里照常运行）：%w",
+	"err.layout.lock":                   "另一个布局操作还没做完：%w",
+	"err.deckd.setpanel.apply":          "改动没有作用到布局：%v",
+	"err.agentdeck.removepane.notpanel": "窗格 %s 的角色是 %q，不是面板，不拆",
+}
+
+var n069EN = map[Key]string{
+	"page.panels":                       "Panels",
+	"keys.panels":                       "Tab page  ↑↓ move  Space/Enter attach or detach  R reload  q close",
+	"help.panel":                        "Space or Enter attaches or detaches this panel in the running layout right away, no rebuild; it is also saved to panels.yaml, so the next deck up keeps it",
+	"panels.title":                      "Panels",
+	"panels.about":                      "The plug-in panels in the right column and the bottom bar. Attached ones show in the layout; a detached panel's program ends, and detaching the quota panel does not affect the quota gate. Each change is saved as you make it.",
+	"panels.loading":                    "Reading panels...",
+	"panels.empty":                      "The panel registry (panels.yaml) is empty",
+	"panels.unavailable":                "This settings screen cannot reach the panel API",
+	"panels.load.fail":                  "Cannot read panels: %s",
+	"panels.state.on":                   "Attached",
+	"panels.state.off":                  "Off",
+	"panels.region.right":               "right column",
+	"panels.region.bottom":              "bottom bar",
+	"panels.set.on":                     "Attached \"%s\"; the layout is updated",
+	"panels.set.off":                    "Detached \"%s\"; the layout is updated",
+	"panels.set.notapplied":             "The change to \"%s\" is saved, but the layout did not follow: %s (the next deck up uses what is saved)",
+	"panels.set.fail":                   "Could not change \"%s\": %s",
+	"panel.name.decisions":              "Needs your decision",
+	"panel.name.progress":               "Project progress",
+	"panel.name.quota":                  "Quota",
+	"panel.name.activity":               "What the agents are doing",
+	"panel.name.notifications":          "Notifications",
+	"progress.heading":                  "Project progress",
+	"progress.rest":                     "Other",
+	"progress.follow.none":              "No session is open right now. Pick one in the left sidebar and this panel shows the progress of its project",
+	"progress.follow.noproject":         "The session on screen does not belong to a project, so there is no progress to show",
+	"err.layout.removepanel":            "cannot detach panel %s: %w",
+	"err.layout.attachpanel":            "cannot attach panel %s: %w",
+	"err.layout.nocenter":               "The layout has no center pane",
+	"err.layout.region":                 "No column %q",
+	"err.layout.restore.tabs":           "The tab strip could not be put back (it is still running in a background window): %w",
+	"err.layout.restore.side":           "The sidebar could not be put back (it is still running in a background window): %w",
+	"err.layout.lock":                   "Another layout operation is still running: %w",
+	"err.deckd.setpanel.apply":          "the change did not reach the layout: %v",
+	"err.agentdeck.removepane.notpanel": "pane %s has role %q, which is not a panel; not removing it",
+}
+
+func init() {
+	mergeErr(zh, n069ZH, "zh")
+	mergeErr(en, n069EN, "en")
+}

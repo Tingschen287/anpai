@@ -59,7 +59,7 @@ func RunQuota(c *deckclient.Client, modeOf func() string) error {
 		if w <= 0 || h <= 0 {
 			w, h = 10, 20
 		}
-		key := fmt.Sprintf("%s/%dx%d/%d", tool, w, h, rows)
+		key := fmt.Sprintf("%s/%dx%d/%d/%s", tool, w, h, rows, logo.BackgroundKey())
 		if v, ok := cache[key]; ok {
 			return v
 		}

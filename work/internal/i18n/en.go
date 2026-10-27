@@ -210,7 +210,6 @@ var en = map[Key]string{
 	"act.role.sub":            "Sub-agent",
 	"act.role.main":           "★Main",
 	"panel.err.unknown":       "No panel %q (choices: %v)",
-	"panel.err.project":       "The progress panel needs --project",
 	"panel.err.missing":       "No panel %s",
 	"panel.err.answer":        "Couldn't answer: ",
 	"panel.err.answered":      "Answered: ",

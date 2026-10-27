@@ -43,6 +43,10 @@ func (t TmuxMux) ResizeHeight(pane, height string) error {
 	return agentdeck.LayoutResizeHeight(context.Background(), t.Socket, pane, height)
 }
 
+func (t TmuxMux) Remove(pane string) error {
+	return agentdeck.LayoutRemovePane(context.Background(), t.Socket, pane)
+}
+
 // paneNum 取 pane id（%12）里的数字，取不到返回很大的数（排到最后）。
 func paneNum(id string) int {
 	n, err := strconv.Atoi(strings.TrimPrefix(id, "%"))

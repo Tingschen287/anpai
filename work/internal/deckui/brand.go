@@ -23,3 +23,19 @@ func BrandFor(cols int) string {
 	}
 	return BrandShort
 }
+
+// BrandIn 是某种语言下的完整产品名（标签标题用：deck up 不跟界面语言，要按设置里的语言取名字）。
+// 中文「安排 Anpai」，英文「Anpai」；语言不认识当中文。
+func BrandIn(lang string) string {
+	var s string
+	var ok bool
+	if lang == i18n.EN {
+		s, ok = i18n.TextEN("brand.name")
+	} else {
+		s, ok = i18n.TextZH("brand.name")
+	}
+	if !ok {
+		return BrandShort
+	}
+	return s
+}

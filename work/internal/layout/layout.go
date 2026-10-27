@@ -47,6 +47,8 @@ type Mux interface {
 	Unpark(pane, target string, spec agentdeck.SplitSpec) error
 	ResizeWidth(pane, width string) error
 	ResizeHeight(pane, height string) error
+	// Remove 拆掉一个面板窗格（只许面板，n069）。
+	Remove(pane string) error
 }
 
 // Spec 是一次布局的参数。
@@ -62,6 +64,7 @@ type Spec struct {
 	BottomHeight int // 下栏高，默认 6
 	Panels       []deckstore.PanelDef
 	Graphics     string // logo 画法：sixel、blocks、none（经布局 server 的环境变量 DECK_GRAPHICS 传给侧栏）
+	Title        string // 终端标签标题（品牌名，按界面语言；n069）。空则不设标题
 }
 
 func (s Spec) withDefaults() Spec {
@@ -142,6 +145,13 @@ func BaseConf(s Spec) string {
 	}
 	if s.Graphics != "" {
 		b.WriteString("set-environment -g DECK_GRAPHICS " + Quote(s.Graphics) + "\n")
+	}
+	// 终端标签标题（n069，owner 在 iTerm2 看到标签只写「tmux」）：tmux 用 set-titles 往外层终端发标题，标题串引用用户选项，
+	// 换界面语言只改这一个选项（侧栏做）。deck up 对已经在运行的布局也调 LayoutEnsureTitle 补设
+	if s.Title != "" {
+		b.WriteString("set -g " + agentdeck.TitleOption + " " + Quote(s.Title) + "\n")
+		b.WriteString("set -g set-titles-string " + Quote(agentdeck.TitleFormat) + "\n")
+		b.WriteString("set -g set-titles on\n")
 	}
 	return b.String()
 }
@@ -258,15 +268,29 @@ func Normalize(m Mux, s Spec) error {
 			return err
 		}
 	}
-	for i, p := range right {
-		if i == 0 {
-			if err := m.ResizeWidth(p.ID, strconv.Itoa(s.RightWidth)); err != nil {
+	// 右栏高度：第 2 块起每块 rightStack 行，第 1 块拿剩下的。tmux 调一块的高度是向它下面那一块借、还，
+	// 所以只调第 2 块起的话，第 1 块不动、最后一块吃掉全部差额：三块以上的右栏会被压成 26/2/1 行
+	// （n069 真机 e2e 抓到，挂上第三块面板时才暴露）。按自上而下的顺序把前 n-1 块都调到目标，最后一块自然就是 rightStack。
+	if len(right) > 0 {
+		if err := m.ResizeWidth(right[0].ID, strconv.Itoa(s.RightWidth)); err != nil {
+			return err
+		}
+	}
+	if n := len(right); n >= 2 {
+		h := max(3, (s.Height-s.BottomHeight)/n)
+		total := n - 1 // 各块之间的边框
+		for _, p := range right {
+			total += p.Height
+		}
+		first := max(3, total-(n-1)*(h+1))
+		for i, p := range right[:n-1] {
+			target := h
+			if i == 0 {
+				target = first
+			}
+			if err := m.ResizeHeight(p.ID, strconv.Itoa(target)); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := m.ResizeHeight(p.ID, s.rightStack(len(right))); err != nil {
-			return err
 		}
 	}
 	return nil

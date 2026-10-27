@@ -48,7 +48,14 @@ type Config struct {
 	// 之后只有 owner 在 F9 按「刷新会话 PATH」键才会再读（POST /v1/tools/refresh）；打开设置、进加入页和 agent 页、派工、列模型都只用当前快照，不会运行 rc。
 	// 只有 deck daemon 设它。
 	SessionPath bool
+	// PanelApplier 把面板注册表的改动作用到正在运行的布局上（n069：F9 设置里挂上、拔掉面板，立即生效，不重建布局）。
+	// nil（测试、布局没接上）= 只存注册表，下次建布局时才生效。deck daemon 在生产里设它。
+	PanelApplier PanelApplier
 }
+
+// PanelApplier 让布局与面板注册表 defs 一致，返回新挂上与拔掉的面板名。调用方（deckd）保证同一时刻只有一次在跑，
+// 并且 defs 是调用时刻存储里最新的注册表。出错时已做的部分保留。
+type PanelApplier func(ctx context.Context, defs []deckstore.PanelDef) (attached, removed []string, err error)
 
 type paneResolver interface {
 	ResolvePeer(ctx context.Context, peer identity.Peer) (identity.Pane, error)
@@ -70,6 +77,7 @@ type Server struct {
 	quota     *dashquota.Client
 	view      *viewstate.Machine
 	progress  ProgressFunc
+	panelMu   sync.Mutex // 挂拔面板：存注册表、改布局串行，两个窗口同时挂拔最后收敛到存储里的状态（n069）
 	// 只在测试里设置：按请求决定调用者。生产路径没有任何方式设置它。
 	callerFn func(*http.Request) Caller
 	// activity 是 agent-deck 会话状态的缓存（n049，侧栏状态圆点）；没配上游地址时为 nil。
@@ -503,6 +511,14 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if project == "" && c.Role == RoleOwner {
+		// owner 没指定项目：跟着中间窗格正在看的会话所属的项目（n069）。没有可跟的就如实说原因，不当错误
+		var reason string
+		if project, reason = s.followedProject(); project == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"project": "", "graph": false, "follow": true, "reason": reason})
+			return
+		}
+	}
 	p, found := s.store.Settings().Project(project)
 	if !found {
 		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.servergetprogress.1", project))
@@ -520,6 +536,26 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// followedProject 是中间窗格正在看的会话所属的项目（n069，进度面板没指定项目时跟它）。
+// 取不到时返回空项目与原因：no_session（没有在看的会话）、no_project（会话不属于设置里的项目）。
+func (s *Server) followedProject() (project, reason string) {
+	if s.view == nil {
+		return "", "no_session"
+	}
+	focus := s.view.State().Focus
+	if focus == "" || focus == viewstate.Idle {
+		return "", "no_session"
+	}
+	sess, ok := s.store.Session(focus)
+	if !ok {
+		return "", "no_session"
+	}
+	if _, found := s.store.Settings().Project(sess.Project); sess.Project == "" || !found {
+		return "", "no_project"
+	}
+	return sess.Project, ""
 }
 
 // ---------------- 写 ----------------
@@ -792,11 +828,32 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
+	// 存与改布局放在同一把锁里：改布局时读的是此刻存储里最新的注册表，两个窗口同时挂拔不会各按各的旧值改
+	s.panelMu.Lock()
+	defer s.panelMu.Unlock()
 	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
 		storeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.Panels())
+	defs := s.store.Panels()
+	body := map[string]any{"panels": defs, "applied": false, "attached": []string{}, "removed": []string{}}
+	if s.cfg.PanelApplier != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		attached, removed, err := s.cfg.PanelApplier(ctx, defs)
+		if attached != nil {
+			body["attached"] = attached
+		}
+		if removed != nil {
+			body["removed"] = removed
+		}
+		// 已存下的不回滚：注册表是 owner 的意愿，布局没跟上只如实说一声（界面显示原因；下次建布局会按注册表来）
+		body["applied"] = err == nil
+		if err != nil {
+			withNote(body, i18n.E("err.deckd.setpanel.apply", err), 300)
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ---------------- SSE ----------------

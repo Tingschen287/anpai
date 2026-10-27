@@ -36,6 +36,11 @@ func shortSockServer(t *testing.T, lang *atomic.Value, hits *atomic.Int32) *deck
 			hits.Add(1)
 		}
 		w.Header().Set(i18n.LangHeader, lang.Load().(string))
+		if r.Method == "GET" && r.URL.Path == "/v1/progress" {
+			// n069：没指定项目的进度面板向 deckd 要「跟随当前看的会话」的进度；这里回「没有在看的会话」
+			w.Write([]byte(`{"project":"","graph":false,"follow":true,"reason":"no_session"}`))
+			return
+		}
 		if r.Method == "GET" {
 			w.Write([]byte(`[]`))
 			return
@@ -120,17 +125,19 @@ func TestN060S3Fix2DecisionAnswerErrorNoteFollowsLanguageSwitch(t *testing.T) {
 	}
 }
 
-// M3：没指定项目的进度面板，提示照旧，但每一轮仍向 deckd 对一次语言，提示按当前语言画。
+// M3：没指定项目的进度面板，每一轮向 deckd 对一次语言，提示按当前语言画。
+// n069 改过的断言：以前没指定项目就地报「要指定 --project」、不向 deckd 取数（所以要自己对语言）；现在没指定项目是「跟随当前看的会话」，
+// 每一轮都向 deckd 取进度，语言头随响应来，提示是「现在没有在看的会话」。断言改为这句话（中英各一）；每轮一次请求、语言跟上的要求不变。
 func TestN060S3Fix2ProgressWithoutProjectFollowsLanguage(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	var lang atomic.Value
 	lang.Store("zh")
 	var hits atomic.Int32
-	m := &model{name: "progress", c: shortSockServer(t, &lang, &hits).FollowLang()}
+	m := &model{name: "progress", c: shortSockServer(t, &lang, &hits).FollowLang(), width: 60}
 	m.Update(m.fetch()())
-	if v := m.View(); !strings.Contains(v, "--project") || !hasHan(v) {
-		t.Fatalf("中文下照旧显示要指定项目的提示：%q", v)
+	if v := m.View(); !strings.Contains(v, "没有在看的会话") || strings.Contains(v, "--project") {
+		t.Fatalf("中文下应说明没有在看的会话（不再要求指定 --project）：%q", v)
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("每一轮都要向 deckd 对一次语言：请求数 %d", hits.Load())
@@ -142,7 +149,7 @@ func TestN060S3Fix2ProgressWithoutProjectFollowsLanguage(t *testing.T) {
 		t.Fatalf("每一轮都要对：请求数 %d", hits.Load())
 	}
 	v := m.View()
-	if i18n.Lang() != i18n.EN || hasHan(v) || !strings.Contains(v, "--project") {
+	if i18n.Lang() != i18n.EN || hasHan(v) || !strings.Contains(v, "No session is open") {
 		t.Errorf("没指定项目的进度面板没有跟上语言：lang=%s %q", i18n.Lang(), v)
 	}
 }

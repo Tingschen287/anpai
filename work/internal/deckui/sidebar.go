@@ -265,12 +265,13 @@ func (s *Sidebar) logoLines(tool string) []string {
 	return []string{fmt.Sprintf(" \x1b[1;38;2;%d;%d;%dm%s\x1b[0m  ", b.Color.R, b.Color.G, b.Color.B, b.Letter), "    "}
 }
 
-func (s *Sidebar) sixel(tool string) string {
+func (s *Sidebar) sixel(tool string, selected bool) string {
 	cw, ch := s.CellW, s.CellH
 	if cw <= 0 || ch <= 0 {
 		cw, ch = 10, 20
 	}
-	key := fmt.Sprintf("%s/%dx%d", tool, cw, ch)
+	// 合成背景（iTerm2，n069）随终端背景变，选中的行底色不同，缓存键里都带上
+	key := fmt.Sprintf("%s/%dx%d/%s/%v", tool, cw, ch, logo.BackgroundKey(), selected)
 	if s.cache == nil {
 		s.cache = map[string]string{}
 	}
@@ -279,7 +280,12 @@ func (s *Sidebar) sixel(tool string) string {
 	}
 	// 高度按两行算、宽度取同样像素，图是正方形；不会超出四列（字符格通常是 1:2）
 	side := min(logoRows*ch, logoCols*cw)
-	v := logo.Sixel(logo.For(tool), side, side)
+	var v string
+	if selected {
+		v = logo.SixelOver(logo.For(tool), side, side, logo.SelectedRowBG)
+	} else {
+		v = logo.Sixel(logo.For(tool), side, side)
+	}
 	s.cache[key] = v
 	return v
 }
@@ -293,7 +299,7 @@ func (s *Sidebar) deckIcon() string {
 	if cw <= 0 || ch <= 0 {
 		cw, ch = 10, 20
 	}
-	key := fmt.Sprintf("deck/%dx%d", cw, ch)
+	key := fmt.Sprintf("deck/%dx%d/%s", cw, ch, logo.BackgroundKey())
 	if s.cache == nil {
 		s.cache = map[string]string{}
 	}
@@ -374,7 +380,7 @@ func (s *Sidebar) Render(w, h int) Frame {
 			r2 := bar + lg[1] + bg + " " + Fit("\x1b[38;5;245m"+sub+"\x1b[0m"+bg, content) + bg + "  \x1b[0m"
 			im := ""
 			if s.Mode == "sixel" && logo.For(x.Tool) != nil {
-				im = s.sixel(x.Tool)
+				im = s.sixel(x.Tool, s.Proj == "" && idx == s.Sel)
 			}
 			body = append(body, row{text: r1, idx: idx, eye: true, image: im}, row{text: r2, idx: idx})
 			idx++

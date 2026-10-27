@@ -17,6 +17,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
+	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/viewstate"
@@ -287,6 +288,8 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 	}
 	defer d.close()
 	sb := &Sidebar{Mode: modeOf()}
+	lastBG := logo.BackgroundKey()
+	titleLang := i18n.Lang() // 起动时的标题由 deck up 设好；之后语言变了才改
 	sb.CellW, sb.CellH = cellSize()
 	l := newLoop(api)
 	var raw Data
@@ -338,8 +341,18 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 			sb.CellW, sb.CellH = cellSize()
 			last = ""
 		case <-tick.C:
-			if m := modeOf(); m != sb.Mode {
-				sb.Mode, sb.cache, last = m, nil, ""
+			// modeOf 顺带按文件更新合成背景色（logo.Apply）：画法或背景色变了就清缓存重画（n069）
+			if m, bk := modeOf(), logo.BackgroundKey(); m != sb.Mode || bk != lastBG {
+				sb.Mode, sb.cache, last, lastBG = m, nil, "", bk
+			}
+			// 界面语言换了：终端标签标题跟着换（中文「安排 Anpai」，英文「Anpai」，n069）
+			if lg := i18n.Lang(); lg != titleLang {
+				titleLang = lg
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel()
+					agentdeck.LayoutSetTitle(ctx, layoutSock, BrandIn(lg))
+				}()
 			}
 		case r := <-started:
 			delete(starting, r.project)

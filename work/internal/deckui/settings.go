@@ -150,6 +150,7 @@ const (
 	rowGlobal                   // 全局可用的一个 agent（⏎ 打开编辑）
 	rowAddAgent                 // 「加入本机的 agent」
 	rowLang                     // 「界面语言」（n060 段 3）：在「通用」页，中文 / English，空格或 ⏎ 切换
+	rowPanel                    // 一块面板（n069，「面板」页）：空格或 ⏎ 挂上、拔掉
 )
 
 type row struct {
@@ -157,6 +158,7 @@ type row struct {
 	agent string
 	tier  deckstore.Tier
 	trust deckstore.TrustGrant
+	panel string // rowPanel：面板名
 }
 
 // page 是设置的一页（n059，owner 选「分页，Tab 切换」）：一页只做一件事。
@@ -167,10 +169,11 @@ const (
 	pageAgents              // 全局可用的 agent 与它们的模型
 	pageTrust               // 已记住的 Codex 授权
 	pageGeneral             // 通用（n060 段 3 返工：界面语言）。加在最后，前三页的顺序与数字键不变
+	pagePanels              // 面板（n069）：挂上、拔掉右栏与下栏的面板。同样加在最后，前四页的顺序与数字键不变
 	pageCount
 )
 
-var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust", "page.general"}
+var pageText = [pageCount]i18n.Key{"page.project", "page.agents", "page.trust", "page.general", "page.panels"}
 
 // TextKeys 返回页签文字键。tabBar 用下标取，调用处不是字符串字面量。
 func TextKeys() []string {
@@ -178,6 +181,11 @@ func TextKeys() []string {
 	for i, k := range pageText {
 		out[i] = string(k)
 	}
+	for _, k := range panelNameKey { // 「面板」页上内置面板的显示名（经 map 取，调用处不是字符串字面量）
+		out = append(out, string(k))
+	}
+	out = append(out, "brand.name") // BrandIn 按指定语言取产品名（TextZH/TextEN，不经 T）
+	sort.Strings(out[len(pageText):])
 	return out
 }
 
@@ -235,6 +243,11 @@ type Settings struct {
 	toolsAsk  bool // 已经发出过后台取工具目录
 	// pathBusy：这个窗口按过「刷新会话 PATH」键、还在等 deckd 读完（连按忽略；deckd 那边多个窗口同时按也只读一次）
 	pathBusy bool
+	// 「面板」页（n069）：面板注册表的当前样子。panelBusy：有一个挂拔请求在路上（回来之前再按不理）
+	panels       []deckstore.PanelDef
+	panelsLoaded bool
+	panelsErr    lazyText
+	panelBusy    bool
 }
 
 type loadedMsg struct {
@@ -345,6 +358,12 @@ func (m *Settings) rows() []row {
 		}
 	case pageGeneral:
 		rs = append(rs, row{kind: rowLang})
+	case pagePanels:
+		if m.panelsLoaded && m.panelsErr.empty() {
+			for _, d := range m.panels {
+				rs = append(rs, row{kind: rowPanel, panel: d.Name})
+			}
+		}
 	}
 	return rs
 }
@@ -355,6 +374,14 @@ func (m *Settings) switchPage(to page) {
 	m.page = (to%pageCount + pageCount) % pageCount
 	m.cur = m.curs[m.page]
 	m.msg = nil
+}
+
+// pageEntryCmd 进了某一页要做的事：「面板」页重读注册表（别的窗口、手改过的 panels.yaml 都能跟上）。
+func (m *Settings) pageEntryCmd() tea.Cmd {
+	if m.page == pagePanels {
+		return m.fetchPanels()
+	}
+	return nil
 }
 
 func (m *Settings) agent(id string) (deckstore.AgentDef, bool) {
@@ -542,6 +569,9 @@ func (m *Settings) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toolsAsk = true // 第一次读到设置：后台问一次 deckd 各 CLI 装没装（n060 段 4）
 			cmd = tea.Batch(cmd, m.fetchToolsBg())
 		}
+		if msg.err == nil && !msg.quiet && !msg.trustOnly && (!m.panelsLoaded || msg.force) {
+			cmd = tea.Batch(cmd, m.fetchPanels()) // 第一次读到设置（或按 R 重读）：把面板注册表也读上来（n069）
+		}
 	case langTickMsg:
 		cmd = m.syncLangCmd()
 	case langSyncedMsg:
@@ -621,6 +651,9 @@ func (m *Settings) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.proj >= len(m.set.Projects) {
 			m.proj = 0
 		}
+	case panelsMsg, panelSetMsg:
+		cmd, _ := m.panelsUpdate(msg)
+		return m, cmd
 	case toolsMsg, toolModelsMsg, pathRefreshMsg:
 		return m, m.subMsg(msg)
 	case toolsBgMsg:
@@ -825,10 +858,13 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "tab":
 		m.switchPage(m.page + 1)
+		return m, m.pageEntryCmd()
 	case "shift+tab":
 		m.switchPage(m.page - 1)
-	case "1", "2", "3", "4":
+		return m, m.pageEntryCmd()
+	case "1", "2", "3", "4", "5":
 		m.switchPage(page(k[0] - '1'))
+		return m, m.pageEntryCmd()
 	case "up", "k":
 		m.cur = max(0, m.cur-1)
 	case "down", "j":
@@ -862,6 +898,8 @@ func (m *Settings) key(k string) (tea.Model, tea.Cmd) {
 			return m, m.openAdd()
 		case rowLang:
 			m.toggleLang()
+		case rowPanel:
+			return m, m.togglePanel(r.panel)
 		}
 	case "a":
 		if m.loaded {
@@ -1198,6 +1236,8 @@ func (m *Settings) View() string {
 		m.trustPage(&b, row, cont)
 	case pageGeneral:
 		m.generalPage(&b, row)
+	case pagePanels:
+		m.panelsPage(&b, row)
 	}
 	keep := 1
 	if m.page == pageProject && m.project() != nil {
@@ -1475,6 +1515,8 @@ func (m *Settings) rowHelp() string {
 		return T("help.lang")
 	case rowTrust:
 		return T("help.trust")
+	case rowPanel:
+		return T("help.panel")
 	}
 	return ""
 }
@@ -1488,6 +1530,8 @@ func (m *Settings) pageKeys() string {
 		return T("keys.agents")
 	case pageGeneral:
 		return T("keys.general")
+	case pagePanels:
+		return T("keys.panels")
 	}
 	return T("keys.trust")
 }

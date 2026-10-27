@@ -202,9 +202,18 @@ func Blocks(img image.Image, cols, rows int) []string {
 	return lines
 }
 
-// Sixel 把 img 缩到 w×h 像素，编成一段 Sixel（DCS … ST）。透明像素不画（P2=1：保留原有背景）。
-// 颜色量化到 6×6×6 色立方，Sixel 的颜色分量是 0–100 的百分比。
+// Sixel 把 img 缩到 w×h 像素，编成一段 Sixel（DCS … ST）。
+// 设了合成背景色（SetBackground，iTerm2，n069）就合成到背景上、不留空洞（SixelOn）；
+// 否则透明像素不画（P2=1：保留原有背景），颜色量化到 6×6×6 色立方，Sixel 的颜色分量是 0–100 的百分比。
 func Sixel(img image.Image, w, h int) string {
+	if bg := Background(); bg != nil {
+		return SixelOn(img, w, h, *bg)
+	}
+	return SixelTransparent(img, w, h)
+}
+
+// SixelTransparent 是透明画法（n056 验收的 Windows Terminal 用它，编码不变）。
+func SixelTransparent(img image.Image, w, h int) string {
 	px := sample(img, w, h)
 	idx := make([][]int, h) // -1 表示不画
 	used := map[int]bool{}

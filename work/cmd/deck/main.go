@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -23,12 +24,14 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/config"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckclient"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckui"
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
+	"github.com/Tingschen287/terminal-deck/work/internal/layout"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
 	"github.com/Tingschen287/terminal-deck/work/internal/panels"
 	"github.com/Tingschen287/terminal-deck/work/internal/projectctl"
@@ -155,7 +158,8 @@ func daemon(dirs deckstore.Dirs, args []string) {
 	// SessionPath：找 agent CLI 与起会话用同一份 PATH（登录 shell 的 PATH 与 deckd 自己的合并，n060 段 4，见 internal/sessionenv）。
 	// 只在 deck daemon 里开；解析会运行 owner 的 shell 启动文件，测试里的 deckd.Run 不开
 	cfg := deckd.Config{Dirs: dirs, Profile: *profile, LayoutSocket: *layout, AgentSocket: *agent, DashboardURL: *dash, Projectctl: pc, SessionPath: true,
-		UpstreamAddr: *upstream, UpstreamToken: config.Token(), SystemLang: daemonSystemLang(*sysLang, os.Getenv)}
+		UpstreamAddr: *upstream, UpstreamToken: config.Token(), SystemLang: daemonSystemLang(*sysLang, os.Getenv),
+		PanelApplier: layoutPanelApplier(*layout, *agent)}
 	fmt.Fprintf(os.Stderr, "deckd：%s（profile %s）\n", socketOrFail(dirs), *profile)
 	if err := deckd.Run(ctx, cfg, deckd.NewTmuxCenter(*layout, *agent)); err != nil {
 		fail("%v", err)
@@ -172,7 +176,7 @@ func panel(dirs deckstore.Dirs, args []string) {
 	c := uiClient(dirs)
 	if args[0] == "quota" {
 		// 额度面板要在每个来源前贴 logo（sixel），用与侧栏同一套整屏帧画法（n056）
-		if err := deckui.RunQuota(c, func() string { return logo.CurrentMode(dirs.State) }); err != nil {
+		if err := deckui.RunQuota(c, func() string { return logo.Apply(dirs.State) }); err != nil {
 			fail("%v", err)
 		}
 		return
@@ -232,7 +236,7 @@ func ui(dirs deckstore.Dirs, which string, args []string) {
 	api := deckui.DeckAPI{C: uiClient(dirs)}
 	var err error
 	if which == "sidebar" {
-		err = deckui.RunSidebar(api, *layoutSock, func() string { return logo.CurrentMode(dirs.State) })
+		err = deckui.RunSidebar(api, *layoutSock, func() string { return logo.Apply(dirs.State) })
 	} else {
 		err = deckui.RunTabs(api, *layoutSock)
 	}
@@ -256,5 +260,31 @@ func settings(dirs deckstore.Dirs, args []string) {
 	}
 	if err := deckui.RunSettings(deckui.DeckSettingsAPI{C: uiClient(dirs)}); err != nil {
 		fail("%v", err)
+	}
+}
+
+// layoutPanelApplier 把面板注册表的改动作用到正在运行的布局（n069）：与 deck layout toggle、normalize 共用布局锁，串行。
+// 布局 server 没在跑（deckd 单独起着、布局被关了）时不算错：注册表已存，下次 deck up 建布局就按它来。
+func layoutPanelApplier(layoutSock, agentSock string) deckd.PanelApplier {
+	return func(ctx context.Context, defs []deckstore.PanelDef) ([]string, []string, error) {
+		self, err := os.Executable()
+		if err != nil {
+			return nil, nil, err
+		}
+		if !agentdeck.LayoutHasSession(ctx, layoutSock, "deck") {
+			return nil, nil, nil
+		}
+		unlock, err := layout.Lock(layoutSock+".lock", 10*time.Second)
+		if err != nil {
+			// layout.Lock 的错误里带本地语言的整句；回给界面的是带码的，里面只放系统的原因
+			if inner := errors.Unwrap(err); inner != nil {
+				err = inner
+			}
+			return nil, nil, i18n.E("err.layout.lock", err)
+		}
+		defer unlock()
+		res, err := layout.ApplyPanels(layout.TmuxMux{Socket: layoutSock},
+			layout.Spec{Deck: self, LayoutSocket: layoutSock, AgentSocket: agentSock}, defs)
+		return res.Attached, res.Removed, err
 	}
 }

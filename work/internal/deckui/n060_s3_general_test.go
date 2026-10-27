@@ -54,11 +54,11 @@ func TestN060S3GlobalAgentPageIsVerbatimCf8a8bc(t *testing.T) {
 		if len(got) != len(exp) {
 			t.Fatalf("%s：行数 %d，cf8a8bc 是 %d\n%s", c.file, len(got), len(exp), strings.Join(got, "\n"))
 		}
-		// 第一行是页签栏：多了「通用」，其余部分不变
-		const extra = "   通用"
+		// 第一行是页签栏：多了「通用」「面板」（n069 又加了「面板」页，页签栏多一个字眼，其余不变），其余部分不变
+		const extra = "   通用   面板"
 		head := strings.TrimRight(got[0], " ")
 		if !strings.HasSuffix(head, extra) || head[:len(head)-len(extra)] != strings.TrimRight(exp[0], " ") {
-			t.Fatalf("%s 页签栏只该多出「通用」：\n%q\n%q", c.file, got[0], exp[0])
+			t.Fatalf("%s 页签栏只该多出「通用」「面板」：\n%q\n%q", c.file, got[0], exp[0])
 		}
 		for i := 1; i < len(got); i++ {
 			if got[i] != exp[i] {
@@ -70,8 +70,8 @@ func TestN060S3GlobalAgentPageIsVerbatimCf8a8bc(t *testing.T) {
 
 // 页的顺序与数字键：原有三页不动（1 项目、2 全局 agent、3 授权），新页是第四页、数字键 4；Tab 循环多一页。
 func TestN060S3GeneralPageIsAppendedAfterTheExistingPages(t *testing.T) {
-	if pageProject != 0 || pageAgents != 1 || pageTrust != 2 || pageGeneral != 3 || pageCount != 4 {
-		t.Fatalf("页序：%d %d %d %d 共 %d", pageProject, pageAgents, pageTrust, pageGeneral, pageCount)
+	if pageProject != 0 || pageAgents != 1 || pageTrust != 2 || pageGeneral != 3 || pagePanels != 4 || pageCount != 5 { // n069：「面板」页加在最后，前四页的顺序与数字键不变
+		t.Fatalf("页序：%d %d %d %d %d 共 %d", pageProject, pageAgents, pageTrust, pageGeneral, pagePanels, pageCount)
 	}
 	m, _ := n057Fixture()
 	for _, c := range []struct {
@@ -83,21 +83,26 @@ func TestN060S3GeneralPageIsAppendedAfterTheExistingPages(t *testing.T) {
 			t.Errorf("按 %q：第 %d 页，应为 %d", c.key, m.page, c.want)
 		}
 	}
-	press(m, "5")
+	press(m, "6") // n069：第五页是「面板」，数字键 5；没有第六页，6 不该动
 	if m.page != pageProject {
-		t.Fatalf("没有第五页，5 不该动：%d", m.page)
+		t.Fatalf("没有第六页，6 不该动：%d", m.page)
 	}
-	// Tab 转一圈：项目 → 全局 agent → 授权 → 通用 → 项目；Shift+Tab 反向
+	press(m, "5")
+	if m.page != pagePanels {
+		t.Fatalf("5 是面板页：%d", m.page)
+	}
+	press(m, "1")
+	// Tab 转一圈：项目 → 全局 agent → 授权 → 通用 → 面板（n069）→ 项目；Shift+Tab 反向
 	var seen []page
 	for range pageCount + 1 {
 		seen = append(seen, m.page)
 		press(m, "tab")
 	}
-	if len(seen) != 5 || seen[1] != pageAgents || seen[2] != pageTrust || seen[3] != pageGeneral || seen[4] != pageProject || m.page != pageAgents {
+	if len(seen) != 6 || seen[1] != pageAgents || seen[2] != pageTrust || seen[3] != pageGeneral || seen[4] != pagePanels || seen[5] != pageProject || m.page != pageAgents {
 		t.Fatalf("Tab 循环：%v 现在 %d", seen, m.page)
 	}
 	press(m, "1", "shift+tab")
-	if m.page != pageGeneral {
+	if m.page != pagePanels {
 		t.Fatalf("项目页 Shift+Tab 回到最后一页：%d", m.page)
 	}
 	// 各页的光标各自记着：通用页只有一行

@@ -210,7 +210,6 @@ var zh = map[Key]string{
 	"act.role.sub":            "协作",
 	"act.role.main":           "★主",
 	"panel.err.unknown":       "没有面板 %q（可选：%v）",
-	"panel.err.project":       "进度面板要指定 --project",
 	"panel.err.missing":       "没有面板 %s",
 	"panel.err.answer":        "没答上：",
 	"panel.err.answered":      "已回答：",

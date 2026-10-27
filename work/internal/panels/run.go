@@ -79,17 +79,13 @@ func (m *model) fetch() tea.Cmd {
 			}
 			return dataMsg{decs: ds}
 		case "progress":
-			if m.project == "" {
-				// 没指定项目：提示照旧，但这条路径不会向 deckd 取任何东西，所以每轮自己对一次界面语言，
-				// 否则别处换了语言，这个面板永远收不到新的语言头（返工 2，M3）。先对语言再造错误，提示就是新语言
-				m.syncLang(ctx)
-				return dataMsg{err: i18n.Errorf("panel.err.project")}
-			}
+			// 没指定 -project：跟着中间窗格正在看的会话所属的项目（n069，deckd 按当前看的会话解析）；
+			// 指定了就按指定的，优先生效（owner 的 panels.yaml 里就写着 -project）
 			var p deckd.Progress
 			if err := m.c.Get(ctx, "/v1/progress"+m.q(), &p); err != nil {
 				return dataMsg{err: err}
 			}
-			return dataMsg{view: RenderProgress(p)}
+			return dataMsg{view: RenderProgressW(p, m.width)}
 		case "notifications":
 			var ns []deckstore.Notification
 			if err := m.c.Get(ctx, "/v1/notifications"+m.q(), &ns); err != nil {

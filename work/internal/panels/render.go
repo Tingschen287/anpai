@@ -373,25 +373,119 @@ func label(opt string) string {
 	return i18n.Present(opt)
 }
 
-// RenderProgress 画项目进度面板。
-func RenderProgress(p deckd.Progress) string {
+// RenderProgress 画项目进度面板（按默认宽度）。
+func RenderProgress(p deckd.Progress) string { return RenderProgressW(p, 36) }
+
+// 进度条各段的颜色：已验收绿、阻塞琥珀、失败红、其余暗灰（原型 Main.dc.html 的 #7dd3a0、#f5b14c、#e5484d、#262a31）。
+var (
+	segAccepted = lipgloss.NewStyle().Foreground(lipgloss.Color("#7dd3a0"))
+	segBlocked  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5b14c"))
+	segFailed   = lipgloss.NewStyle().Foreground(lipgloss.Color("#e5484d"))
+	segRest     = lipgloss.NewStyle().Foreground(lipgloss.Color("#262a31"))
+)
+
+// segmentCells 把 n 格按各段的数量分配（最大余数法）：总数为 0 全给空；某段不为 0 就至少得 1 格（n 够分时），
+// 免得 1 个失败节点在 49 个节点里看不见。返回的格数加起来恰好是 n。
+func segmentCells(counts []int, n int) []int {
+	out := make([]int, len(counts))
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	if n <= 0 || total <= 0 {
+		return out
+	}
+	type rem struct{ i, r int }
+	var rs []rem
+	used := 0
+	for i, c := range counts {
+		out[i] = c * n / total
+		used += out[i]
+		rs = append(rs, rem{i, c * n % total})
+	}
+	sort.SliceStable(rs, func(a, b int) bool { return rs[a].r > rs[b].r })
+	for k := 0; used < n && k < len(rs); k++ {
+		out[rs[k].i]++
+		used++
+	}
+	// 非零的段至少 1 格：从最大的段里借
+	nonzero := 0
+	for _, c := range counts {
+		if c > 0 {
+			nonzero++
+		}
+	}
+	for i, c := range counts {
+		for c > 0 && out[i] == 0 && n >= nonzero {
+			big := 0
+			for j := range out {
+				if out[j] > out[big] {
+					big = j
+				}
+			}
+			if out[big] <= 1 {
+				break
+			}
+			out[big]--
+			out[i]++
+		}
+	}
+	return out
+}
+
+// RenderProgressW 画项目进度面板（原型：分段进度条 + 数字格；width 是面板宽）。
+// 没有项目可看（没有在看的会话、会话不属于项目）时说一句清楚的话，不是错误。
+func RenderProgressW(p deckd.Progress, width int) string {
 	var b strings.Builder
+	if p.Follow && p.Project == "" {
+		b.WriteString(title.Render(i18n.T("progress.heading")) + "\n")
+		why := i18n.T("progress.follow.none")
+		if p.Reason == "no_project" {
+			why = i18n.T("progress.follow.noproject")
+		}
+		b.WriteString(dim.Render(ansi.Wrap(why, max(10, width-1), "")) + "\n")
+		return b.String()
+	}
 	b.WriteString(title.Render(i18n.T("progress.title")+p.Project) + "\n")
 	if !p.Graph {
 		b.WriteString(dim.Render(i18n.T("progress.nograph")) + "\n")
 		return b.String()
 	}
-	order := []string{"accepted", "running", "submitted", "ready", "rework", "blocked", "failed", "planned", "superseded"}
+	total := p.Unknown
+	for _, n := range p.Counts {
+		total += n
+	}
+	acc, blk, fail := p.Counts["accepted"], p.Counts["blocked"], p.Counts["failed"]
+	rest := total - acc - blk - fail
+	// 分段条：已验收、阻塞、失败、其余（原型里「其余」是计划中）
+	n := max(8, min(width-2, 60))
+	cells := segmentCells([]int{acc, blk, fail, rest}, n)
+	b.WriteString(segAccepted.Render(strings.Repeat("█", cells[0])) + segBlocked.Render(strings.Repeat("█", cells[1])) +
+		segFailed.Render(strings.Repeat("█", cells[2])) + segRest.Render(strings.Repeat("█", cells[3])) + "\n")
+	// 数字格：两列
+	grid := [][2]string{
+		{fmt.Sprintf("%s %d", i18n.T("progress.accepted"), acc), fmt.Sprintf("%s %d", i18n.T("progress.blocked"), blk)},
+		{fmt.Sprintf("%s %d", i18n.T("progress.failed"), fail), fmt.Sprintf("%s %d", i18n.T("progress.rest"), rest)},
+	}
+	colW := max(10, (width-2)/2)
+	for _, r := range grid {
+		pad := max(1, colW-lipgloss.Width(r[0]))
+		b.WriteString(r[0] + strings.Repeat(" ", pad) + r[1] + "\n")
+	}
+	// 「其余」里各状态的明细（进行中、待评审、可开工……），只列不为 0 的
+	order := []string{"running", "submitted", "ready", "rework", "planned", "superseded"}
 	var parts []string
 	for _, k := range order {
-		if n := p.Counts[k]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), n))
+		if c := p.Counts[k]; c > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), c))
 		}
 	}
 	if p.Unknown > 0 {
 		parts = append(parts, i18n.T("progress.unknown", p.Unknown))
 	}
-	b.WriteString(strings.Join(parts, " · ") + "\n")
+	if len(parts) > 0 {
+		b.WriteString(dim.Render(strings.Join(parts, " · ")) + "\n")
+	}
 	for _, bl := range p.Budgets {
 		switch {
 		case bl.Used == nil && bl.Limit != nil:

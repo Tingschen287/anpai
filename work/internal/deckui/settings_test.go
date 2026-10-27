@@ -136,6 +136,10 @@ func TestSettingsViewShowsInstalledAndProject(t *testing.T) {
 		t.Fatal("授权页之后是通用页")
 	}
 	press(m, "tab")
+	if m.page != pagePanels { // n069：通用页之后多了「面板」页，Tab 转一圈再多一步
+		t.Fatal("通用页之后是面板页")
+	}
+	press(m, "tab")
 	if m.page != pageProject {
 		t.Fatal("Tab 转一圈回到项目页")
 	}
