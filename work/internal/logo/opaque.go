@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // n069：iTerm2（3.7.6 真机，诊断样张 2）把 sixel 里「没画」的像素（透明处，P2=1）涂成图里最后定义的那种颜色：
@@ -118,9 +120,58 @@ func CurrentBackground(stateDir string) *color.RGBA {
 }
 
 // Apply 读布局当前的画法与合成背景色：背景色设进本进程，返回画法。侧栏、额度面板每次取画法时都走它，deck up 改了会跟着变。
+// 读的时候持决策锁（见 WriteDecision），读到的一定是某一次 deck up 写下的完整的一对。
 func Apply(stateDir string) string {
+	unlock := lockDecision(stateDir, false)
+	defer unlock()
 	SetBackground(CurrentBackground(stateDir))
 	return CurrentMode(stateDir)
+}
+
+// DecisionLock 是决策锁文件（状态目录下）。
+func DecisionLock(stateDir string) string { return filepath.Join(stateDir, "graphics-lock") }
+
+// lockDecision 取跨进程的决策锁（flock）：写者要独占，读者也要独占（决策文件很小，读写都是毫秒级）。
+// 取不到（目录不存在、被占太久）就不加锁继续：读到旧一点的状态比卡住面板强。
+func lockDecision(stateDir string, create bool) func() {
+	if create {
+		os.MkdirAll(stateDir, 0o700)
+	}
+	f, err := os.OpenFile(DecisionLock(stateDir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }
+		}
+		if err != syscall.EWOULDBLOCK || time.Now().After(deadline) {
+			f.Close()
+			return func() {}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// WriteDecision 把画法与合成背景色作为一个整体写下（n069 Codex 审查 R2）：两个文件各自原子 rename 并不让这一对原子，
+// 两个 deck up 交错时可能留下谁都没决定过的「sixel + 没有背景」，iTerm2 上就是实心方块，重读也恢复不了。
+// 这里持跨进程的决策锁写两个文件，读的一方（Apply）也持同一把锁：最后一个写者的完整决策胜出（n056 选的「最后接入者说了算」）。
+// 画法是 sixel 且有背景色、但背景色写不下时，画法改写成 none 并返回它（面板读不到背景色会按透明画法画，iTerm2 上是实心方块）。
+func WriteDecision(stateDir, mode string, bg *color.RGBA) (effective string, err error) {
+	unlock := lockDecision(stateDir, true)
+	defer unlock()
+	if berr := WriteBackground(stateDir, bg); berr != nil {
+		if bg != nil && mode == "sixel" {
+			mode = "none"
+		}
+		err = berr
+	}
+	if merr := WriteMode(stateDir, mode); merr != nil && err == nil {
+		err = merr
+	}
+	return mode, err
 }
 
 const maxRegisters = 256 // iTerm2 报告的颜色寄存器数（XTSMGRAPHICS，诊断样张 1）
@@ -143,7 +194,7 @@ func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
 		}
 	}
 	set[bg] = true
-	// 寄存器：背景色排第 0 号，其余按颜色值排序（输出稳定）
+	// 寄存器：先按背景色排第 0 号分配，其余按颜色值排序（输出稳定）；写出前把背景色挪到最后一个寄存器
 	cols := make([]color.RGBA, 0, len(set))
 	for c := range set {
 		if c != bg {
@@ -193,6 +244,20 @@ func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
 				continue
 			}
 			index[c] = cube[cubeOf(c)]
+		}
+	}
+	// 背景色排在最后一个寄存器（n069 经 tmux 的真机样张 9）：tmux 把图再编码时按寄存器号从小到大定义颜色，并把图补到整格、
+	// 补出的像素没画；iTerm2 把没画的涂成「最后定义的颜色」。背景色是最后一个，补出来的区域就是背景色，看不见
+	n := len(palette)
+	remapped := make([]color.RGBA, 0, n)
+	remapped = append(remapped, palette[1:]...)
+	remapped = append(remapped, palette[0])
+	palette = remapped
+	for k, v := range index {
+		if v == 0 {
+			index[k] = n - 1
+		} else {
+			index[k] = v - 1
 		}
 	}
 	var b strings.Builder
@@ -258,4 +323,16 @@ func SixelOver(img image.Image, w, h int, over color.RGBA) string {
 		return SixelTransparent(img, w, h)
 	}
 	return SixelOn(img, w, h, over)
+}
+
+// FitHeight 在合成画法（iTerm2）下把图的边长取成 6 的整数倍且不超过 n（n 是这几行的总像素）；透明画法原样返回 n（n056 验收的尺寸不变）。
+//
+// 原因（n069 经 tmux 的真机样张 9，隔离 tmux 3.4 复现）：sixel 的数据按 6 行一段，32 像素高的图数据是 36 行；
+// tmux 按它自己的格子（没问到终端像素时是 16×32）数，36 行超过一格，于是把图占成两格并补齐、多出一整行的区域（再编码后声明 60 行）。
+// 取 30 行就恰好一格（声明 30 行），不再多占下面一行。补出的零头像素颜色是背景（SixelOn 把背景色放在最后一个寄存器）。
+func FitHeight(n int) int {
+	if Background() == nil {
+		return n
+	}
+	return max(6, n/6*6)
 }

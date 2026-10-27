@@ -96,7 +96,7 @@ func TestITermFillMakesTransparentLogoASolidSquareButOpaqueKeepsShape(t *testing
 			}
 		}
 		px2 := fillLikeITerm(g2, cs2, last2)
-		isBG := func(p [3]int) bool { return p == cs2[0] }
+		isBG := func(p [3]int) bool { return p == cs2[last2] }
 		isLime := func(p [3]int) bool { return p[1] > 70 && p[0] > 50 && p[2] < 50 }
 		if s := share(px2, isBG); s < 0.15 || s > 0.8 {
 			t.Fatalf("%d：背景占 %.0f%%，形状不对", side, 100*s)
@@ -107,13 +107,14 @@ func TestITermFillMakesTransparentLogoASolidSquareButOpaqueKeepsShape(t *testing
 	}
 }
 
-// 背景色单独占寄存器 0、不量化：暗灰 (30,30,30) 在 6×6×6 色立方里会变成 (0,0,0) 或 (51,51,51)，贴在终端背景上就是看得见的方框。
+// 背景色单独占最后一个寄存器、不量化：暗灰 (30,30,30) 在 6×6×6 色立方里会变成 (0,0,0) 或 (51,51,51)，贴在终端背景上就是看得见的方框。
 func TestSixelOnBackgroundIsExactRegisterZero(t *testing.T) {
 	for _, bg := range []color.RGBA{{30, 30, 30, 255}, {0, 0, 0, 255}, {255, 255, 255, 255}, {40, 44, 52, 255}} {
 		_, cs, _ := decodeAny(t, SixelOn(Deck(), 32, 32, bg))
 		want := [3]int{pct(bg.R), pct(bg.G), pct(bg.B)}
-		if cs[0] != want {
-			t.Fatalf("背景 %v：寄存器 0 应是 %v，实际 %v", bg, want, cs[0])
+		_, _, last := decodeAny(t, SixelOn(Deck(), 32, 32, bg))
+		if cs[last] != want {
+			t.Fatalf("背景 %v：最后一个寄存器应是 %v，实际 %v", bg, want, cs[last])
 		}
 	}
 }
@@ -122,8 +123,8 @@ func TestSixelOnBackgroundIsExactRegisterZero(t *testing.T) {
 func TestSixelOnKeepsBrandColourAndTransparentIsBackground(t *testing.T) {
 	bg := color.RGBA{16, 16, 16, 255}
 	g, cs, _ := decodeAny(t, SixelOn(Deck(), 64, 64, bg))
-	if g[0][0] != 0 { // A4 的左上角是透明
-		t.Fatalf("透明角应是背景寄存器 0：%d", g[0][0])
+	if cs[g[0][0]] != [3]int{pct(16), pct(16), pct(16)} { // A4 的左上角是透明
+		t.Fatalf("透明角应是背景寄存器：%v", cs[g[0][0]])
 	}
 	want := [3]int{pct(180), pct(245), pct(70)}
 	found := false
@@ -142,8 +143,9 @@ func TestSixelOnManyColoursStaysWithinRegisters(t *testing.T) {
 	if len(cs) > maxRegisters {
 		t.Fatalf("寄存器 %d 个，超过 %d", len(cs), maxRegisters)
 	}
-	if cs[0] != [3]int{pct(30), pct(30), pct(30)} {
-		t.Fatalf("量化后背景也要精确：%v", cs[0])
+	_, _, lastReg := decodeAny(t, SixelOn(patternGradient(), 64, 64, bg))
+	if cs[lastReg] != [3]int{pct(30), pct(30), pct(30)} {
+		t.Fatalf("量化后背景也要精确：%v", cs[lastReg])
 	}
 }
 

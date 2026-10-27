@@ -203,7 +203,9 @@ func TestAdvProgressGraphFailures(t *testing.T) {
 		t.Fatalf("progress=nil：%d %v", code, out)
 	}
 	// 回调报错 → 502
-	f.srv.progress = func(context.Context, deckstore.ProjectDef) (any, error) { return nil, errors.New("boom \x1b[31mred\x1b[0m") }
+	f.srv.progress = func(context.Context, deckstore.ProjectDef) (any, error) {
+		return nil, errors.New("boom \x1b[31mred\x1b[0m")
+	}
 	code, out = f.rawGet("/v1/progress?project=alpha")
 	t.Logf("回调报错：%d %v", code, out)
 	if code != 502 {

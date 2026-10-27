@@ -147,7 +147,7 @@ func TestApplyPanelsBottomRegion(t *testing.T) {
 	checkFrame(t, m, s, "下栏重新挂上")
 }
 
-// 整栏被 F6 隐藏着时挂上新面板：新面板同样停放，不把隐藏的栏弹出来；再显示时一起回来。
+// 整栏被 F6 隐藏着时挂上新面板：owner 主动挂上就是想看到它，所以隐藏的整栏显示出来（与新面板一起，共 3 块）。
 func TestApplyPanelsWhileRegionHidden(t *testing.T) {
 	m, s, _ := realLayout(t)
 	if err := Toggle(m, s, "right"); err != nil {
@@ -157,15 +157,12 @@ func TestApplyPanelsWhileRegionHidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, p := range mainPanels(t, m) {
-		if regionOf(p.Role) == "right" && p.Window == MainWindow {
-			t.Fatalf("右栏隐藏着，%s 不该出现在主窗口", name)
+		if regionOf(p.Role) == "right" && p.Window != MainWindow {
+			t.Fatalf("挂上之后右栏应显示出来，%s 还停放在 %s", name, p.Window)
 		}
 	}
 	if _, ok := mainPanels(t, m)["progress"]; !ok {
-		t.Fatal("新面板应已建好（停放着）")
-	}
-	if err := Toggle(m, s, "right"); err != nil {
-		t.Fatal(err)
+		t.Fatal("新面板应已建好")
 	}
 	n := 0
 	for _, p := range mainPanels(t, m) {
@@ -179,8 +176,8 @@ func TestApplyPanelsWhileRegionHidden(t *testing.T) {
 	if n != 3 {
 		t.Fatalf("右栏应有 3 块面板：%d", n)
 	}
-	checkFrame(t, m, s, "显示右栏后")
-	// 隐藏着时拔掉一块也行
+	checkFrame(t, m, s, "挂上并显示右栏后")
+	// 隐藏着时拔掉一块也行（拔掉不会把隐藏的栏弹出来）
 	if err := Toggle(m, s, "right"); err != nil {
 		t.Fatal(err)
 	}

@@ -64,7 +64,8 @@ func RunQuota(c *deckclient.Client, modeOf func() string) error {
 			return v
 		}
 		side := min(panels.QuotaLogoRows*h, panels.QuotaLogoCols*w)
-		v := logo.Sixel(PadVertical(im, side, max(rows, panels.QuotaLogoRows)*h), side, max(rows, panels.QuotaLogoRows)*h)
+		height := logo.FitHeight(max(rows, panels.QuotaLogoRows) * h)
+		v := logo.Sixel(PadVertical(im, side, height), side, height)
 		cache[key] = v
 		return v
 	}

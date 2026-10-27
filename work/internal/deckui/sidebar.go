@@ -279,7 +279,7 @@ func (s *Sidebar) sixel(tool string, selected bool) string {
 		return v
 	}
 	// 高度按两行算、宽度取同样像素，图是正方形；不会超出四列（字符格通常是 1:2）
-	side := min(logoRows*ch, logoCols*cw)
+	side := logo.FitHeight(min(logoRows*ch, logoCols*cw))
 	var v string
 	if selected {
 		v = logo.SixelOver(logo.For(tool), side, side, logo.SelectedRowBG)
@@ -306,7 +306,7 @@ func (s *Sidebar) deckIcon() string {
 	if v, ok := s.cache[key]; ok {
 		return v
 	}
-	side := min(ch, 2*cw)
+	side := logo.FitHeight(min(ch, 2*cw))
 	v := logo.Sixel(logo.Deck(), side, side)
 	s.cache[key] = v
 	return v

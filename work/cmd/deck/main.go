@@ -278,7 +278,7 @@ func layoutPanelApplier(layoutSock, agentSock string) deckd.PanelApplier {
 			}
 			return nil, nil, err
 		}
-		unlock, err := layout.Lock(layoutSock+".lock", 10*time.Second)
+		unlock, err := layout.LockCtx(ctx, layoutSock+".lock", 10*time.Second)
 		if err != nil {
 			// layout.Lock 的错误里带本地语言的整句；回给界面的是带码的，里面只放系统的原因
 			if inner := errors.Unwrap(err); inner != nil {
@@ -287,7 +287,7 @@ func layoutPanelApplier(layoutSock, agentSock string) deckd.PanelApplier {
 			return nil, nil, i18n.E("err.layout.lock", err)
 		}
 		defer unlock()
-		res, err := layout.ApplyPanels(layout.TmuxMux{Socket: layoutSock},
+		res, err := layout.ApplyPanels(layout.TmuxMux{Socket: layoutSock, Ctx: ctx},
 			layout.Spec{Deck: self, LayoutSocket: layoutSock, AgentSocket: agentSock}, defs)
 		return res.Attached, res.Removed, err
 	}

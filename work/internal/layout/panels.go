@@ -35,7 +35,7 @@ func panelOf(role string) (region, name string, ok bool) {
 //   - 注册表里 off 的面板，布局里有窗格（含被 F5/F6/F7 停放的）：拆掉，面板程序随之结束；
 //   - 其余不动（程序不重启）。注册表里没有的窗格也不碰（owner 手改过 panels.yaml 的残留，不替他决定）。
 //
-// 这一栏被 F6/F7 整栏隐藏着时，新面板建好立刻同样停放，不把隐藏的栏弹出来；再按键显示时一起回来。
+// 这一栏被 F5～F7 整栏隐藏着时，挂上新面板会把这一栏显示出来（owner 主动挂上，就是想看到它）。
 // 调用方要持布局锁（Lock）：与 deck layout toggle、normalize 串行。出错时已做的部分保留，返回已做的与错误。
 func ApplyPanels(m Mux, s Spec, defs []deckstore.PanelDef) (ApplyResult, error) {
 	s = s.withDefaults()
@@ -160,7 +160,14 @@ func attachPanel(m Mux, s Spec, d deckstore.PanelDef) (err error) {
 	if center == "" {
 		return i18n.E("err.layout.nocenter")
 	}
-	hidden := len(shown) == 0 && len(parked) > 0
+	// 这一栏被 F5～F7 整栏隐藏着：owner 主动挂上一块面板，就是想看到它——先把隐藏的整栏显示出来，再按平常的办法挂上
+	// （owner 选的；以前是新面板也停放着，再按键才一起回来）
+	if len(shown) == 0 && len(parked) > 0 {
+		if err := Toggle(m, s, region); err != nil {
+			return err
+		}
+		return attachPanel(m, s, d)
+	}
 	sort.Slice(shown, func(i, j int) bool { return paneNum(shown[i].ID) < paneNum(shown[j].ID) })
 	cmd := s.panelCmd(d)
 	var id string
@@ -173,7 +180,7 @@ func attachPanel(m Mux, s Spec, d deckstore.PanelDef) (err error) {
 				return err
 			}
 			defer func() {
-				err = errors.Join(err, restoreCoded(m, s, center, true, tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
+				err = errors.Join(err, restoreCoded(detached(m), s, center, true, tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
 			}()
 		}
 		id, err = m.Split(center, agentdeck.SplitSpec{Horizontal: true, Size: itoa(s.RightWidth)}, cmd)
@@ -185,7 +192,7 @@ func attachPanel(m Mux, s Spec, d deckstore.PanelDef) (err error) {
 				return err
 			}
 			defer func() {
-				err = errors.Join(err, restoreCoded(m, s, center, false, sidebar,
+				err = errors.Join(err, restoreCoded(detached(m), s, center, false, sidebar,
 					agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: itoa(s.LeftWidth)}))
 			}()
 		}
@@ -199,9 +206,6 @@ func attachPanel(m Mux, s Spec, d deckstore.PanelDef) (err error) {
 	if err := m.SetRole(id, panelPrefix+region+":"+d.Name); err != nil {
 		// 没有角色的窗格以后谁也认不出，也拆不了（Remove 只认面板角色）：如实报错，窗格留着，owner 重建布局即清
 		return err
-	}
-	if hidden {
-		return m.Park(id, "parked-"+region)
 	}
 	return nil
 }
@@ -220,4 +224,12 @@ func restoreCoded(m Mux, s Spec, center string, isTabs bool, pane string, spec a
 		return err
 	}
 	return m.Select(center)
+}
+
+// detached 返回不随 ctx 取消的 Mux（真 tmux 有，测试里的别的实现原样）：收尾接回暂停的窗格用。
+func detached(m Mux) Mux {
+	if d, ok := m.(interface{ Detached() Mux }); ok {
+		return d.Detached()
+	}
+	return m
 }

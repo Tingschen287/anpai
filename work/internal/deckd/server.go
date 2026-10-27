@@ -81,7 +81,11 @@ type Server struct {
 	quota     *dashquota.Client
 	view      *viewstate.Machine
 	progress  ProgressFunc
-	panelMu   sync.Mutex // 挂拔面板：存注册表、改布局串行，两个窗口同时挂拔最后收敛到存储里的状态（n069）
+	// panelWork 是进行中（含排队）的挂拔数：deckd 关闭时 WaitBackground 要等它们结束，才能释放写入者锁
+	panelWorkMu   sync.Mutex
+	panelWorkCond *sync.Cond
+	panelWork     int
+	panelMu       sync.Mutex // 挂拔面板：存注册表、改布局串行，两个窗口同时挂拔最后收敛到存储里的状态（n069）
 	// 只在测试里设置：按请求决定调用者。生产路径没有任何方式设置它。
 	callerFn func(*http.Request) Caller
 	// activity 是 agent-deck 会话状态的缓存（n049，侧栏状态圆点）；没配上游地址时为 nil。
@@ -848,9 +852,21 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", errors.New("missing field on")))
 		return
 	}
+	// 挂拔登记进 deckd 的关闭等待（Codex 审查 R1）：关闭之后不再接单；已接的在 WaitBackground 里等完，之后才释放写入者锁。
+	// 工作的 context 来自 deckd 的生命周期，不是请求：客户端断开（F9 里按了空格就退出）不会半途取消，deckd 关闭会
+	work, endWork, ok := s.beginPanelWork()
+	if !ok {
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.panel.stopping"))
+		return
+	}
+	defer endWork()
 	// 存与改布局放在同一把锁里：改布局时读的是此刻存储里最新的注册表，两个窗口同时挂拔不会各按各的旧值改
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
+	if work.Err() != nil { // 排队时 deckd 开始关闭了：不写盘、不改布局
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.panel.stopping"))
+		return
+	}
 	if err := s.store.SetPanel(r.PathValue("name"), *b.On); err != nil {
 		storeErr(w, err)
 		return
@@ -858,8 +874,8 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 	defs := s.store.Panels()
 	body := map[string]any{"panels": defs, "applied": false, "attached": []string{}, "removed": []string{}}
 	if s.cfg.PanelApplier != nil {
-		// 注册表已存下：让布局收敛不能因为客户端断开（F9 里按了空格就退出）而半途取消，所以与请求的生命周期脱钩
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+		// 注册表已存下：让布局收敛的总期限 30 秒，从 deckd 的生命周期派生（见上），传进锁等待和每一条 tmux 命令
+		ctx, cancel := context.WithTimeout(work, 30*time.Second)
 		defer cancel()
 		attached, removed, err := s.cfg.PanelApplier(ctx, defs)
 		if attached != nil {
@@ -880,6 +896,41 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// beginPanelWork 登记一次面板操作：返回与 deckd 生命周期绑定的 context、结束函数；deckd 已经开始关闭时 ok 为 false。
+// 计数与「是否在关闭」的判断在同一把锁里：WaitBackground 取消 background 之后才来，要么看见这次登记在等，要么这次被拒。
+func (s *Server) beginPanelWork() (context.Context, func(), bool) {
+	bg := s.background()
+	s.panelWorkMu.Lock()
+	defer s.panelWorkMu.Unlock()
+	if bg.Err() != nil {
+		return nil, nil, false
+	}
+	s.panelWork++
+	return bg, func() {
+		s.panelWorkMu.Lock()
+		s.panelWork--
+		s.panelCond().Broadcast()
+		s.panelWorkMu.Unlock()
+	}, true
+}
+
+// panelCond 懒建条件变量（Server 可能不经 NewServer 建出来）；调用时持 panelWorkMu。
+func (s *Server) panelCond() *sync.Cond {
+	if s.panelWorkCond == nil {
+		s.panelWorkCond = sync.NewCond(&s.panelWorkMu)
+	}
+	return s.panelWorkCond
+}
+
+// waitPanelWork 等已登记的面板操作做完（WaitBackground 调）。
+func (s *Server) waitPanelWork() {
+	s.panelWorkMu.Lock()
+	defer s.panelWorkMu.Unlock()
+	for s.panelWork > 0 {
+		s.panelCond().Wait()
+	}
 }
 
 // ---------------- SSE ----------------

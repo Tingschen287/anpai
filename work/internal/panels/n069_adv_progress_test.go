@@ -279,7 +279,10 @@ func TestAdvPanelTimeoutDoesNotShowStale(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	dir, _ := os.MkdirTemp("/tmp", "n69s")
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	ln, _ := net.Listen("unix", filepath.Join(dir, "p.sock"))
+	ln, err := net.Listen("unix", filepath.Join(dir, "p.sock"))
+	if err != nil {
+		t.Skipf("这个环境不让监听 unix socket（%v），跳过需要假 deckd 的测试", err) // Codex 审查 1：以前忽略错误，在拒绝 bind 的沙箱里会 panic
+	}
 	var calls atomic.Int32
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
@@ -321,10 +324,10 @@ func TestAdvPanelTimeoutDoesNotShowStale(t *testing.T) {
 func TestAdvPanelOddReplies(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	for name, reply := range map[string]string{
-		"null":          `null`,
-		"empty-obj":     `{}`,
-		"graph-no-body": `{"project":"alpha","graph":true}`,
-		"wrong-types":   `{"project":"alpha","graph":true,"counts":{"accepted":"x"}}`,
+		"null":           `null`,
+		"empty-obj":      `{}`,
+		"graph-no-body":  `{"project":"alpha","graph":true}`,
+		"wrong-types":    `{"project":"alpha","graph":true,"counts":{"accepted":"x"}}`,
 		"unknown-reason": `{"project":"","graph":false,"follow":true,"reason":"future_reason"}`,
 	} {
 		c, _ := recordingDeckd(t, reply)

@@ -40,6 +40,7 @@ var n069ZH = map[Key]string{
 	"err.layout.restore.tabs":           "标签条接不回原位（它还在后台窗口里照常运行）：%w",
 	"err.layout.restore.side":           "侧栏接不回原位（它还在后台窗口里照常运行）：%w",
 	"err.layout.lock":                   "另一个布局操作还没做完：%w",
+	"err.deckd.panel.stopping":          "deckd 正在关闭，这次挂拔没有处理（面板注册表没改）",
 	"err.deckd.setpanel.apply":          "改动没有作用到布局：%v",
 	"err.agentdeck.removepane.notpanel": "窗格 %s 的角色是 %q，不是面板，不拆",
 }
@@ -80,6 +81,7 @@ var n069EN = map[Key]string{
 	"err.layout.restore.tabs":           "The tab strip could not be put back (it is still running in a background window): %w",
 	"err.layout.restore.side":           "The sidebar could not be put back (it is still running in a background window): %w",
 	"err.layout.lock":                   "Another layout operation is still running: %w",
+	"err.deckd.panel.stopping":          "deckd is shutting down; this panel change was not handled (the panel registry is unchanged)",
 	"err.deckd.setpanel.apply":          "the change did not reach the layout: %v",
 	"err.agentdeck.removepane.notpanel": "pane %s has role %q, which is not a panel; not removing it",
 }

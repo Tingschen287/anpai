@@ -291,10 +291,7 @@ func TestAdvTwoBottomPanelsHiddenThenAttachThird(t *testing.T) {
 	if err := Toggle(m, s, "bottom"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyPanels(m, s, set("b2", "b3")); err != nil {
-		t.Fatal(err)
-	}
-	if err := Toggle(m, s, "bottom"); err != nil {
+	if _, err := ApplyPanels(m, s, set("b2", "b3")); err != nil { // 隐藏着时挂上第三块：整栏显示出来（owner 主动挂上就是想看到它，Codex 审查 1 之后 owner 定的）
 		t.Fatal(err)
 	}
 	t.Log(dump(t, m))

@@ -146,19 +146,11 @@ func up(dirs deckstore.Dirs, args []string) {
 	// 记下本次画法（在建布局之前：新起的窗格一开始就读到这次的，不先读到上次留下的；n056 评审 1 B2、attempt 2 自查）。
 	// 最后接上的说了算：退出或失败时都不恢复（n056 评审 2 R1、owner rev 124 选简化方案）。按字符串恢复分不清
 	// 文件是不是自己写的，较早的客户端退出会把后来者的画法改掉
-	if err := logo.WriteMode(dirs.State, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
-	}
-	// 合成背景色（iTerm2 的 sixel 不能留透明像素，n069）：没有就删掉旧文件，面板回到透明画法
-	if err := logo.WriteBackground(dirs.State, dec.Background); err != nil {
-		fmt.Fprintf(os.Stderr, "deck：记不下 logo 背景色（已在运行的面板可能沿用上次的）：%v\n", err)
-		if dec.Background != nil && mode == "sixel" {
-			// 面板读不到背景色就会按透明画法画 sixel，iTerm2 上是实心方块：宁可退回字母徽章
-			mode, spec.Graphics = "none", "none"
-			if err := logo.WriteMode(dirs.State, mode); err != nil {
-				fmt.Fprintf(os.Stderr, "deck：记不下画法：%v\n", err)
-			}
-		}
+	// 画法与合成背景色（iTerm2 的 sixel 不能留透明像素，n069）作为一个整体写下（跨进程锁；没有背景色就删掉旧文件，面板回到透明画法）；
+	// 背景色写不下时画法退回字母徽章（面板读不到背景色会按透明画法画，iTerm2 上是实心方块）
+	if eff, err := logo.WriteDecision(dirs.State, mode, dec.Background); err != nil {
+		fmt.Fprintf(os.Stderr, "deck：记不下画法与背景色（已在运行的面板可能不会切换）：%v\n", err)
+		mode, spec.Graphics = eff, eff
 	}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
@@ -188,7 +180,7 @@ func up(dirs deckstore.Dirs, args []string) {
 			// 打不开就退回字母徽章：sixel 特性不在时 tmux 对所有客户端画占位（n056 attempt 2 自查）
 			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败，改用字母徽章：%v\n", err)
 			mode = "none"
-			if err := logo.WriteMode(dirs.State, mode); err != nil {
+			if _, err := logo.WriteDecision(dirs.State, mode, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板可能仍按 sixel 画，显示成占位）：%v\n", err)
 			}
 		}

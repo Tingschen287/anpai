@@ -509,7 +509,7 @@ func (s *Server) background() context.Context {
 }
 
 // WaitBackground 等后台工作（等 owner 处理启动确认后送 brief）结束；deckd 关闭时在取消 background 之后、释放写入者锁之前调。
-func (s *Server) WaitBackground() { s.bgWG.Wait() }
+func (s *Server) WaitBackground() { s.bgWG.Wait(); s.waitPanelWork() }
 
 // WithBackground 接上 deckd 的后台 context（关闭时取消，后台等 owner 处理启动确认的工作随之结束）。
 // 传进来的 context 外面再包一层，Close 能一并取消它。生产里只在 daemon 启动时调一次，行为和直接用传入的 context 一样。

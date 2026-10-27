@@ -3,7 +3,10 @@ package deckui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image/color"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,10 +32,10 @@ func TestSidebarSixelOpaqueWhenBackgroundSet(t *testing.T) {
 		if !strings.HasPrefix(im.Data, "\x1bP0;0;0q\"1;1;") {
 			t.Fatalf("设了背景应走合成画法（P2=0，每个像素都画）：%q", im.Data[:24])
 		}
-		// 背景寄存器 0：普通行是终端背景（20,20,24 → 8%,8%,9%）；选中的行是行底色（48,48,48 → 19%）
+		// 背景色在最后一个寄存器：普通行是终端背景（20,20,24 → 8%,8%,9%）；选中的行是行底色（48,48,48 → 19%）
 		switch {
-		case strings.Contains(im.Data, "#0;2;8;8;9"):
-		case strings.Contains(im.Data, "#0;2;19;19;19"):
+		case bgOf(im.Data) == "8;8;9":
+		case bgOf(im.Data) == "19;19;19":
 			selected++
 		default:
 			t.Fatalf("背景寄存器不对：%q", im.Data[:60])
@@ -42,14 +45,14 @@ func TestSidebarSixelOpaqueWhenBackgroundSet(t *testing.T) {
 		t.Fatalf("选中的那一行（且只有它）的图应合成到行底色上：%d", selected)
 	}
 	// 标题行的 deck 图标不在选中行上，用终端背景
-	if !strings.Contains(f.Images[0].Data, "#0;2;8;8;9") {
+	if bgOf(f.Images[0].Data) != "8;8;9" {
 		t.Fatal("标题图标用终端背景")
 	}
 	// 选中项目标题时（Proj 不空）没有会话行被选中
 	sb2 := &Sidebar{Data: sample(), Mode: "sixel", CellW: 16, CellH: 32}
 	sb2.Proj = sb2.Data.Groups()[0].ID
 	for _, im := range sb2.Render(40, 30).Images {
-		if strings.Contains(im.Data, "#0;2;19;19;19") {
+		if bgOf(im.Data) == "19;19;19" {
 			t.Fatal("选中的是项目标题，没有会话行的图该用行底色")
 		}
 	}
@@ -75,7 +78,7 @@ func TestSidebarSixelCacheFollowsBackground(t *testing.T) {
 	b := sb.deckIcon()
 	logo.SetBackground(nil)
 	c := sb.deckIcon()
-	if a == b || a == c || b == c || !strings.Contains(a, "#0;2;0;0;0") || !strings.Contains(b, "#0;2;100;100;100") {
+	if a == b || a == c || b == c || bgOf(a) != "0;0;0" || bgOf(b) != "100;100;100" {
 		t.Fatal("三种背景应各画各的")
 	}
 }
@@ -204,5 +207,61 @@ func TestTitleSyncFollowsLanguage(t *testing.T) {
 	settle()
 	if got[3] != "安排 Anpai" || got[4] != "Anpai" {
 		t.Fatalf("路上换回中文：先设中文，再收敛到当前的英文：%v", got)
+	}
+}
+
+// bgOf 取一段 sixel 里最后定义的颜色寄存器（合成画法把背景色放在最后一个，tmux 再编码时补出的区域就是这个颜色）。
+func bgOf(data string) string {
+	last, val := -1, ""
+	for _, m := range regexp.MustCompile(`#(\d+);2;(\d+;\d+;\d+)`).FindAllStringSubmatch(data, -1) {
+		n, _ := strconv.Atoi(m[1])
+		if n > last {
+			last, val = n, m[2]
+		}
+	}
+	return val
+}
+
+// 经 tmux 的横条（样张 9）：合成画法的图高取 6 的整数倍且不超过这几行的像素（logo.FitHeight），
+// 否则 sixel 的 6 行一段让 32 行的图数据成了 36 行、超过 tmux 的一格，被占成两格并补齐。透明画法（WT）的尺寸一点不变。
+func TestSidebarSixelHeightFitsWholeCellsOnlyWhenComposited(t *testing.T) {
+	t.Cleanup(func() { logo.SetBackground(nil) })
+	dims := func(sb *Sidebar) (rows []int) {
+		for _, im := range sb.Render(40, 30).Images {
+			var a, b, w, h int
+			if _, err := fmt.Sscanf(im.Data[strings.Index(im.Data, "\""):], "\"%d;%d;%d;%d", &a, &b, &w, &h); err != nil {
+				t.Fatalf("光栅属性：%v", err)
+			}
+			rows = append(rows, h)
+		}
+		return rows
+	}
+	for _, cell := range [][2]int{{16, 32}, {16, 38}, {9, 18}, {8, 19}} {
+		sb := &Sidebar{Data: sample(), Mode: "sixel", CellW: cell[0], CellH: cell[1]}
+		logo.SetBackground(nil)
+		for _, h := range dims(sb) {
+			if h != min(cell[1], 2*cell[0]) && h != min(2*cell[1], 4*cell[0]) {
+				t.Fatalf("透明画法的尺寸要保持 n056 验收的：格子 %v 得到 %d", cell, h)
+			}
+		}
+		bg := color.RGBA{16, 16, 16, 255}
+		logo.SetBackground(&bg)
+		sb = &Sidebar{Data: sample(), Mode: "sixel", CellW: cell[0], CellH: cell[1]}
+		for _, h := range dims(sb) {
+			if h%6 != 0 || (h > cell[1] && h > 2*cell[1]) || h > min(2*cell[1], 4*cell[0]) {
+				t.Fatalf("合成画法：格子 %v 的图高 %d 应是 6 的倍数且不超过这几行", cell, h)
+			}
+		}
+	}
+	logo.SetBackground(nil)
+	if logo.FitHeight(32) != 32 {
+		t.Fatal("没设背景时原样")
+	}
+	bg := color.RGBA{1, 1, 1, 255}
+	logo.SetBackground(&bg)
+	for in, want := range map[int]int{32: 30, 64: 60, 38: 36, 76: 72, 5: 6, 6: 6, 0: 6} {
+		if got := logo.FitHeight(in); got != want {
+			t.Fatalf("FitHeight(%d)=%d，应为 %d", in, got, want)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package panels
 
 import (
+	"github.com/muesli/termenv"
 	"net"
 	"net/http"
 	"os"
@@ -96,12 +97,41 @@ func TestRenderProgressWMatchesPrototype(t *testing.T) {
 	if !strings.Contains(lines[2], "已验收 37") || !strings.Contains(lines[2], "阻塞 3") || !strings.Contains(lines[3], "失败 1") || !strings.Contains(lines[3], "其余 8") {
 		t.Fatalf("数字格应是两行两列：\n%s", out)
 	}
-	// 分段条各段的颜色：原型的绿、琥珀、红、暗灰
-	for _, hex := range []string{"125;211;160", "245;177;76", "229;72;77"} { // #7dd3a0 #f5b14c #e5484d
-		_ = hex
-	}
 	if !strings.Contains(raw, "█") {
 		t.Fatal("分段条")
+	}
+}
+
+// 分段条各段的颜色与顺序：原型的绿 #7dd3a0（已验收）、琥珀 #f5b14c（阻塞）、红 #e5484d（失败）、暗灰 #262a31（其余；lipgloss 转出来是 38;42;48）。
+// 测试环境没有终端，lipgloss 不输出颜色：强制真彩色再看原始输出（Codex 审查 1 的建议：颜色循环原来没有断言）。
+func TestProgressBarSegmentColoursAndOrder(t *testing.T) {
+	i18n.SetLang(i18n.ZH)
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(old) })
+	raw := RenderProgressW(prog(), 40)
+	barLine := strings.Split(raw, "\n")[1]
+	want := []struct{ name, code string }{
+		{"已验收（绿）", "38;2;125;211;160"}, {"阻塞（琥珀）", "38;2;245;177;76"}, {"失败（红）", "38;2;229;72;77"}, {"其余（暗灰）", "38;2;38;42;48"},
+	}
+	last := -1
+	for _, w := range want {
+		i := strings.Index(barLine, w.code)
+		if i < 0 {
+			t.Fatalf("分段条里没有 %s 的颜色 %s：%q", w.name, w.code, barLine)
+		}
+		if i <= last {
+			t.Fatalf("分段顺序不对：%s 应在前一段之后：%q", w.name, barLine)
+		}
+		last = i
+	}
+	// 只有已验收时没有别的段的颜色
+	only := RenderProgressW(deckd.Progress{Project: "p", Graph: true, Counts: map[string]int{"accepted": 5}}, 40)
+	bar := strings.Split(only, "\n")[1]
+	for _, c := range []string{"38;2;245;177;76", "38;2;229;72;77", "38;2;38;42;48"} {
+		if strings.Contains(bar, c+"m█") { // 零格的段只会输出空的样式转义，看不见；有方块才算有这一段
+			t.Fatalf("全部已验收时不该画 %s 的方块：%q", c, bar)
+		}
 	}
 }
 
