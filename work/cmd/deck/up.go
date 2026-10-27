@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,7 +69,21 @@ func pushTitle(title string) func() {
 		return func() {}
 	}
 	fmt.Fprint(os.Stdout, "\x1b[22;0t\x1b]0;"+title+"\x07")
-	return func() { fmt.Fprint(os.Stdout, "\x1b[23;0t") }
+	var once sync.Once
+	pop := func() { once.Do(func() { fmt.Fprint(os.Stdout, "\x1b[23;0t") }) }
+	// 被 SIGTERM、SIGHUP 杀掉时也弹栈（对抗自查 C-8）：先弹、再按默认方式退出
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		s, ok := <-sig
+		if !ok {
+			return
+		}
+		pop()
+		signal.Reset(syscall.SIGTERM, syscall.SIGHUP)
+		syscall.Kill(os.Getpid(), s.(syscall.Signal))
+	}()
+	return func() { signal.Stop(sig); close(sig); pop() }
 }
 
 // keepPixels 在 tmux 客户端接上后把格子像素补进自己的终端，窗口每次改大小（WSL 会清零）后再补，
@@ -137,6 +152,13 @@ func up(dirs deckstore.Dirs, args []string) {
 	// 合成背景色（iTerm2 的 sixel 不能留透明像素，n069）：没有就删掉旧文件，面板回到透明画法
 	if err := logo.WriteBackground(dirs.State, dec.Background); err != nil {
 		fmt.Fprintf(os.Stderr, "deck：记不下 logo 背景色（已在运行的面板可能沿用上次的）：%v\n", err)
+		if dec.Background != nil && mode == "sixel" {
+			// 面板读不到背景色就会按透明画法画 sixel，iTerm2 上是实心方块：宁可退回字母徽章
+			mode, spec.Graphics = "none", "none"
+			if err := logo.WriteMode(dirs.State, mode); err != nil {
+				fmt.Fprintf(os.Stderr, "deck：记不下画法：%v\n", err)
+			}
+		}
 	}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h

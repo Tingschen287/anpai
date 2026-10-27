@@ -209,3 +209,17 @@ func TestPanelTitleForCustomPanelIsSanitized(t *testing.T) {
 		t.Fatalf("自定义面板名要清洗：%q", got)
 	}
 }
+
+// 注册表存下了但没有作用到布局（布局没在运行）：不能说「布局已更新」（对抗自查 F2）。
+func TestPanelResultTextSavedOnlyWhenNotApplied(t *testing.T) {
+	i18n.SetLang(i18n.ZH)
+	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
+	got := panelResultText("quota", false, PanelSetResult{Applied: false})
+	if !strings.Contains(got, "已保存") || !strings.Contains(got, "下次 deck up 生效") || strings.Contains(got, "布局已更新") {
+		t.Fatalf("%q", got)
+	}
+	i18n.SetLang(i18n.EN)
+	if got := panelResultText("quota", true, PanelSetResult{Applied: false}); !strings.Contains(got, "is saved") || strings.Contains(got, "updated") {
+		t.Fatalf("%q", got)
+	}
+}

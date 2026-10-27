@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,13 +92,23 @@ func WriteBackground(stateDir string, c *color.RGBA) error {
 
 // CurrentBackground 读布局当前的合成背景色；文件没有或内容不认识就是 nil（透明画法）。
 func CurrentBackground(stateDir string) *color.RGBA {
-	b, err := os.ReadFile(BackgroundFile(stateDir))
+	f, err := os.Open(BackgroundFile(stateDir))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 64)) // 合法内容 7 字节；侧栏每秒读一次，不为怪文件读到底
 	if err != nil {
 		return nil
 	}
 	s := strings.TrimSpace(string(b))
 	if len(s) != 6 {
 		return nil
+	}
+	for i := 0; i < 6; i++ { // 只认十六进制数字：Sscanf 会放过符号、空格、NUL 与 0x 前缀
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return nil
+		}
 	}
 	var r, g, bl uint8
 	if _, err := fmt.Sscanf(s, "%02x%02x%02x", &r, &g, &bl); err != nil {
@@ -161,6 +172,9 @@ func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
 		cube := map[int]int{}
 		var ids []int
 		for _, c := range cols {
+			if nearerBackground(c, bg) { // 几乎透明的边缘像素：吸到色立方会比背景亮/暗一档，在 logo 周围出现光晕
+				continue
+			}
 			i := cubeOf(c)
 			if _, ok := cube[i]; !ok {
 				cube[i] = -1
@@ -174,6 +188,10 @@ func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
 			palette = append(palette, color.RGBA{r, g, b, 255})
 		}
 		for _, c := range cols {
+			if nearerBackground(c, bg) {
+				index[c] = 0
+				continue
+			}
 			index[c] = cube[cubeOf(c)]
 		}
 	}
@@ -220,6 +238,16 @@ func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
 }
 
 func cubeOf(c color.RGBA) int { return cube(c) }
+
+// nearerBackground：c 离背景色比离它自己的色立方色更近（平方距离）。这样的像素归到精确的背景寄存器 0。
+func nearerBackground(c, bg color.RGBA) bool {
+	d := func(a, b color.RGBA) int {
+		dr, dg, db := int(a.R)-int(b.R), int(a.G)-int(b.G), int(a.B)-int(b.B)
+		return dr*dr + dg*dg + db*db
+	}
+	r, g, b := cubeRGB(cubeOf(c))
+	return d(c, bg) <= d(c, color.RGBA{r, g, b, 255})
+}
 
 // SelectedRowBG 是侧栏选中会话行的底色（xterm 256 色 236，sidebar.go 里的 \x1b[48;5;236m）。
 var SelectedRowBG = color.RGBA{48, 48, 48, 255}

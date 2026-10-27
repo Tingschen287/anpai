@@ -271,8 +271,12 @@ func layoutPanelApplier(layoutSock, agentSock string) deckd.PanelApplier {
 		if err != nil {
 			return nil, nil, err
 		}
-		if !agentdeck.LayoutHasSession(ctx, layoutSock, "deck") {
-			return nil, nil, nil
+		// 只有「布局 server 确实没在跑」才算没有布局；tmux 超时、ctx 取消、别的错误如实返回，不当成成功（对抗自查）
+		if _, err := agentdeck.LayoutPanes(ctx, layoutSock); err != nil {
+			if errors.Is(err, agentdeck.ErrNoServer) {
+				return nil, nil, deckd.ErrLayoutNotRunning
+			}
+			return nil, nil, err
 		}
 		unlock, err := layout.Lock(layoutSock+".lock", 10*time.Second)
 		if err != nil {

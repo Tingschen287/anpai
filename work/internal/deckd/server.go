@@ -55,6 +55,10 @@ type Config struct {
 
 // PanelApplier 让布局与面板注册表 defs 一致，返回新挂上与拔掉的面板名。调用方（deckd）保证同一时刻只有一次在跑，
 // 并且 defs 是调用时刻存储里最新的注册表。出错时已做的部分保留。
+// ErrLayoutNotRunning 是 PanelApplier 在布局 server 没在跑时返回的：不算出错，注册表已存、下次 deck up 建布局按它来；
+// 回给界面的 applied 为 false 且没有说明，界面据此写「已保存，布局没在运行」，不说「布局已更新」。
+var ErrLayoutNotRunning = errors.New("layout is not running")
+
 type PanelApplier func(ctx context.Context, defs []deckstore.PanelDef) (attached, removed []string, err error)
 
 type paneResolver interface {
@@ -548,7 +552,19 @@ func (s *Server) followedProject() (project, reason string) {
 	if focus == "" || focus == viewstate.Idle {
 		return "", "no_session"
 	}
-	sess, ok := s.store.Session(focus)
+	// focus 是状态机里的 agent-deck id：先按它精确找，找不到再退回 Session（key 或 id 都认）。
+	// 只调 Session(focus) 会让「另一个会话的 key 恰好等于这个 agent-deck id」时解析到错的会话（先按 key 匹配）。
+	var sess deckstore.Session
+	ok := false
+	for _, x := range s.store.Sessions("") {
+		if x.AgentDeckID == focus {
+			sess, ok = x, true
+			break
+		}
+	}
+	if !ok {
+		sess, ok = s.store.Session(focus)
+	}
 	if !ok {
 		return "", "no_session"
 	}
@@ -815,7 +831,7 @@ func (s *Server) getPanels(w http.ResponseWriter, r *http.Request) {
 }
 
 type panelBody struct {
-	On bool `json:"on"`
+	On *bool `json:"on"` // 必填：缺了或为 null 不能当成 false 把面板拔掉
 }
 
 func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
@@ -828,17 +844,22 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
+	if b.On == nil {
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", errors.New("missing field on")))
+		return
+	}
 	// 存与改布局放在同一把锁里：改布局时读的是此刻存储里最新的注册表，两个窗口同时挂拔不会各按各的旧值改
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
-	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
+	if err := s.store.SetPanel(r.PathValue("name"), *b.On); err != nil {
 		storeErr(w, err)
 		return
 	}
 	defs := s.store.Panels()
 	body := map[string]any{"panels": defs, "applied": false, "attached": []string{}, "removed": []string{}}
 	if s.cfg.PanelApplier != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		// 注册表已存下：让布局收敛不能因为客户端断开（F9 里按了空格就退出）而半途取消，所以与请求的生命周期脱钩
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
 		defer cancel()
 		attached, removed, err := s.cfg.PanelApplier(ctx, defs)
 		if attached != nil {
@@ -848,7 +869,12 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 			body["removed"] = removed
 		}
 		// 已存下的不回滚：注册表是 owner 的意愿，布局没跟上只如实说一声（界面显示原因；下次建布局会按注册表来）
-		body["applied"] = err == nil
+		if errors.Is(err, ErrLayoutNotRunning) {
+			err = nil
+			body["applied"] = false
+		} else {
+			body["applied"] = err == nil
+		}
 		if err != nil {
 			withNote(body, i18n.E("err.deckd.setpanel.apply", err), 300)
 		}

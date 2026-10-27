@@ -276,3 +276,17 @@ func TestFollowedProjectUnknownSession(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+// 布局没在运行：已存下，applied 为 false 且没有错误说明（界面据此说「布局没在运行」，不说「已更新」）。
+func TestSetPanelLayoutNotRunningIsSavedNotApplied(t *testing.T) {
+	f := newFixture(t)
+	f.srv.cfg.PanelApplier = func(context.Context, []deckstore.PanelDef) ([]string, []string, error) {
+		return nil, nil, ErrLayoutNotRunning
+	}
+	code, body := f.do("owner", "POST", "/v1/panels/progress", `{"on":true}`)
+	var out panelBodyOut
+	json.Unmarshal([]byte(body), &out)
+	if code != 200 || out.Applied || out.Note != "" || !onOf(out.Panels, "progress") || !onOf(f.store.Panels(), "progress") {
+		t.Fatalf("%d %s", code, body)
+	}
+}

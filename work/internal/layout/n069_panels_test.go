@@ -355,3 +355,28 @@ func TestNormalizeShortWindowManyPanels(t *testing.T) {
 		t.Logf("Normalize：%v", err)
 	}
 }
+
+// 对抗自查 F1：下栏高度被改过（窗口缩放后 tmux 按比例分了空间）再 Normalize，右栏两块仍是约定的高度——
+// 右栏高度要用调完下栏之后重新读到的，不是开头读到的。
+func TestNormalizeTwoRightPanelsAfterBottomResized(t *testing.T) {
+	for _, bottom := range []string{"12", "2"} {
+		m, s, _ := realLayout(t)
+		s = s.withDefaults()
+		r := byRole(t, m)
+		want := [2]int{r["panel:right:decisions"].Height, r["panel:right:quota"].Height}
+		if err := m.ResizeHeight(r["panel:bottom:notifications"].ID, bottom); err != nil {
+			t.Fatal(err)
+		}
+		if err := Normalize(m, s); err != nil {
+			t.Fatal(err)
+		}
+		r = byRole(t, m)
+		got := [2]int{r["panel:right:decisions"].Height, r["panel:right:quota"].Height}
+		if got != want {
+			t.Fatalf("下栏拉到 %s 行后 Normalize：右栏 %v，应为 %v", bottom, got, want)
+		}
+		if r["panel:bottom:notifications"].Height != s.BottomHeight {
+			t.Fatalf("下栏应复原为 %d：%d", s.BottomHeight, r["panel:bottom:notifications"].Height)
+		}
+	}
+}

@@ -69,6 +69,21 @@ func ApplyPanels(m Mux, s Spec, defs []deckstore.PanelDef) (ApplyResult, error) 
 		if !d.On {
 			continue
 		}
+		// 注册表里这块面板换了栏（手改 panels.yaml）：旧栏里的窗格拆掉，下面按新栏重新挂
+		var inPlace []agentdeck.LayoutPane
+		for _, p := range have[d.Name] {
+			if region, _, _ := panelOf(p.Role); region != d.Region {
+				if err := m.Remove(p.ID); err != nil {
+					errs = append(errs, i18n.E("err.layout.removepanel", d.Name, err))
+					inPlace = append(inPlace, p) // 没拆掉就当它还在，免得挂出第二个
+				} else {
+					res.Removed = append(res.Removed, d.Name)
+				}
+				continue
+			}
+			inPlace = append(inPlace, p)
+		}
+		have[d.Name] = inPlace
 		if dup := have[d.Name]; len(dup) > 1 {
 			// 同名面板有多个窗格（上一次中途出错留下的）：留编号最小的一个，其余拆掉
 			sort.Slice(dup, func(i, j int) bool { return paneNum(dup[i].ID) < paneNum(dup[j].ID) })

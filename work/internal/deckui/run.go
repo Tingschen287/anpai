@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -289,7 +290,7 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 	defer d.close()
 	sb := &Sidebar{Mode: modeOf()}
 	lastBG := logo.BackgroundKey()
-	titleLang := i18n.Lang() // 起动时的标题由 deck up 设好；之后语言变了才改
+	title := &titleSync{sock: layoutSock, set: agentdeck.LayoutSetTitle, done: i18n.Lang()} // 起动时的标题由 deck up 设好；之后语言变了才改
 	sb.CellW, sb.CellH = cellSize()
 	l := newLoop(api)
 	var raw Data
@@ -346,14 +347,7 @@ func RunSidebar(api API, layoutSock string, modeOf func() string) error {
 				sb.Mode, sb.cache, last, lastBG = m, nil, "", bk
 			}
 			// 界面语言换了：终端标签标题跟着换（中文「安排 Anpai」，英文「Anpai」，n069）
-			if lg := i18n.Lang(); lg != titleLang {
-				titleLang = lg
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					defer cancel()
-					agentdeck.LayoutSetTitle(ctx, layoutSock, BrandIn(lg))
-				}()
-			}
+			title.tick(i18n.Lang())
 		case r := <-started:
 			delete(starting, r.project)
 			text, ok := startMainNote(r.project, r.res, r.err)
@@ -465,4 +459,36 @@ func RunTabs(api API, layoutSock string) error {
 		}
 		draw()
 	}
+}
+
+// titleSync 在界面语言变了之后把终端标签标题改成新语言的品牌名（n069）。设标题走 tmux 命令，放到后台做，不卡侧栏的主循环；
+// 同一时刻只有一次在路上，设成功了才记下这个语言——设失败（布局 server 一时不可用）下一拍重试；
+// 路上又换了语言，这一次回来后下一拍发现和记下的不一致，会再设，最终收敛到当前语言。
+type titleSync struct {
+	sock string
+	set  func(ctx context.Context, sock, title string) error
+	mu   sync.Mutex
+	done string // 标题已设成功的语言
+	busy bool
+}
+
+func (t *titleSync) tick(lang string) {
+	t.mu.Lock()
+	if lang == t.done || t.busy {
+		t.mu.Unlock()
+		return
+	}
+	t.busy = true
+	t.mu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		err := t.set(ctx, t.sock, BrandIn(lang))
+		t.mu.Lock()
+		t.busy = false
+		if err == nil {
+			t.done = lang
+		}
+		t.mu.Unlock()
+	}()
 }

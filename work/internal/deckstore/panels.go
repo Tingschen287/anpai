@@ -5,6 +5,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -70,16 +71,44 @@ func LoadPanels(cfgDir string) ([]PanelDef, error) {
 	return f.Panels, validatePanels(f.Panels)
 }
 
+type panelStamp struct {
+	mod  time.Time
+	size int64
+}
+
+// syncPanelsLocked：deckd 运行期间 owner 手改了 panels.yaml，就采用磁盘上的，不拿内存里的旧版本覆盖他的改动。
+// 改坏了（解析或校验不过）保持内存里的并返回原因：调用方写盘前必须先看这个错，不然会把手改的文件整份覆盖。调用方持 s.mu。
+func (s *Store) syncPanelsLocked() error {
+	fi, err := os.Stat(filepath.Join(s.dirs.Config, "panels.yaml"))
+	if err != nil {
+		return nil // 文件没了：保持内存里的，下次存盘写回
+	}
+	stamp := panelStamp{fi.ModTime(), fi.Size()}
+	if stamp == s.panelsAt {
+		return nil
+	}
+	ps, err := LoadPanels(s.dirs.Config)
+	if err != nil {
+		return i18n.E("err.deckstore.open.2", err)
+	}
+	s.panels, s.panelsAt = ps, stamp
+	return nil
+}
+
 // Panels 返回面板注册表。
 func (s *Store) Panels() []PanelDef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.syncPanelsLocked() // 手改坏了就还给内存里的那份；SetPanel 会把原因报给 owner
 	return append([]PanelDef(nil), s.panels...)
 }
 
 // SetPanel 挂上或拔掉一块面板（owner 界面调）。
 func (s *Store) SetPanel(name string, on bool) error {
 	return s.mutate(func() (func() error, []Event, error) {
+		if err := s.syncPanelsLocked(); err != nil {
+			return nil, nil, err
+		}
 		next := append([]PanelDef(nil), s.panels...)
 		found := false
 		for i := range next {

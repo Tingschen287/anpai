@@ -93,9 +93,29 @@ func QueryBackground(tty *os.File, timeout time.Duration) BGResult {
 			break
 		}
 	}
-	if !da1Re.Match(buf) {
-		flushInput(int(fd)) // 同 Query：迟到的回答不能留在输入缓冲里
+	// 再收一小会儿（对抗自查 C-6）：DA1 先到、OSC 11 的回答还在路上，或超时之后才到的回答，不能留在输入缓冲里，
+	// 否则接上 tmux 后会被当成按键。收到的算进回答（迟到的背景色照样用）
+	grace := time.Now().Add(200 * time.Millisecond)
+	for {
+		left := time.Until(grace)
+		if left <= 0 {
+			break
+		}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, int(left/time.Millisecond)+1)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || n == 0 {
+			break
+		}
+		k, err := unix.Read(int(fd), tmp)
+		if err != nil || k <= 0 {
+			break
+		}
+		buf = append(buf, tmp[:k]...)
 	}
+	flushInput(int(fd)) // 同 Query：还没到的丢掉
 	return ParseBG(string(buf))
 }
 
@@ -117,6 +137,11 @@ type Decision struct {
 //     owner 用 -graphics sixel 强制时尊重，仍用透明画法。
 func Decide(forced string, r Result, native bool, iterm bool, bg BGResult) Decision {
 	d := Decision{Mode: Mode(forced, r, native)}
+	// 环境变量说是 iTerm2，但终端自己（XTVERSION）报了别的名字（例如从 iTerm2 起的 tmux 或 ssh 转发了 LC_TERMINAL，
+	// 实际接的是 Windows Terminal）：按非 iTerm2 处理，透明画法不变（对抗自查 F3）。没报名字（没回答）就信环境变量
+	if bg.Term != "" && !strings.Contains(bg.Term, "iTerm2") {
+		iterm = false
+	}
 	if d.Mode != "sixel" || !iterm {
 		return d
 	}
@@ -124,7 +149,9 @@ func Decide(forced string, r Result, native bool, iterm bool, bg BGResult) Decis
 		d.Background = bg.BG
 		return d
 	}
-	if forced == "" {
+	switch forced {
+	case "sixel", "blocks", "none": // owner 明确指定：尊重
+	default: // 空或不认识的值（auto、default……）Mode 都当自动判断，这里也一样
 		d.Mode = "none"
 	}
 	return d

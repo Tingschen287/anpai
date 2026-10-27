@@ -145,3 +145,16 @@ func nil2(t *testing.T) *os.File {
 	}
 	return f
 }
+
+// 环境变量说是 iTerm2，但终端自己报了别的名字（tmux 或 ssh 转发了 LC_TERMINAL，实际是别的终端）：按非 iTerm2 处理，透明画法不变（对抗自查 F3）。
+func TestDecideTrustsXTVERSIONOverEnv(t *testing.T) {
+	wt := Parse(wtAnswer)
+	bg := BGResult{Term: "WezTerm 20240203", BG: &color.RGBA{16, 16, 16, 255}}
+	if d := Decide("", wt, false, true, bg); d.Mode != "sixel" || d.Background != nil {
+		t.Fatalf("别的终端不该合成背景：%+v", d)
+	}
+	// 没报名字（XTVERSION 没回答）才信环境变量
+	if d := Decide("", Parse(itermAnswer), true, true, BGResult{BG: &color.RGBA{16, 16, 16, 255}}); d.Background == nil {
+		t.Fatal("没报名字时信环境变量")
+	}
+}

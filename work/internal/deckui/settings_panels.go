@@ -67,6 +67,7 @@ func panelTitle(name string) string {
 type panelsMsg struct {
 	defs []deckstore.PanelDef
 	err  error
+	gen  int // 发出这次重读时的 panelGen；比现在小说明之后又有挂拔的回答到了，这份是旧的，丢掉
 }
 
 type panelSetMsg struct {
@@ -87,18 +88,23 @@ func (m *Settings) fetchPanels() tea.Cmd {
 	if !ok {
 		return nil
 	}
+	gen := m.panelGen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		d, err := p.Panels(ctx)
-		return panelsMsg{defs: d, err: err}
+		return panelsMsg{defs: d, err: err, gen: gen}
 	}
 }
 
 // togglePanel 挂上或拔掉光标所在的面板。同一时刻只发一个请求：回来之前再按不理（连按会让两次请求各按各的旧值）。
 func (m *Settings) togglePanel(name string) tea.Cmd {
 	p, ok := m.panelsAPI()
-	if !ok || m.panelBusy {
+	if !ok {
+		return nil
+	}
+	if m.panelBusy { // 上一个还在路上：说一声，免得分不清是卡了还是没按上
+		m.msg = later(func() string { return T("panels.busy") })
 		return nil
 	}
 	on := true
@@ -120,21 +126,27 @@ func (m *Settings) togglePanel(name string) tea.Cmd {
 func (m *Settings) panelsUpdate(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case panelsMsg:
+		if msg.gen < m.panelGen {
+			return nil, true
+		}
 		if msg.err != nil {
 			err := msg.err
 			m.panelsErr = later(func() string { return T("panels.load.fail", errLong(err)) })
 			return nil, true
 		}
 		m.panels, m.panelsErr, m.panelsLoaded = msg.defs, nil, true
+		m.clampPanelCursor()
 		return nil, true
 	case panelSetMsg:
 		m.panelBusy = false
+		m.panelGen++
 		if msg.err != nil {
 			err, name := msg.err, msg.name
 			m.msg = later(func() string { return T("panels.set.fail", panelTitle(name), errLong(err)) })
 			return m.fetchPanels(), true // 失败时按服务器上的现状重读，不显示一个没成的状态
 		}
 		m.panels, m.panelsLoaded, m.panelsErr = msg.res.Panels, true, nil
+		m.clampPanelCursor()
 		name, on, res := msg.name, msg.on, msg.res
 		m.msg = later(func() string { return panelResultText(name, on, res) })
 		return nil, true
@@ -148,6 +160,9 @@ func panelResultText(name string, on bool, res PanelSetResult) string {
 	if res.Note != "" || res.NoteCode != "" {
 		why := deckclient.Text(res.NoteCode, res.NoteArgs, res.Note)
 		return T("panels.set.notapplied", title, oneLine(deckstore.Display(why, 300)))
+	}
+	if !res.Applied { // 注册表存下了，但没有作用到布局（布局没在运行）：不说「布局已更新」
+		return T("panels.set.savedonly", title)
 	}
 	if on {
 		return T("panels.set.on", title)
@@ -172,6 +187,9 @@ func (m *Settings) panelsPage(b *strings.Builder, row func(string) string) {
 	if len(m.panels) == 0 {
 		b.WriteString(dimOn + "   " + T("panels.empty") + reset + "\n")
 	}
+	if m.panelBusy {
+		b.WriteString(dimOn + "   " + T("panels.busy") + reset + "\n")
+	}
 	for _, d := range m.panels {
 		mark := dimOn + "○ " + T("panels.state.off") + reset
 		if d.On {
@@ -188,4 +206,13 @@ func panelRegionText(region string) string {
 		return T("panels.region.bottom")
 	}
 	return T("panels.region.right")
+}
+
+// clampPanelCursor：列表变短（别处改了、重读）后，把「面板」页的光标拉回最后一行，不留在列表之外。
+func (m *Settings) clampPanelCursor() {
+	if m.page == pagePanels {
+		if n := len(m.panels); m.cur >= n {
+			m.cur = max(0, n-1)
+		}
+	}
 }

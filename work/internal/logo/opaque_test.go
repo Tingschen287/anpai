@@ -1,6 +1,8 @@
 package logo
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"image"
 	"image/color"
 	"os"
@@ -251,4 +253,27 @@ func abs(n int) int {
 		return -n
 	}
 	return n
+}
+
+// n056 在 Windows Terminal 上验收的透明编码，一个字节都不能变：7 个 logo × 9 种边长共 63 段 sixel，
+// 逐段取 sha256 拼成清单再取 sha256，与改动前（c600412）上同一个程序算出的清单（evidence/wt-sixel-hashes-c600412.txt）一致。
+func TestTransparentEncodingByteIdenticalToC600412(t *testing.T) {
+	SetBackground(nil)
+	var list strings.Builder
+	for _, tool := range []string{"deck", "claude", "codex", "grok", "opencode", "kimi", "antigravity"} {
+		for _, n := range []int{16, 18, 20, 32, 36, 38, 64, 72, 256} {
+			im := Deck()
+			if tool != "deck" {
+				im = For(tool)
+			}
+			a, b := Sixel(im, n, n), SixelTransparent(im, n, n)
+			if a != b {
+				t.Fatalf("%s %d：没设背景时 Sixel 应与 SixelTransparent 一致", tool, n)
+			}
+			fmt.Fprintf(&list, "%s %d %x\n", tool, n, sha256.Sum256([]byte(a)))
+		}
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(list.String()))); got != "bd25018be196a637b78223b21482530ef704f4c25f477978075178867f1db6e6" {
+		t.Fatalf("透明编码变了（清单哈希 %s）：Windows Terminal 上验收过的画法不能改", got)
+	}
 }

@@ -248,6 +248,7 @@ type Settings struct {
 	panelsLoaded bool
 	panelsErr    lazyText
 	panelBusy    bool
+	panelGen     int // 每收到一次挂拔的回答加一：之前发出的重读若晚到，丢掉（旧状态不盖新状态）
 }
 
 type loadedMsg struct {

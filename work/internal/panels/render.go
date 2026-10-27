@@ -388,6 +388,7 @@ var (
 // 免得 1 个失败节点在 49 个节点里看不见。返回的格数加起来恰好是 n。
 func segmentCells(counts []int, n int) []int {
 	out := make([]int, len(counts))
+	counts = clampCounts(counts)
 	total := 0
 	for _, c := range counts {
 		total += c
@@ -433,9 +434,22 @@ func segmentCells(counts []int, n int) []int {
 	return out
 }
 
+// maxNodes 是计数的上限：真实的 Graph 不会有这么多节点；线上畸形数据（负数、接近 int64 上限）
+// 不能让 strings.Repeat 负数 panic，也不能让 c*n 溢出。
+const maxNodes = 1 << 30
+
+func clampCounts(counts []int) []int {
+	out := make([]int, len(counts))
+	for i, c := range counts {
+		out[i] = min(max(c, 0), maxNodes)
+	}
+	return out
+}
+
 // RenderProgressW 画项目进度面板（原型：分段进度条 + 数字格；width 是面板宽）。
 // 没有项目可看（没有在看的会话、会话不属于项目）时说一句清楚的话，不是错误。
 func RenderProgressW(p deckd.Progress, width int) string {
+	width = min(max(width, 0), 2000) // 宽度来自终端，但别让 width-2 溢出、也别为一个畸形宽度铺出兆级的空格
 	var b strings.Builder
 	if p.Follow && p.Project == "" {
 		b.WriteString(title.Render(i18n.T("progress.heading")) + "\n")
@@ -446,16 +460,18 @@ func RenderProgressW(p deckd.Progress, width int) string {
 		b.WriteString(dim.Render(ansi.Wrap(why, max(10, width-1), "")) + "\n")
 		return b.String()
 	}
-	b.WriteString(title.Render(i18n.T("progress.title")+p.Project) + "\n")
+	b.WriteString(title.Render(i18n.T("progress.title")+deckstore.Display(p.Project, 80)) + "\n")
 	if !p.Graph {
 		b.WriteString(dim.Render(i18n.T("progress.nograph")) + "\n")
 		return b.String()
 	}
-	total := p.Unknown
+	// 数字格与分段条用同一份清洗过的计数（负数当 0），两者不会对不上
+	nonneg := func(n int) int { return min(max(n, 0), maxNodes) }
+	total := nonneg(p.Unknown)
 	for _, n := range p.Counts {
-		total += n
+		total += nonneg(n)
 	}
-	acc, blk, fail := p.Counts["accepted"], p.Counts["blocked"], p.Counts["failed"]
+	acc, blk, fail := nonneg(p.Counts["accepted"]), nonneg(p.Counts["blocked"]), nonneg(p.Counts["failed"])
 	rest := total - acc - blk - fail
 	// 分段条：已验收、阻塞、失败、其余（原型里「其余」是计划中）
 	n := max(8, min(width-2, 60))
@@ -481,7 +497,7 @@ func RenderProgressW(p deckd.Progress, width int) string {
 		}
 	}
 	if p.Unknown > 0 {
-		parts = append(parts, i18n.T("progress.unknown", p.Unknown))
+		parts = append(parts, i18n.T("progress.unknown", nonneg(p.Unknown)))
 	}
 	if len(parts) > 0 {
 		b.WriteString(dim.Render(strings.Join(parts, " · ")) + "\n")
@@ -500,6 +516,8 @@ func RenderProgressW(p deckd.Progress, width int) string {
 			n := p.ProblemsCoded[i]
 			pr = deckclient.Text(n.Code, n.Args, pr)
 		}
+		// 问题文字来自控制器的报错，是外部原文：去控制序列、折成一行、限长（其他面板同样走 Display）
+		pr = strings.Join(strings.Fields(deckstore.Display(pr, 300)), " ")
 		b.WriteString(warn.Render("! "+pr) + "\n")
 	}
 	return b.String()

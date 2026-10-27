@@ -21,6 +21,7 @@ type tickMsg struct{}
 type dataMsg struct {
 	view string
 	decs []deckstore.Decision
+	prog *deckd.Progress // 进度面板：存数据，不存画好的字；宽度、语言以 View 那一刻为准
 	err  error
 }
 
@@ -29,6 +30,7 @@ type model struct {
 	project string
 	c       *deckclient.Client
 	view    string
+	prog    *deckd.Progress
 	err     error
 	decs    []deckstore.Decision
 	sel     int
@@ -85,7 +87,7 @@ func (m *model) fetch() tea.Cmd {
 			if err := m.c.Get(ctx, "/v1/progress"+m.q(), &p); err != nil {
 				return dataMsg{err: err}
 			}
-			return dataMsg{view: RenderProgressW(p, m.width)}
+			return dataMsg{prog: &p}
 		case "notifications":
 			var ns []deckstore.Notification
 			if err := m.c.Get(ctx, "/v1/notifications"+m.q(), &ns); err != nil {
@@ -121,7 +123,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dataMsg:
 		m.err = msg.err
 		if msg.err == nil {
-			m.view, m.decs = msg.view, msg.decs
+			m.view, m.decs, m.prog = msg.view, msg.decs, msg.prog
 			if n := len(OpenDecisions(m.decs)); m.sel >= n {
 				m.sel = n - 1
 			}
@@ -188,6 +190,9 @@ func (m *model) View() string {
 			note = m.note()
 		}
 		return RenderDecisions(m.decs, m.sel, note)
+	}
+	if m.name == "progress" && m.prog != nil {
+		return RenderProgressW(*m.prog, m.width) // 在事件循环里画：取数的 goroutine 不碰 m.width（避免数据竞争），改语言、改窗口大小下一帧就生效
 	}
 	return m.view
 }

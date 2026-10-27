@@ -1,9 +1,13 @@
 package deckui
 
 import (
+	"context"
+	"errors"
 	"image/color"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"github.com/Tingschen287/terminal-deck/work/internal/logo"
@@ -106,5 +110,99 @@ func TestBrandIn(t *testing.T) {
 	i18n.SetLang(i18n.EN)
 	if BrandIn(i18n.ZH) != "安排 Anpai" || BrandIn(i18n.EN) != "Anpai" {
 		t.Error("BrandIn 与进程语言无关")
+	}
+}
+
+// 界面语言换了，侧栏把终端标签标题改成新语言的品牌名；同一语言不重复设；设失败下一拍重试；路上又换了语言最终收敛。
+func TestTitleSyncFollowsLanguage(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	fail := false
+	release := make(chan struct{}, 8)
+	ts := &titleSync{sock: "s", done: i18n.ZH, set: func(ctx context.Context, sock, title string) error {
+		mu.Lock()
+		got = append(got, title)
+		f := fail
+		mu.Unlock()
+		<-release
+		if f {
+			return errors.New("布局不可用")
+		}
+		return nil
+	}}
+	wait := func(n int) {
+		t.Helper()
+		for i := 0; i < 200; i++ {
+			mu.Lock()
+			l := len(got)
+			mu.Unlock()
+			if l >= n {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("等不到第 %d 次设标题：%v", n, got)
+	}
+	settle := func() {
+		for i := 0; i < 200; i++ {
+			ts.mu.Lock()
+			b := ts.busy
+			ts.mu.Unlock()
+			if !b {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("一直在路上")
+	}
+	ts.tick(i18n.ZH) // 起动时的语言，deck up 已经设好
+	time.Sleep(50 * time.Millisecond)
+	if len(got) != 0 {
+		t.Fatalf("语言没变不该设：%v", got)
+	}
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	ts.tick(i18n.EN)
+	wait(1)
+	release <- struct{}{}
+	settle()
+	ts.tick(i18n.EN) // 上次失败：下一拍重试
+	wait(2)
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	release <- struct{}{}
+	settle()
+	ts.tick(i18n.EN) // 重试又失败了（fail 是在第二次发出时读的）；再来一拍
+	wait(3)
+	release <- struct{}{}
+	settle()
+	ts.tick(i18n.EN)
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := len(got)
+	mu.Unlock()
+	if n != 3 {
+		t.Fatalf("成功之后同一语言不再设：%v", got)
+	}
+	if got[0] != "Anpai" || got[1] != "Anpai" {
+		t.Fatalf("英文标题是 Anpai：%v", got)
+	}
+	// 在路上时换回中文：这一次回来后下一拍收敛到中文
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	ts.tick(i18n.ZH)
+	wait(4)
+	ts.tick(i18n.EN) // 路上又来一拍：忽略
+	release <- struct{}{}
+	settle()
+	ts.tick(i18n.EN)
+	wait(5)
+	release <- struct{}{}
+	settle()
+	if got[3] != "安排 Anpai" || got[4] != "Anpai" {
+		t.Fatalf("路上换回中文：先设中文，再收敛到当前的英文：%v", got)
 	}
 }

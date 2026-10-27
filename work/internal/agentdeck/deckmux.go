@@ -18,6 +18,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -416,13 +417,30 @@ func LayoutSetTitle(ctx context.Context, socket, title string) error {
 func LayoutRemovePane(ctx context.Context, socket, pane string) error {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
 	defer cancel()
-	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "display-message", "-p", "-t", pane, "#{@deck_role}"))
+	// 只认 %数字 的窗格 id：空串、{active}、窗口名、带分号的串都会被 tmux 解析成别的窗格（或让参数被当成命令分隔）
+	if !paneIDRe.MatchString(pane) {
+		return i18n.E("err.agentdeck.removepane.notpanel", pane, "")
+	}
+	// 按 id 精确查：窗格已经不在（被外面关了）就是目标状态，不算错；display-message 对不存在的目标也返回成功、角色为空，分不出来
+	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{@deck_role}"))
 	if err != nil {
 		return err
 	}
-	if role := strings.TrimSpace(string(out)); !strings.HasPrefix(role, "panel:") {
+	role, found := "", false
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, r, ok := strings.Cut(line, "\t"); ok && id == pane {
+			role, found = strings.TrimSpace(r), true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if !strings.HasPrefix(role, "panel:") {
 		return i18n.E("err.agentdeck.removepane.notpanel", pane, role)
 	}
 	_, err = runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "kill-pane", "-t", pane))
 	return err
 }
+
+var paneIDRe = regexp.MustCompile(`^%[0-9]+$`)

@@ -278,15 +278,31 @@ func Normalize(m Mux, s Spec) error {
 	}
 	if n := len(right); n >= 2 {
 		h := max(3, (s.Height-s.BottomHeight)/n)
+		// 前面调侧栏、标签条、下栏已经改过右栏的实际高度：重新读一次再算总高（对抗自查 F1：用开头读到的旧高度，
+		// 下栏不是 6 行时最后一块得到 h+差额）
+		fresh, err := m.Panes()
+		if err != nil {
+			return err
+		}
+		heightOf := map[string]int{}
+		for _, p := range fresh {
+			heightOf[p.ID] = p.Height
+		}
 		total := n - 1 // 各块之间的边框
 		for _, p := range right {
-			total += p.Height
+			total += heightOf[p.ID]
 		}
+		avail := total - (n - 1) // 各块能分到的行数合计
+		cramped := avail < 3*n
 		first := max(3, total-(n-1)*(h+1))
 		for i, p := range right[:n-1] {
 			target := h
 			if i == 0 {
 				target = first
+			}
+			if cramped {
+				// 窗口放不下每块 3 行：把能给的行数平分，多出来的从第一块起每块多 1 行（以前首块钳成 3、其余也要 3，结果 1/3/1）
+				target = avail/n + oneIf(i < avail%n)
 			}
 			if err := m.ResizeHeight(p.ID, strconv.Itoa(target)); err != nil {
 				return err
@@ -509,4 +525,11 @@ func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec)
 		return err
 	}
 	return m.Select(center)
+}
+
+func oneIf(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
