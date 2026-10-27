@@ -473,7 +473,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.tabs"), tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
+			err = errors.Join(err, restore(detached(m), s, center, i18n.T("layout.pane.tabs"), tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
 		}()
 	}
 	// 下栏原本在侧栏右边（侧栏整高）。整宽并回会铺到侧栏下面、把侧栏压矮，所以先停放侧栏，下栏回去后再把侧栏整高接回左边。
@@ -482,7 +482,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.side"), sidebar,
+			err = errors.Join(err, restore(detached(m), s, center, i18n.T("layout.pane.side"), sidebar,
 				agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: strconv.Itoa(s.LeftWidth)}))
 		}()
 	}
@@ -517,8 +517,15 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 }
 
 // restore 把为并回而暂时停放的窗格接回原位，再整理尺寸、选回中间。
+//
+// n069（复审 2 的 R2-2 与对抗自查）：调用方在 defer 里用不随取消的 Mux（detached）调它，接回失败时再试一次——
+// 这一步失败，标签条或侧栏就一直停放着，之后谁也找不回来（Toggle 与 attachPanel 的 restoreCoded 同一规则）。
 func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec) error {
-	if err := m.Unpark(pane, center, spec); err != nil {
+	err := m.Unpark(pane, center, spec)
+	if err != nil {
+		err = m.Unpark(pane, center, spec)
+	}
+	if err != nil {
 		return i18n.Errorf("layout.err.restore", what, err)
 	}
 	if err := Normalize(m, s); err != nil {

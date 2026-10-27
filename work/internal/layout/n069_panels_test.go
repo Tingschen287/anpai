@@ -377,3 +377,34 @@ func TestNormalizeTwoRightPanelsAfterBottomResized(t *testing.T) {
 		}
 	}
 }
+
+// Discard（撤回刚建的、还没有角色的窗格）只拆角色为空的窗格：中间、侧栏、标签条、面板都有角色，拆不到；已经不在算成功。
+func TestDiscardOnlyRemovesUntaggedPanes(t *testing.T) {
+	m, s, b := realLayout(t)
+	id, err := m.Split(b.Center, agentdeck.SplitSpec{Horizontal: true, Size: "10"}, "sleep 600")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Discard(id); err != nil {
+		t.Fatalf("没有角色的窗格应能撤回：%v", err)
+	}
+	if err := m.Discard(id); err != nil {
+		t.Fatalf("已经不在算成功：%v", err)
+	}
+	r := byRole(t, m)
+	before := len(r)
+	for _, role := range []string{RoleCenter, RoleSidebar, RoleTabs, "panel:right:decisions", "panel:bottom:notifications"} {
+		if err := m.Discard(r[role].ID); err == nil {
+			t.Fatalf("不该拆有角色的窗格 %s", role)
+		}
+	}
+	for _, bad := range []string{"", "{active}", "%0;", "main", "%1;kill-server"} {
+		if err := m.Discard(bad); err == nil {
+			t.Fatalf("不合格的目标 %q 应被拒绝", bad)
+		}
+	}
+	if got := byRole(t, m); len(got) != before {
+		t.Fatalf("窗格数变了 %d → %d", before, len(got))
+	}
+	_ = s
+}

@@ -259,9 +259,53 @@ func TestSidebarSixelHeightFitsWholeCellsOnlyWhenComposited(t *testing.T) {
 	}
 	bg := color.RGBA{1, 1, 1, 255}
 	logo.SetBackground(&bg)
-	for in, want := range map[int]int{32: 30, 64: 60, 38: 36, 76: 72, 5: 6, 6: 6, 0: 6} {
+	for in, want := range map[int]int{32: 30, 64: 60, 38: 36, 76: 72, 5: 0, 6: 6, 0: 0} {
 		if got := logo.FitHeight(in); got != want {
 			t.Fatalf("FitHeight(%d)=%d，应为 %d", in, got, want)
+		}
+	}
+	// 不足一个 sixel 段（6 像素）：不画，而不是画一个比预留还高的图
+	if s := logo.Sixel(logo.Deck(), logo.FitHeight(5), logo.FitHeight(5)); s != "" {
+		t.Fatalf("预留不足 6 像素时不该画图：%q", s[:min(len(s), 20)])
+	}
+}
+
+// 额度面板的 logo（Codex 复审 2 的 R2-3）：合成画法下边长与画布高度一起取整，保证等比、总高是 6 的倍数、不越出预留行；
+// 以前只取整高度，两行块在 16×32、8×16 的格子上被压扁 6%。
+func TestQuotaLogoStaysSquareWhenComposited(t *testing.T) {
+	t.Cleanup(func() { logo.SetBackground(nil) })
+	for _, composited := range []bool{true, false} {
+		if composited {
+			bg := color.RGBA{16, 16, 16, 255}
+			logo.SetBackground(&bg)
+		} else {
+			logo.SetBackground(nil)
+		}
+		for _, cell := range [][2]int{{16, 32}, {8, 16}, {16, 38}, {9, 18}, {10, 20}, {8, 19}, {7, 14}} {
+			for _, rows := range []int{2, 3, 4} {
+				side, height := quotaLogoSize(cell[0], cell[1], rows)
+				if composited && (side%6 != 0 || height%6 != 0) {
+					t.Fatalf("合成画法 %v %d 行：边长 %d、总高 %d 应都是 6 的倍数", cell, rows, side, height)
+				}
+				if height > rows*cell[1] || side > 4*cell[0] || side > 2*cell[1] || height < side {
+					t.Fatalf("%v %d 行：边长 %d 总高 %d 越出预留（%d 行 × %d、宽 4 格 × %d）或总高小于边长", cell, rows, side, height, rows, cell[1], cell[0])
+				}
+				if !composited && (side != min(2*cell[1], 4*cell[0]) || height != rows*cell[1]) {
+					t.Fatalf("透明画法（n056）的尺寸要原样：%v %d 行得 %d×%d", cell, rows, side, height)
+				}
+				// 等比：画布（logo 方图垫高后）的宽高比与目标 side×height 一致（整数误差一个像素以内），不会被压扁
+				im := PadVertical(logo.For("claude"), side, height)
+				b := im.Bounds()
+				if d := b.Dx()*height - b.Dy()*side; d > b.Dx() || -d > b.Dx() {
+					t.Fatalf("%v %d 行：画布 %dx%d 缩到 %dx%d 不等比（差 %d）", cell, rows, b.Dx(), b.Dy(), side, height, d)
+				}
+				// 真正编出来的 sixel 的光栅属性与算出来的一致
+				data := quotaSixel(logo.For("claude"), cell[0], cell[1], rows)
+				var a, bb, w2, h2 int
+				if _, err := fmt.Sscanf(data[strings.Index(data, "\""):], "\"%d;%d;%d;%d", &a, &bb, &w2, &h2); err != nil || w2 != side || h2 != height {
+					t.Fatalf("%v %d 行：sixel 光栅 %dx%d 应为 %dx%d（%v）", cell, rows, w2, h2, side, height, err)
+				}
+			}
 		}
 	}
 }

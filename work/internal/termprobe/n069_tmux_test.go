@@ -282,13 +282,16 @@ func TestN069TmuxReencodeLeavesNoForegroundStripes(t *testing.T) {
 				t.Errorf("%s：声明高 %d 超过 %d 行 × %d 像素，多占了下面一行", name, h, c.cellsH, max(cell.ch, 32))
 			}
 			// 按 iTerm2 的填法渲染：没画的取最后定义的颜色，再看哪里不是背景色、前景有没有越出源图
-			fgBelow, unsetInSource := 0, 0
+			fgBelow, unsetInSource, unsetAbove := 0, 0, 0
 			for y := 0; y < len(grid) && y < h; y++ {
 				for x := 0; x < w; x++ {
 					reg := grid[y][x]
 					if reg < 0 {
 						if y < side && x < side {
 							unsetInSource++
+							if y < side-3 {
+								unsetAbove++ // 最后一段之外（离图底超过 3 行）的没画像素
+							}
 						}
 						continue
 					}
@@ -299,10 +302,17 @@ func TestN069TmuxReencodeLeavesNoForegroundStripes(t *testing.T) {
 					}
 				}
 			}
+			// 源图范围内的像素 tmux 再编码后应都有颜色（P2=0 全画）；有「没画」的会被 iTerm2 涂成最后定义的颜色（上面已断言它是背景色）。
+			// tmux 3.4 的再编码实测会丢掉源图最下面的 1～3 行（16 像素宽的格子上：30 高的图丢 1 行、60 高的图丢 3 行；8 像素宽的格子不丢），
+			// 这些行在 iTerm2 上变成背景色，等于图的底边被削掉不到 5%，不是横条，也不影响认图（owner 的样张 11 就是这样，已确认干净）。
+			// 所以这里断言：没画的像素只能在图底的 3 行之内，中间与上面不能有没画的（那才是错位或丢段）。
+			if unsetAbove > 0 {
+				t.Errorf("%s：离图底 3 行之外有 %d 个像素没画（iTerm2 会用最后定义的颜色填）", name, unsetAbove)
+			}
 			if fgBelow > 0 {
 				t.Errorf("%s：源图（%d）之外有 %d 个前景色像素", name, side, fgBelow)
 			}
-			t.Logf("%s：源 %dx%d → tmux 声明 %dx%d，源图范围内没画 %d 个，最后定义的颜色 %v", name, side, side, w, h, unsetInSource, last)
+			t.Logf("%s：源 %dx%d → tmux 声明 %dx%d，没画 %d 个（图底 3 行之内；之外 %d 个），最后定义的颜色 %v", name, side, side, w, h, unsetInSource, unsetAbove, last)
 		}
 	}
 }

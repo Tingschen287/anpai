@@ -104,6 +104,13 @@ func TestADV_SixelOnSizes(t *testing.T) {
 				}
 			}()
 			s := SixelOn(Deck(), sz[0], sz[1], bg)
+			if sz[0] <= 0 || sz[1] <= 0 {
+				// 复审 2 起：边长为 0（FitHeight 对不足 6 像素返回 0）表示不画，返回空串，而不是一个 0×0 的 sixel 头
+				if s != "" {
+					t.Errorf("%v 应返回空串：%q", sz, s)
+				}
+				return
+			}
 			if !strings.HasPrefix(s, "\x1bP0;0;0q\"1;1;") || !strings.HasSuffix(s, "\x1b\\") {
 				t.Errorf("%v 头尾不对 %q", sz, s)
 			}
@@ -302,25 +309,6 @@ func TestADV_ConcurrentWriteBackground(t *testing.T) {
 		}
 	}
 	_ = filepath.Join
-}
-
-// Apply 的两个文件不同步：先读 bg 再读 mode，之间 deck up 可以改。这里直接演示「sixel + 旧背景」组合是可达的。
-func TestADV_ApplyReadsBgThenModeNonAtomic(t *testing.T) {
-	t.Cleanup(func() { SetBackground(nil) })
-	dir := t.TempDir()
-	// 旧状态：Windows Terminal 起的布局（sixel，无背景）；deck up 从 iTerm2 接上，写入顺序是先 mode 后 bg
-	WriteMode(dir, "sixel")
-	m := Apply(dir)
-	if m != "sixel" || Background() != nil {
-		t.Fatal("前提")
-	}
-	// deck up 的顺序（up.go）：mode 先写；中间侧栏的 tick 正好跑 Apply
-	WriteMode(dir, "sixel")                            // 本次也是 sixel
-	mid := Apply(dir)                                  // 侧栏此刻读：sixel + 没有背景
-	WriteBackground(dir, &color.RGBA{30, 30, 30, 255}) // 之后 bg 才写
-	if mid == "sixel" && Background() == nil {
-		t.Log("窗口存在：侧栏会按透明画法画 sixel，在 iTerm2 上就是实心方块，直到下一个 tick（≤1s）")
-	}
 }
 
 // 真 logo 上的同一问题：哪些工具在哪些边长下走量化分支，且 alpha<5% 的像素偏离背景多少。

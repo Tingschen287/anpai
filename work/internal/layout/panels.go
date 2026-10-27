@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
@@ -37,6 +38,11 @@ func panelOf(role string) (region, name string, ok bool) {
 //
 // 这一栏被 F5～F7 整栏隐藏着时，挂上新面板会把这一栏显示出来（owner 主动挂上，就是想看到它）。
 // 调用方要持布局锁（Lock）：与 deck layout toggle、normalize 串行。出错时已做的部分保留，返回已做的与错误。
+//
+// **步骤边界（Codex 复审 2 的 R2-2，owner 选根治方案）**：m 的 context（deckd 的生命周期与总 deadline）只在**步骤之间**检查：
+// 一个步骤（拆一个窗格；新开一个窗格含打角色，含隐藏栏的显示与暂停窗格的恢复）一旦开始，就用不随 ctx 取消的 Mux 做完，
+// 每条命令各有自己的 5 秒上限，所以步骤是有界的、也不会做到一半被取消而留下暂停着的标签条或没有角色的窗格。
+// ctx 取消或到期后不再开始新的步骤，已经做完的步骤保留，最后把尺寸理顺（也用不随取消的 Mux）。
 func ApplyPanels(m Mux, s Spec, defs []deckstore.PanelDef) (ApplyResult, error) {
 	s = s.withDefaults()
 	var res ApplyResult
@@ -52,32 +58,55 @@ func ApplyPanels(m Mux, s Spec, defs []deckstore.PanelDef) (ApplyResult, error) 
 		}
 	}
 	var errs []error
+	stopped, touched := false, false
+	// step 做一个步骤：先在步骤边界看 m 的 context（取消了就不开始，之后的步骤也都不再开始），再用不随取消的 Mux 把它做完。
+	step := func(f func(d Mux) error) error {
+		if stopped {
+			return nil
+		}
+		if err := stepBoundary(m); err != nil {
+			stopped = true
+			errs = append(errs, err)
+			return err
+		}
+		touched = true
+		d, done := stepMux(m)
+		defer done()
+		return f(d)
+	}
+	remove := func(name string, p agentdeck.LayoutPane) bool {
+		err := step(func(d Mux) error { return d.Remove(p.ID) })
+		if err != nil {
+			if !stopped {
+				errs = append(errs, i18n.E("err.layout.removepanel", name, err))
+			}
+			return false
+		}
+		return !stopped
+	}
 	// 先拆：拆掉的空间让给后来新开的窗格
 	for _, d := range defs {
 		if d.On {
 			continue
 		}
 		for _, p := range have[d.Name] {
-			if err := m.Remove(p.ID); err != nil {
-				errs = append(errs, i18n.E("err.layout.removepanel", d.Name, err))
-				continue
+			if remove(d.Name, p) {
+				res.Removed = append(res.Removed, d.Name)
 			}
-			res.Removed = append(res.Removed, d.Name)
 		}
 	}
 	for _, d := range defs {
-		if !d.On {
+		if !d.On || stopped {
 			continue
 		}
 		// 注册表里这块面板换了栏（手改 panels.yaml）：旧栏里的窗格拆掉，下面按新栏重新挂
 		var inPlace []agentdeck.LayoutPane
 		for _, p := range have[d.Name] {
 			if region, _, _ := panelOf(p.Role); region != d.Region {
-				if err := m.Remove(p.ID); err != nil {
-					errs = append(errs, i18n.E("err.layout.removepanel", d.Name, err))
-					inPlace = append(inPlace, p) // 没拆掉就当它还在，免得挂出第二个
-				} else {
+				if remove(d.Name, p) {
 					res.Removed = append(res.Removed, d.Name)
+				} else {
+					inPlace = append(inPlace, p) // 没拆掉就当它还在，免得挂出第二个
 				}
 				continue
 			}
@@ -88,32 +117,59 @@ func ApplyPanels(m Mux, s Spec, defs []deckstore.PanelDef) (ApplyResult, error) 
 			// 同名面板有多个窗格（上一次中途出错留下的）：留编号最小的一个，其余拆掉
 			sort.Slice(dup, func(i, j int) bool { return paneNum(dup[i].ID) < paneNum(dup[j].ID) })
 			for _, p := range dup[1:] {
-				if err := m.Remove(p.ID); err != nil {
-					errs = append(errs, i18n.E("err.layout.removepanel", d.Name, err))
-				}
+				remove(d.Name, p)
 			}
 		}
-		if len(have[d.Name]) > 0 {
+		if stopped || len(have[d.Name]) > 0 {
 			continue
 		}
-		if err := attachPanel(m, s, d); err != nil {
+		err := step(func(dm Mux) error { return attachPanel(dm, s, d) })
+		switch {
+		case stopped:
+		case err != nil:
 			errs = append(errs, i18n.E("err.layout.attachpanel", d.Name, err))
-			continue
+		default:
+			res.Attached = append(res.Attached, d.Name)
 		}
-		res.Attached = append(res.Attached, d.Name)
 	}
-	if len(res.Removed)+len(res.Attached) > 0 {
-		if err := Normalize(m, s); err != nil {
+	if touched {
+		// 收尾理顺尺寸、交还焦点：不随取消（ctx 到期后这里仍要把已经做完的步骤理顺，不然右栏高度、宽度是乱的）。
+		// 只要有步骤开始过就理顺（不只看成功的：新开的窗格后来被撤回，也动过尺寸）
+		dm := detached(m)
+		if err := Normalize(dm, s); err != nil {
 			errs = append(errs, err)
 		}
-		if center := centerOf(m); center != "" {
+		if center := centerOf(dm); center != "" {
 			// 键盘焦点交还中间（拆掉的窗格若正是焦点所在，tmux 会把焦点给邻居）
-			if err := m.Select(center); err != nil {
+			if err := dm.Select(center); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 	return res, errors.Join(errs...)
+}
+
+// stepLimit 是一个结构步骤（含它里面暂停与恢复的窗格）的总时限：每条 tmux 命令另有 5 秒上限，正常的步骤是毫秒级，
+// 这个时限只防 tmux 卡住时一步拖得没完。恢复暂停的窗格在步骤里再用不随取消的 Mux（detached），不受这个时限截断。
+const stepLimit = 30 * time.Second
+
+// stepMux 给一个步骤配 Mux：不随 m 的 ctx 取消，另有自己的时限（stepLimit）；别的 Mux 实现退回 detached。
+func stepMux(m Mux) (Mux, func()) {
+	if s, ok := m.(interface {
+		Step(time.Duration) (Mux, func())
+	}); ok {
+		return s.Step(stepLimit)
+	}
+	return detached(m), func() {}
+}
+
+// stepBoundary 在步骤边界看 Mux 的 context 有没有取消或到期（TmuxMux 直接看；别的 Mux 用它的 Panes 是否出错代替）。
+func stepBoundary(m Mux) error {
+	if c, ok := m.(interface{ Err() error }); ok {
+		return c.Err()
+	}
+	_, err := m.Panes()
+	return err
 }
 
 func centerOf(m Mux) string {
@@ -203,9 +259,16 @@ func attachPanel(m Mux, s Spec, d deckstore.PanelDef) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := m.SetRole(id, panelPrefix+region+":"+d.Name); err != nil {
-		// 没有角色的窗格以后谁也认不出，也拆不了（Remove 只认面板角色）：如实报错，窗格留着，owner 重建布局即清
-		return err
+	role := panelPrefix + region + ":" + d.Name
+	if err := m.SetRole(id, role); err != nil {
+		if err2 := m.SetRole(id, role); err2 != nil { // 再试一次；还不行就撤回这个刚建的、还没有角色的窗格，不留谁也认不出的孤儿
+			if dm, ok := m.(interface{ Discard(pane string) error }); ok {
+				if derr := dm.Discard(id); derr != nil {
+					return errors.Join(err2, derr)
+				}
+			}
+			return err2
+		}
 	}
 	return nil
 }
@@ -214,7 +277,11 @@ func itoa(n int) string { return strconv.Itoa(n) }
 
 // restoreCoded 同 restore，但出错是带码的（经 deckd 回给界面，不能是本地语言的整句）。
 func restoreCoded(m Mux, s Spec, center string, isTabs bool, pane string, spec agentdeck.SplitSpec) error {
-	if err := m.Unpark(pane, center, spec); err != nil {
+	err := m.Unpark(pane, center, spec)
+	if err != nil {
+		err = m.Unpark(pane, center, spec) // 再试一次：这一步失败，标签条或侧栏就一直停放着看不见
+	}
+	if err != nil {
 		if isTabs {
 			return i18n.E("err.layout.restore.tabs", err)
 		}

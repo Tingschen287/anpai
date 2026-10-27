@@ -146,7 +146,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	// 记下本次画法（在建布局之前：新起的窗格一开始就读到这次的，不先读到上次留下的；n056 评审 1 B2、attempt 2 自查）。
 	// 最后接上的说了算：退出或失败时都不恢复（n056 评审 2 R1、owner rev 124 选简化方案）。按字符串恢复分不清
 	// 文件是不是自己写的，较早的客户端退出会把后来者的画法改掉
-	// 画法与合成背景色（iTerm2 的 sixel 不能留透明像素，n069）作为一个整体写下（跨进程锁；没有背景色就删掉旧文件，面板回到透明画法）；
+	// 画法与合成背景色（iTerm2 的 sixel 不能留透明像素，n069）作为一个整体写下（一个文件 graphics-decision，临时文件加 rename，没有锁；没有背景色就是明确的「sixel -」透明画法）；
 	// 背景色写不下时画法退回字母徽章（面板读不到背景色会按透明画法画，iTerm2 上是实心方块）
 	if eff, err := logo.WriteDecision(dirs.State, mode, dec.Background); err != nil {
 		fmt.Fprintf(os.Stderr, "deck：记不下画法与背景色（已在运行的面板可能不会切换）：%v\n", err)

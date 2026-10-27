@@ -15,10 +15,12 @@ import (
 	"image"
 	"image/color"
 	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 //go:embed assets/*.png
@@ -123,13 +125,37 @@ func WriteMode(stateDir, mode string) error {
 
 // CurrentMode 读布局当前的画法；文件没有或内容不认识时按 Mode()（DECK_GRAPHICS 环境变量）。
 func CurrentMode(stateDir string) string {
-	if b, err := os.ReadFile(ModeFile(stateDir)); err == nil {
+	switch mode, _, st := loadDecision(stateDir); st { // n069：决策文件优先（画法与背景色在同一个文件里）
+	case decOK:
+		return mode
+	case decBad: // 在却读不懂：不看旧文件（见 Apply）
+		return "none"
+	}
+	return legacyMode(stateDir)
+}
+
+// legacyMode 读旧版本的 graphics 文件（只在决策文件不存在时用）；没有或不认识时按 Mode()。
+func legacyMode(stateDir string) string {
+	if b, err := readSmall(ModeFile(stateDir)); err == nil {
 		switch v := strings.TrimSpace(string(b)); v {
 		case "sixel", "blocks", "none":
 			return v
 		}
 	}
 	return Mode()
+}
+
+// readSmall 读一个小状态文件：O_NONBLOCK 打开、必须是普通文件、最多 64 字节（命名管道之类不让读者阻塞）。
+func readSmall(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	return io.ReadAll(io.LimitReader(f, 64))
 }
 
 // Mode 是画法：sixel、blocks、none。

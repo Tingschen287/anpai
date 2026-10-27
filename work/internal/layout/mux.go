@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/agentdeck"
 )
@@ -22,9 +23,24 @@ func (t TmuxMux) c() context.Context {
 	return t.Ctx
 }
 
+// Err 说明这批操作的 context 取消或到期了（ApplyPanels 在步骤边界看它）。
+func (t TmuxMux) Err() error { return t.c().Err() }
+
+// Discard 撤回一个刚用 Split 建出来、还没来得及打角色的窗格（只认角色为空的窗格：中间、侧栏、标签条、面板都有角色，拆不到）。
+func (t TmuxMux) Discard(pane string) error {
+	return agentdeck.LayoutDiscardUntaggedPane(context.WithoutCancel(t.c()), t.Socket, pane)
+}
+
 // Detached 是同一个布局 server 上、不随 ctx 取消的 Mux（每条命令仍各有 5 秒上限）：收尾要把暂停的标签条与侧栏接回去，
 // ctx 已到期也得做完，不然布局残缺。
 func (t TmuxMux) Detached() Mux { return TmuxMux{Socket: t.Socket, Ctx: context.WithoutCancel(t.c())} }
+
+// Step 是一个结构步骤用的 Mux（n069 复审 2 的 R2-2）：不随 ctx 取消、期限由这一步自己定（limit），每条命令仍各有 5 秒上限。
+// 步骤一旦开始就做完；tmux 卡住时也不会无限拖：到了 limit 这一步就此为止（done 要调用）。
+func (t TmuxMux) Step(limit time.Duration) (Mux, func()) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.c()), limit)
+	return TmuxMux{Socket: t.Socket, Ctx: ctx}, cancel
+}
 
 func (t TmuxMux) NewSession(conf, session, window, width, height, command string) (string, error) {
 	return agentdeck.LayoutNewSession(t.c(), t.Socket, conf, session, window, width, height, command)

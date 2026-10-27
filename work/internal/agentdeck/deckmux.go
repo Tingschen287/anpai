@@ -444,3 +444,27 @@ func LayoutRemovePane(ctx context.Context, socket, pane string) error {
 }
 
 var paneIDRe = regexp.MustCompile(`^%[0-9]+$`)
+
+// LayoutDiscardUntaggedPane 撤回刚建出来、还没有角色的窗格（n069：新开面板窗格后打角色失败时，不留孤儿）。
+// 只认 %数字 的窗格 id，且只拆角色为空的窗格——中间、侧栏、标签条和面板窗格都有角色，这里拆不到；窗格已经不在算撤回成功。
+func LayoutDiscardUntaggedPane(ctx context.Context, socket, pane string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	if !paneIDRe.MatchString(pane) {
+		return i18n.E("err.agentdeck.removepane.notpanel", pane, "")
+	}
+	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{@deck_role}"))
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, r, ok := strings.Cut(line, "\t"); ok && id == pane {
+			if role := strings.TrimSpace(r); role != "" {
+				return i18n.E("err.agentdeck.removepane.notpanel", pane, role)
+			}
+			_, err = runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "kill-pane", "-t", pane))
+			return err
+		}
+	}
+	return nil
+}

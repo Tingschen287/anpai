@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // n069：iTerm2（3.7.6 真机，诊断样张 2）把 sixel 里「没画」的像素（透明处，P2=1）涂成图里最后定义的那种颜色：
@@ -94,84 +93,155 @@ func WriteBackground(stateDir string, c *color.RGBA) error {
 
 // CurrentBackground 读布局当前的合成背景色；文件没有或内容不认识就是 nil（透明画法）。
 func CurrentBackground(stateDir string) *color.RGBA {
-	f, err := os.Open(BackgroundFile(stateDir))
+	b, err := readSmall(BackgroundFile(stateDir)) // 合法内容 7 字节；侧栏每秒读一次，不为怪文件读到底（也不被命名管道卡住）
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 64)) // 合法内容 7 字节；侧栏每秒读一次，不为怪文件读到底
-	if err != nil {
+	c, ok := parseHex6(strings.TrimSpace(string(b)))
+	if !ok {
 		return nil
 	}
-	s := strings.TrimSpace(string(b))
+	return &c
+}
+
+// parseHex6 严格解析六位十六进制颜色：Sscanf 会放过符号、空格、NUL 与 0x 前缀，所以先逐字符校验。
+func parseHex6(s string) (color.RGBA, bool) {
 	if len(s) != 6 {
-		return nil
+		return color.RGBA{}, false
 	}
-	for i := 0; i < 6; i++ { // 只认十六进制数字：Sscanf 会放过符号、空格、NUL 与 0x 前缀
+	for i := 0; i < 6; i++ {
 		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-			return nil
+			return color.RGBA{}, false
 		}
 	}
 	var r, g, bl uint8
 	if _, err := fmt.Sscanf(s, "%02x%02x%02x", &r, &g, &bl); err != nil {
-		return nil
+		return color.RGBA{}, false
 	}
-	return &color.RGBA{r, g, bl, 255}
+	return color.RGBA{r, g, bl, 255}, true
+}
+
+// 画法与合成背景色是一个决策，只写在一个文件里（Codex 复审 2 的 R2-1，owner 选根治方案）：
+//
+//	graphics-decision   一行：「<画法> <背景色六位十六进制 或 ->」，例如「sixel 1e1e1e」「sixel -」「none -」
+//
+// 写者写临时文件再 rename（POSIX 原子），读者只读这一个文件：读到的一定是某个写者写下的完整决策，不依赖任何锁，
+// 写者写到一半被暂停也不会让读者看到半份。「最后写完整决策的接入者说了算」。
+// 旧版本的两个文件（graphics、graphics-bg）只在这个文件不存在时才读（升级迁移）：读到「sixel 但没有背景」按字母徽章处理。
+
+// DecisionFile 是画法与背景色的决策文件（状态目录下）。
+func DecisionFile(stateDir string) string { return filepath.Join(stateDir, "graphics-decision") }
+
+func validMode(m string) bool { return m == "sixel" || m == "blocks" || m == "none" }
+
+// 决策文件的读取结果：不存在 / 读到了完整决策 / 在却读不了或读不懂。
+const (
+	decAbsent = iota
+	decOK
+	decBad
+)
+
+// loadDecision 只打开一次决策文件、按这一次的结果分流（不先问「在不在」再读：两步之间写者可能刚好 rename 落盘，
+// 读者就会把刚写好的完整决策当成读不懂；对抗自查 D1）。只有「不存在」算 decAbsent；打开用 O_NONBLOCK 并要求是普通文件，
+// 命名管道之类不会让读者永远阻塞（对抗自查 D2）。
+func loadDecision(stateDir string) (mode string, bg *color.RGBA, st int) {
+	f, err := os.OpenFile(DecisionFile(stateDir), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, decAbsent
+		}
+		return "", nil, decBad
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return "", nil, decBad
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 128))
+	if err != nil {
+		return "", nil, decBad
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) != 2 || !validMode(fields[0]) {
+		return "", nil, decBad
+	}
+	if fields[1] == "-" {
+		return fields[0], nil, decOK
+	}
+	c, ok := parseHex6(fields[1])
+	if !ok {
+		return "", nil, decBad
+	}
+	return fields[0], &c, decOK
+}
+
+// ReadDecision 读决策文件：返回画法与背景色（nil 是透明画法）；文件没有、过长或内容不合格式返回 ok=false。
+func ReadDecision(stateDir string) (mode string, bg *color.RGBA, ok bool) {
+	mode, bg, st := loadDecision(stateDir)
+	return mode, bg, st == decOK
+}
+
+// WriteDecision 把画法与合成背景色作为一个整体原子地写下（临时文件加 rename）。
+// 画法是 sixel 且有背景色、但没写成时返回 effective=none（面板读不到背景色会按透明画法画 sixel，iTerm2 上是实心方块）。
+func WriteDecision(stateDir, mode string, bg *color.RGBA) (effective string, err error) {
+	effective = mode
+	fail := func(e error) (string, error) {
+		if bg != nil && mode == "sixel" {
+			effective = "none"
+		}
+		return effective, e
+	}
+	if !validMode(mode) {
+		return fail(fmt.Errorf("unknown graphics mode %q", mode))
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fail(err)
+	}
+	f, err := os.CreateTemp(stateDir, "graphics-decision.*.tmp")
+	if err != nil {
+		return fail(err)
+	}
+	tmp := f.Name()
+	bgText := "-"
+	if bg != nil {
+		bgText = fmt.Sprintf("%02x%02x%02x", bg.R, bg.G, bg.B)
+	}
+	if _, err := fmt.Fprintf(f, "%s %s\n", mode, bgText); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fail(err)
+	}
+	if err := os.Rename(tmp, DecisionFile(stateDir)); err != nil {
+		os.Remove(tmp)
+		return fail(err)
+	}
+	return mode, nil
 }
 
 // Apply 读布局当前的画法与合成背景色：背景色设进本进程，返回画法。侧栏、额度面板每次取画法时都走它，deck up 改了会跟着变。
-// 读的时候持决策锁（见 WriteDecision），读到的一定是某一次 deck up 写下的完整的一对。
+// 优先读决策文件（一个文件，原子）；没有它才读旧版本的两个文件，读到「sixel 但没有背景」当字母徽章（升级迁移：
+// 旧版 deck up 在 iTerm2 上可能留下这种混合状态，按透明画法画就是实心方块；Windows Terminal 重新 deck up 一次就写成明确的「sixel -」）。
 func Apply(stateDir string) string {
-	unlock := lockDecision(stateDir, false)
-	defer unlock()
-	SetBackground(CurrentBackground(stateDir))
-	return CurrentMode(stateDir)
-}
-
-// DecisionLock 是决策锁文件（状态目录下）。
-func DecisionLock(stateDir string) string { return filepath.Join(stateDir, "graphics-lock") }
-
-// lockDecision 取跨进程的决策锁（flock）：写者要独占，读者也要独占（决策文件很小，读写都是毫秒级）。
-// 取不到（目录不存在、被占太久）就不加锁继续：读到旧一点的状态比卡住面板强。
-func lockDecision(stateDir string, create bool) func() {
-	if create {
-		os.MkdirAll(stateDir, 0o700)
+	switch mode, bg, st := loadDecision(stateDir); st {
+	case decOK:
+		SetBackground(bg)
+		return mode
+	case decBad:
+		// 决策文件在、却读不懂（手改坏了、被截断、将来的新格式、不是普通文件）：不退到旧文件——旧文件是更早的决策，
+		// 可能是 sixel 加背景，会把当前的决定（比如 none）盖回去。按最保守的字母徽章画，等下一次 deck up 重写。
+		SetBackground(nil)
+		return "none"
 	}
-	f, err := os.OpenFile(DecisionLock(stateDir), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return func() {}
+	bg := CurrentBackground(stateDir)
+	SetBackground(bg)
+	mode := legacyMode(stateDir)
+	if b, err := readSmall(ModeFile(stateDir)); err == nil && strings.TrimSpace(string(b)) == "sixel" && bg == nil {
+		return "none"
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }
-		}
-		if err != syscall.EWOULDBLOCK || time.Now().After(deadline) {
-			f.Close()
-			return func() {}
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// WriteDecision 把画法与合成背景色作为一个整体写下（n069 Codex 审查 R2）：两个文件各自原子 rename 并不让这一对原子，
-// 两个 deck up 交错时可能留下谁都没决定过的「sixel + 没有背景」，iTerm2 上就是实心方块，重读也恢复不了。
-// 这里持跨进程的决策锁写两个文件，读的一方（Apply）也持同一把锁：最后一个写者的完整决策胜出（n056 选的「最后接入者说了算」）。
-// 画法是 sixel 且有背景色、但背景色写不下时，画法改写成 none 并返回它（面板读不到背景色会按透明画法画，iTerm2 上是实心方块）。
-func WriteDecision(stateDir, mode string, bg *color.RGBA) (effective string, err error) {
-	unlock := lockDecision(stateDir, true)
-	defer unlock()
-	if berr := WriteBackground(stateDir, bg); berr != nil {
-		if bg != nil && mode == "sixel" {
-			mode = "none"
-		}
-		err = berr
-	}
-	if merr := WriteMode(stateDir, mode); merr != nil && err == nil {
-		err = merr
-	}
-	return mode, err
+	return mode
 }
 
 const maxRegisters = 256 // iTerm2 报告的颜色寄存器数（XTSMGRAPHICS，诊断样张 1）
@@ -179,6 +249,9 @@ const maxRegisters = 256 // iTerm2 报告的颜色寄存器数（XTSMGRAPHICS，
 // SixelOn 把 img 缩到 w×h，合成到背景 bg 上，编成不留空洞的 Sixel（P2=0，每个像素都画）。
 // 颜色少（不超过 255 种）就用原色，不量化；否则量化到 6×6×6 色立方，背景色仍单独占一个寄存器、保持精确。
 func SixelOn(img image.Image, w, h int, bg color.RGBA) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
 	px := sample(img, w, h)
 	flat := make([]color.RGBA, w*h)
 	set := map[color.RGBA]bool{}
@@ -330,9 +403,12 @@ func SixelOver(img image.Image, w, h int, over color.RGBA) string {
 // 原因（n069 经 tmux 的真机样张 9，隔离 tmux 3.4 复现）：sixel 的数据按 6 行一段，32 像素高的图数据是 36 行；
 // tmux 按它自己的格子（没问到终端像素时是 16×32）数，36 行超过一格，于是把图占成两格并补齐、多出一整行的区域（再编码后声明 60 行）。
 // 取 30 行就恰好一格（声明 30 行），不再多占下面一行。补出的零头像素颜色是背景（SixelOn 把背景色放在最后一个寄存器）。
+//
+// 不足 6 像素（一个 sixel 段都放不下）时返回 0，表示「这里不画图」：SixelOn 对 0 边长返回空串（上层按没有图处理）。
+// 以前返回 6，会比预留的像素还高（与「不超过」的承诺相反）。
 func FitHeight(n int) int {
 	if Background() == nil {
 		return n
 	}
-	return max(6, n/6*6)
+	return n / 6 * 6
 }

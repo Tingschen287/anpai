@@ -107,8 +107,8 @@ func TestITermFillMakesTransparentLogoASolidSquareButOpaqueKeepsShape(t *testing
 	}
 }
 
-// 背景色单独占最后一个寄存器、不量化：暗灰 (30,30,30) 在 6×6×6 色立方里会变成 (0,0,0) 或 (51,51,51)，贴在终端背景上就是看得见的方框。
-func TestSixelOnBackgroundIsExactRegisterZero(t *testing.T) {
+// 背景色单独占最后一个寄存器（不是零号寄存器，见 n069 样张 9）、不量化：暗灰 (30,30,30) 在 6×6×6 色立方里会变成 (0,0,0) 或 (51,51,51)，贴在终端背景上就是看得见的方框。
+func TestSixelOnBackgroundIsExactLastRegister(t *testing.T) {
 	for _, bg := range []color.RGBA{{30, 30, 30, 255}, {0, 0, 0, 255}, {255, 255, 255, 255}, {40, 44, 52, 255}} {
 		_, cs, _ := decodeAny(t, SixelOn(Deck(), 32, 32, bg))
 		want := [3]int{pct(bg.R), pct(bg.G), pct(bg.B)}
@@ -210,8 +210,10 @@ func TestBackgroundFileRoundTrip(t *testing.T) {
 	if err := WriteBackground(dir, nil); err != nil {
 		t.Fatal(err)
 	}
-	if Apply(dir) != "sixel" || Background() != nil {
-		t.Fatal("文件删掉后 Apply 应回到透明画法")
+	// 旧版两个文件的迁移规则（Codex 复审 2 R2-1）：旧版留下「sixel 但没有背景」当字母徽章（可能是旧版并发写出来的混合状态，
+	// 按透明画法画在 iTerm2 上是实心方块）；明确的「sixel 加透明」要由新版 WriteDecision 写（见 n069_decision_test.go）
+	if Apply(dir) != "none" || Background() != nil {
+		t.Fatal("旧版 sixel 没有背景应按字母徽章")
 	}
 	// 坏内容不当成颜色
 	os.WriteFile(BackgroundFile(dir), []byte("zzzzzz\n"), 0o600)
