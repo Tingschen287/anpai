@@ -467,7 +467,14 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 }
 
 // idleLines 是空闲页的文字（第一行是产品名。中文窄时只写「Anpai」，n058；英文一律「Anpai」，n060）。
-func idleLines(w int) []string { return deckui.IdleLines(w) }
+func idleLines(w int) []string {
+	rows := deckui.IdleRows(w, 0)
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Text
+	}
+	return out
+}
 
 // idleArt 选空闲页上 logo 的色块大小：返回画好的各行与宽度（格）。放不下就返回空。
 func idleArt(w, h, textLines int) ([]string, int) {
@@ -494,23 +501,22 @@ func idle(dirs deckstore.Dirs) {
 		}
 		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 画成半格色块。16×8 格只有 16×16 个点，A4 的线条认不出
 		// （n069 真机：16x8 是一团，32x16 清楚）；高、宽放得下就用 32×16，放不下退回 16×8，再放不下就不画（免得挤掉按键说明，n056 自查）
-		lines := idleLines(w)
-		art, artW := idleArt(w, h, len(lines))
+		rows := deckui.IdleRows(w, h) // n071：品牌与提示句各自居中，快捷键表整块居中、块内左对齐
+		art, artW := idleArt(w, h, len(rows))
 		fmt.Print("\x1b[2J\x1b[?25l")
-		top := max(1, (h-len(lines)-len(art)-1)/2)
+		top := max(1, (h-len(rows)-len(art)-1)/2)
 		for i, l := range art {
-			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-artW)/2), l)
+			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-artW)/2+1), l)
 		}
 		if len(art) > 0 {
 			top += len(art) + 1
 		}
-		for i, l := range lines {
-			col := max(1, (w-displayWidth(l))/2)
+		for _, put := range deckui.IdlePlace(rows, top, h) { // 矮窗：画到窗外的行不画（n071）
 			style := "\x1b[2m"
-			if i == 0 {
+			if put.Brand {
 				style = "\x1b[1;38;2;180;245;70m"
 			}
-			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", top+i, col, style, l)
+			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", put.Row, put.Col, style, put.Text)
 		}
 	}
 	draw()

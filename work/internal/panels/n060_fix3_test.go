@@ -126,15 +126,16 @@ func TestN060ProgressPanelUnitsAndProblems(t *testing.T) {
 		ProblemsCoded: []i18n.Nest{{Code: "err.projectctl.graph.read", Args: []any{"/x/work-graph.yaml", "open /x/work-graph.yaml: no such file or directory"}, Error: "读不到 /x/work-graph.yaml：open /x/work-graph.yaml: no such file or directory"}, {}},
 	}
 	zh := ansi.Strip(RenderProgress(p))
-	for _, want := range []string{"worker rounds 3 / 10轮", "frontier calls 未知 / 10次", "elapsed 未知 / 10小时", "tokens 3 / 10", "! 读不到 /x/work-graph.yaml：open", "! 外部原文的一条"} {
-		if !strings.Contains(zh, want) {
+	// n071：预算标签按语言（worker rounds → 执行轮次 等）、一行一项按列对齐、单位前有空格；先压掉对齐空格再比，数据与单位一项没少
+	for _, want := range []string{"执行轮次 3 / 10 轮", "frontier 调用 未知 / 10 次", "耗时 未知 / 10 小时", "token 3 / 10", "! 读不到 /x/work-graph.yaml：open", "! 外部原文的一条"} {
+		if !hasOnLine(zh, want) {
 			t.Fatalf("中文进度面板少了 %q：\n%s", want, zh)
 		}
 	}
 	i18n.SetLang(i18n.EN)
 	en := ansi.Strip(RenderProgress(p))
-	for _, want := range []string{"worker rounds 3 / 10 rounds", "frontier calls unknown / 10 calls", "elapsed unknown / 10 h", "! cannot read /x/work-graph.yaml: open"} {
-		if !strings.Contains(en, want) {
+	for _, want := range []string{"Worker rounds 3 / 10 rounds", "Frontier calls unknown / 10 calls", "Elapsed unknown / 10 h", "! cannot read /x/work-graph.yaml: open"} { // n071：标签首字母大写、对齐空格压成一个再比
+		if !hasOnLine(en, want) {
 			t.Fatalf("英文进度面板少了 %q：\n%s", want, en)
 		}
 	}

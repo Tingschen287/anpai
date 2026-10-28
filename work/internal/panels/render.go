@@ -281,8 +281,8 @@ var progressCountKey = map[string]i18n.Key{
 
 // TextKeys 返回本包里经 map 传给 i18n.T 的键。调用处不是字符串字面量，扫描器看不见。
 func TextKeys() []string {
-	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey)+len(progressUnitKey))
-	for _, m := range []map[string]i18n.Key{kindKey, optionKey, activityStatusKey, progressCountKey, progressUnitKey} {
+	out := make([]string, 0, len(kindKey)+len(optionKey)+len(activityStatusKey)+len(progressCountKey)+len(progressUnitKey)+len(budgetLabelKey))
+	for _, m := range []map[string]i18n.Key{kindKey, optionKey, activityStatusKey, progressCountKey, progressUnitKey, budgetLabelKey} {
 		for _, k := range m {
 			out = append(out, string(k))
 		}
@@ -460,7 +460,11 @@ func RenderProgressW(p deckd.Progress, width int) string {
 		b.WriteString(dim.Render(ansi.Wrap(why, max(10, width-1), "")) + "\n")
 		return b.String()
 	}
-	b.WriteString(title.Render(i18n.T("progress.title")+deckstore.Display(p.Project, 80)) + "\n")
+	heading := i18n.T("progress.title") + deckstore.Display(p.Project, 80)
+	if width >= 8 && lipgloss.Width(heading) > width {
+		heading = ansi.Truncate(heading, width, "…") // 项目名很长时不撑出整行（n071 自查）
+	}
+	b.WriteString(title.Render(heading) + "\n")
 	if !p.Graph {
 		b.WriteString(dim.Render(i18n.T("progress.nograph")) + "\n")
 		return b.String()
@@ -478,36 +482,27 @@ func RenderProgressW(p deckd.Progress, width int) string {
 	cells := segmentCells([]int{acc, blk, fail, rest}, n)
 	b.WriteString(segAccepted.Render(strings.Repeat("█", cells[0])) + segBlocked.Render(strings.Repeat("█", cells[1])) +
 		segFailed.Render(strings.Repeat("█", cells[2])) + segRest.Render(strings.Repeat("█", cells[3])) + "\n")
-	// 数字格：两列
-	grid := [][2]string{
-		{fmt.Sprintf("%s %d", i18n.T("progress.accepted"), acc), fmt.Sprintf("%s %d", i18n.T("progress.blocked"), blk)},
-		{fmt.Sprintf("%s %d", i18n.T("progress.failed"), fail), fmt.Sprintf("%s %d", i18n.T("progress.rest"), rest)},
+	// 数字格（n071：两列网格，标签左对齐、数字右对齐；明细——进行中、待评审……、状态未知——用同样的格宽，只列不为 0 的）
+	grid := []countCell{
+		{i18n.T("progress.accepted"), acc}, {i18n.T("progress.blocked"), blk},
+		{i18n.T("progress.failed"), fail}, {i18n.T("progress.rest"), rest},
 	}
-	colW := max(10, (width-2)/2)
-	for _, r := range grid {
-		pad := max(1, colW-lipgloss.Width(r[0]))
-		b.WriteString(r[0] + strings.Repeat(" ", pad) + r[1] + "\n")
-	}
-	// 「其余」里各状态的明细（进行中、待评审、可开工……），只列不为 0 的
-	order := []string{"running", "submitted", "ready", "rework", "planned", "superseded"}
-	var parts []string
-	for _, k := range order {
-		if c := p.Counts[k]; c > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", i18n.T(progressCountKey[k]), c))
+	for _, k := range []string{"running", "submitted", "ready", "rework", "planned", "superseded"} {
+		if c := nonneg(p.Counts[k]); c > 0 {
+			grid = append(grid, countCell{i18n.T(progressCountKey[k]), c})
 		}
 	}
 	if p.Unknown > 0 {
-		parts = append(parts, i18n.T("progress.unknown", nonneg(p.Unknown)))
+		grid = append(grid, countCell{i18n.T("progress.unknown.label"), nonneg(p.Unknown)})
 	}
-	if len(parts) > 0 {
-		b.WriteString(dim.Render(strings.Join(parts, " · ")) + "\n")
+	for _, l := range countGrid(grid, width) {
+		b.WriteString(l + "\n")
 	}
-	for _, bl := range p.Budgets {
-		switch {
-		case bl.Used == nil && bl.Limit != nil:
-			b.WriteString(i18n.T("progress.budget.unknown", bl.Label, *bl.Limit, unitText(bl)))
-		case bl.Used != nil && bl.Limit != nil:
-			b.WriteString(fmt.Sprintf("%s %g / %g%s\n", bl.Label, *bl.Used, *bl.Limit, unitText(bl)))
+	// 预算：一行一项，四段对齐（已用、上限、百分比，见 progress_layout.go）
+	if rows := layoutBudget(budgetRows(p.Budgets), width); len(rows) > 0 {
+		b.WriteString("\n")
+		for _, l := range rows {
+			b.WriteString(l + "\n")
 		}
 	}
 	for i, pr := range p.Problems {
