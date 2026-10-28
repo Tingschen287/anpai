@@ -48,7 +48,18 @@ type Config struct {
 	// 之后只有 owner 在 F9 按「刷新会话 PATH」键才会再读（POST /v1/tools/refresh）；打开设置、进加入页和 agent 页、派工、列模型都只用当前快照，不会运行 rc。
 	// 只有 deck daemon 设它。
 	SessionPath bool
+	// PanelApplier 把面板注册表的改动作用到正在运行的布局上（n069：F9 设置里挂上、拔掉面板，立即生效，不重建布局）。
+	// nil（测试、布局没接上）= 只存注册表，下次建布局时才生效。deck daemon 在生产里设它。
+	PanelApplier PanelApplier
 }
+
+// PanelApplier 让布局与面板注册表 defs 一致，返回新挂上与拔掉的面板名。调用方（deckd）保证同一时刻只有一次在跑，
+// 并且 defs 是调用时刻存储里最新的注册表。出错时已做的部分保留。
+// ErrLayoutNotRunning 是 PanelApplier 在布局 server 没在跑时返回的：不算出错，注册表已存、下次 deck up 建布局按它来；
+// 回给界面的 applied 为 false 且没有说明，界面据此写「已保存，布局没在运行」，不说「布局已更新」。
+var ErrLayoutNotRunning = errors.New("layout is not running")
+
+type PanelApplier func(ctx context.Context, defs []deckstore.PanelDef) (attached, removed []string, err error)
 
 type paneResolver interface {
 	ResolvePeer(ctx context.Context, peer identity.Peer) (identity.Pane, error)
@@ -70,6 +81,11 @@ type Server struct {
 	quota     *dashquota.Client
 	view      *viewstate.Machine
 	progress  ProgressFunc
+	// panelWork 是进行中（含排队）的挂拔数：deckd 关闭时 WaitBackground 要等它们结束，才能释放写入者锁
+	panelWorkMu   sync.Mutex
+	panelWorkCond *sync.Cond
+	panelWork     int
+	panelMu       sync.Mutex // 挂拔面板：存注册表、改布局串行，两个窗口同时挂拔最后收敛到存储里的状态（n069）
 	// 只在测试里设置：按请求决定调用者。生产路径没有任何方式设置它。
 	callerFn func(*http.Request) Caller
 	// activity 是 agent-deck 会话状态的缓存（n049，侧栏状态圆点）；没配上游地址时为 nil。
@@ -503,6 +519,14 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if project == "" && c.Role == RoleOwner {
+		// owner 没指定项目：跟着中间窗格正在看的会话所属的项目（n069）。没有可跟的就如实说原因，不当错误
+		var reason string
+		if project, reason = s.followedProject(); project == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"project": "", "graph": false, "follow": true, "reason": reason})
+			return
+		}
+	}
 	p, found := s.store.Settings().Project(project)
 	if !found {
 		writeErr(w, http.StatusNotFound, i18n.E("err.deckd.servergetprogress.1", project))
@@ -520,6 +544,38 @@ func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// followedProject 是中间窗格正在看的会话所属的项目（n069，进度面板没指定项目时跟它）。
+// 取不到时返回空项目与原因：no_session（没有在看的会话）、no_project（会话不属于设置里的项目）。
+func (s *Server) followedProject() (project, reason string) {
+	if s.view == nil {
+		return "", "no_session"
+	}
+	focus := s.view.State().Focus
+	if focus == "" || focus == viewstate.Idle {
+		return "", "no_session"
+	}
+	// focus 是状态机里的 agent-deck id：先按它精确找，找不到再退回 Session（key 或 id 都认）。
+	// 只调 Session(focus) 会让「另一个会话的 key 恰好等于这个 agent-deck id」时解析到错的会话（先按 key 匹配）。
+	var sess deckstore.Session
+	ok := false
+	for _, x := range s.store.Sessions("") {
+		if x.AgentDeckID == focus {
+			sess, ok = x, true
+			break
+		}
+	}
+	if !ok {
+		sess, ok = s.store.Session(focus)
+	}
+	if !ok {
+		return "", "no_session"
+	}
+	if _, found := s.store.Settings().Project(sess.Project); sess.Project == "" || !found {
+		return "", "no_project"
+	}
+	return sess.Project, ""
 }
 
 // ---------------- 写 ----------------
@@ -779,7 +835,7 @@ func (s *Server) getPanels(w http.ResponseWriter, r *http.Request) {
 }
 
 type panelBody struct {
-	On bool `json:"on"`
+	On *bool `json:"on"` // 必填：缺了或为 null 不能当成 false 把面板拔掉
 }
 
 func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
@@ -792,11 +848,90 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", err))
 		return
 	}
-	if err := s.store.SetPanel(r.PathValue("name"), b.On); err != nil {
+	if b.On == nil {
+		writeErr(w, http.StatusBadRequest, i18n.E("err.deckd.serverpostagents.2", errors.New("missing field on")))
+		return
+	}
+	// 挂拔登记进 deckd 的关闭等待（Codex 审查 R1）：关闭之后不再接单；已接的在 WaitBackground 里等完，之后才释放写入者锁。
+	// 工作的 context 来自 deckd 的生命周期，不是请求：客户端断开（F9 里按了空格就退出）不会半途取消，deckd 关闭会
+	work, endWork, ok := s.beginPanelWork()
+	if !ok {
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.panel.stopping"))
+		return
+	}
+	defer endWork()
+	// 存与改布局放在同一把锁里：改布局时读的是此刻存储里最新的注册表，两个窗口同时挂拔不会各按各的旧值改
+	s.panelMu.Lock()
+	defer s.panelMu.Unlock()
+	if work.Err() != nil { // 排队时 deckd 开始关闭了：不写盘、不改布局
+		writeErr(w, http.StatusServiceUnavailable, i18n.E("err.deckd.panel.stopping"))
+		return
+	}
+	if err := s.store.SetPanel(r.PathValue("name"), *b.On); err != nil {
 		storeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.Panels())
+	defs := s.store.Panels()
+	body := map[string]any{"panels": defs, "applied": false, "attached": []string{}, "removed": []string{}}
+	if s.cfg.PanelApplier != nil {
+		// 注册表已存下：让布局收敛的批次期限 30 秒，从 deckd 的生命周期派生（见上）。这是批次边界 ctx：管锁等待和每个结构步骤之间的检查，
+		// 取消或到期后不再开始下一步；已开始的步骤用自己的步骤 ctx（不随取消，每步 30 秒、每条 tmux 命令 5 秒），做完再返回
+		ctx, cancel := context.WithTimeout(work, 30*time.Second)
+		defer cancel()
+		attached, removed, err := s.cfg.PanelApplier(ctx, defs)
+		if attached != nil {
+			body["attached"] = attached
+		}
+		if removed != nil {
+			body["removed"] = removed
+		}
+		// 已存下的不回滚：注册表是 owner 的意愿，布局没跟上只如实说一声（界面显示原因；下次建布局会按注册表来）
+		if errors.Is(err, ErrLayoutNotRunning) {
+			err = nil
+			body["applied"] = false
+		} else {
+			body["applied"] = err == nil
+		}
+		if err != nil {
+			withNote(body, i18n.E("err.deckd.setpanel.apply", err), 300)
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// beginPanelWork 登记一次面板操作：返回与 deckd 生命周期绑定的 context、结束函数；deckd 已经开始关闭时 ok 为 false。
+// 计数与「是否在关闭」的判断在同一把锁里：WaitBackground 取消 background 之后才来，要么看见这次登记在等，要么这次被拒。
+func (s *Server) beginPanelWork() (context.Context, func(), bool) {
+	bg := s.background()
+	s.panelWorkMu.Lock()
+	defer s.panelWorkMu.Unlock()
+	if bg.Err() != nil {
+		return nil, nil, false
+	}
+	s.panelWork++
+	return bg, func() {
+		s.panelWorkMu.Lock()
+		s.panelWork--
+		s.panelCond().Broadcast()
+		s.panelWorkMu.Unlock()
+	}, true
+}
+
+// panelCond 懒建条件变量（Server 可能不经 NewServer 建出来）；调用时持 panelWorkMu。
+func (s *Server) panelCond() *sync.Cond {
+	if s.panelWorkCond == nil {
+		s.panelWorkCond = sync.NewCond(&s.panelWorkMu)
+	}
+	return s.panelWorkCond
+}
+
+// waitPanelWork 等已登记的面板操作做完（WaitBackground 调）。
+func (s *Server) waitPanelWork() {
+	s.panelWorkMu.Lock()
+	defer s.panelWorkMu.Unlock()
+	for s.panelWork > 0 {
+		s.panelCond().Wait()
+	}
 }
 
 // ---------------- SSE ----------------

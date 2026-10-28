@@ -57,6 +57,7 @@ type Store struct {
 	noteSeq   int64
 	reports   []*Report
 	panels    []PanelDef
+	panelsAt  panelStamp // 内存里的 panels 对应的 panels.yaml 的修改时间与大小（手改检测）
 	hook      func(Event)
 }
 

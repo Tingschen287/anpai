@@ -47,6 +47,8 @@ type Mux interface {
 	Unpark(pane, target string, spec agentdeck.SplitSpec) error
 	ResizeWidth(pane, width string) error
 	ResizeHeight(pane, height string) error
+	// Remove 拆掉一个面板窗格（只许面板，n069）。
+	Remove(pane string) error
 }
 
 // Spec 是一次布局的参数。
@@ -62,6 +64,7 @@ type Spec struct {
 	BottomHeight int // 下栏高，默认 6
 	Panels       []deckstore.PanelDef
 	Graphics     string // logo 画法：sixel、blocks、none（经布局 server 的环境变量 DECK_GRAPHICS 传给侧栏）
+	Title        string // 终端标签标题（品牌名，按界面语言；n069）。空则不设标题
 }
 
 func (s Spec) withDefaults() Spec {
@@ -142,6 +145,13 @@ func BaseConf(s Spec) string {
 	}
 	if s.Graphics != "" {
 		b.WriteString("set-environment -g DECK_GRAPHICS " + Quote(s.Graphics) + "\n")
+	}
+	// 终端标签标题（n069，owner 在 iTerm2 看到标签只写「tmux」）：tmux 用 set-titles 往外层终端发标题，标题串引用用户选项，
+	// 换界面语言只改这一个选项（侧栏做）。deck up 对已经在运行的布局也调 LayoutEnsureTitle 补设
+	if s.Title != "" {
+		b.WriteString("set -g " + agentdeck.TitleOption + " " + Quote(s.Title) + "\n")
+		b.WriteString("set -g set-titles-string " + Quote(agentdeck.TitleFormat) + "\n")
+		b.WriteString("set -g set-titles on\n")
 	}
 	return b.String()
 }
@@ -258,15 +268,45 @@ func Normalize(m Mux, s Spec) error {
 			return err
 		}
 	}
-	for i, p := range right {
-		if i == 0 {
-			if err := m.ResizeWidth(p.ID, strconv.Itoa(s.RightWidth)); err != nil {
+	// 右栏高度：第 2 块起每块 rightStack 行，第 1 块拿剩下的。tmux 调一块的高度是向它下面那一块借、还，
+	// 所以只调第 2 块起的话，第 1 块不动、最后一块吃掉全部差额：三块以上的右栏会被压成 26/2/1 行
+	// （n069 真机 e2e 抓到，挂上第三块面板时才暴露）。按自上而下的顺序把前 n-1 块都调到目标，最后一块自然就是 rightStack。
+	if len(right) > 0 {
+		if err := m.ResizeWidth(right[0].ID, strconv.Itoa(s.RightWidth)); err != nil {
+			return err
+		}
+	}
+	if n := len(right); n >= 2 {
+		h := max(3, (s.Height-s.BottomHeight)/n)
+		// 前面调侧栏、标签条、下栏已经改过右栏的实际高度：重新读一次再算总高（对抗自查 F1：用开头读到的旧高度，
+		// 下栏不是 6 行时最后一块得到 h+差额）
+		fresh, err := m.Panes()
+		if err != nil {
+			return err
+		}
+		heightOf := map[string]int{}
+		for _, p := range fresh {
+			heightOf[p.ID] = p.Height
+		}
+		total := n - 1 // 各块之间的边框
+		for _, p := range right {
+			total += heightOf[p.ID]
+		}
+		avail := total - (n - 1) // 各块能分到的行数合计
+		cramped := avail < 3*n
+		first := max(3, total-(n-1)*(h+1))
+		for i, p := range right[:n-1] {
+			target := h
+			if i == 0 {
+				target = first
+			}
+			if cramped {
+				// 窗口放不下每块 3 行：把能给的行数平分，多出来的从第一块起每块多 1 行（以前首块钳成 3、其余也要 3，结果 1/3/1）
+				target = avail/n + oneIf(i < avail%n)
+			}
+			if err := m.ResizeHeight(p.ID, strconv.Itoa(target)); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := m.ResizeHeight(p.ID, s.rightStack(len(right))); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -433,7 +473,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.tabs"), tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
+			err = errors.Join(err, restore(detached(m), s, center, i18n.T("layout.pane.tabs"), tabs, agentdeck.SplitSpec{Before: true, Size: "1"}))
 		}()
 	}
 	// 下栏原本在侧栏右边（侧栏整高）。整宽并回会铺到侧栏下面、把侧栏压矮，所以先停放侧栏，下栏回去后再把侧栏整高接回左边。
@@ -442,7 +482,7 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 			return err
 		}
 		defer func() {
-			err = errors.Join(err, restore(m, s, center, i18n.T("layout.pane.side"), sidebar,
+			err = errors.Join(err, restore(detached(m), s, center, i18n.T("layout.pane.side"), sidebar,
 				agentdeck.SplitSpec{Horizontal: true, Before: true, Full: true, Size: strconv.Itoa(s.LeftWidth)}))
 		}()
 	}
@@ -477,12 +517,26 @@ func Toggle(m Mux, s Spec, region string) (err error) {
 }
 
 // restore 把为并回而暂时停放的窗格接回原位，再整理尺寸、选回中间。
+//
+// n069（复审 2 的 R2-2 与对抗自查）：调用方在 defer 里用不随取消的 Mux（detached）调它，接回失败时再试一次——
+// 这一步失败，标签条或侧栏就一直停放着，之后谁也找不回来（Toggle 与 attachPanel 的 restoreCoded 同一规则）。
 func restore(m Mux, s Spec, center, what, pane string, spec agentdeck.SplitSpec) error {
-	if err := m.Unpark(pane, center, spec); err != nil {
+	err := m.Unpark(pane, center, spec)
+	if err != nil {
+		err = m.Unpark(pane, center, spec)
+	}
+	if err != nil {
 		return i18n.Errorf("layout.err.restore", what, err)
 	}
 	if err := Normalize(m, s); err != nil {
 		return err
 	}
 	return m.Select(center)
+}
+
+func oneIf(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

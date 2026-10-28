@@ -236,6 +236,9 @@ type Progress struct {
 	// ProblemsCoded 和 Problems 一一对应：能翻译的是嵌套码，Problems 仍是中文原文。没有码的那一条 Code 为空。
 	ProblemsCoded []i18n.Nest `json:"problems_coded,omitempty"`
 	TakenAt       time.Time   `json:"taken_at"`
+	// Follow 为真表示没指定项目、跟着中间窗格正在看的会话（n069）；Reason 是跟不上的原因：no_session、no_project
+	Follow bool   `json:"follow,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // BudgetView 是一行预算；读不到的维度 Used/Limit 为 nil，并给出原因。

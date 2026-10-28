@@ -47,6 +47,7 @@ var intakeFiles = map[string]intake{
 	"internal/deckstore/files.go":       {exempt, "读 deck 自己写的状态文件（会话、决定、通知），里面有真标记，不能中和"},
 	"internal/deckstore/store.go":       {exempt, "读 deck 自己写的注册表、通知，里面有真标记，不能中和"},
 	"internal/deckstore/settings.go":    {exempt, "owner 自己编辑的设置 YAML；deck 写回时也可能带真标记；只有 owner 能写"},
+	"internal/logo/opaque.go":           {exempt, "读 deck up 自己写的 graphics-bg 状态文件（六位十六进制颜色），不合格式就当没有，不进任何文字"},
 	"internal/deckstore/panels.go":      {exempt, "owner 自己编辑的面板注册表 YAML，没有自由文字进参数"},
 	"internal/deckclient/client.go":     {exempt, "读 deckd 的响应：deckd 是可信的生产者，响应里有真标记，必须保留给界面翻译"},
 	"internal/lease/lease.go":           {exempt, "读 deck 自己写的接管记录，内容来自本进程的常量和会话号"},

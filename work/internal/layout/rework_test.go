@@ -25,6 +25,10 @@ func (m unparkFails) Unpark(pane, target string, spec agentdeck.SplitSpec) error
 	return m.TmuxMux.Unpark(pane, target, spec)
 }
 
+// n069：Toggle 的接回现在用 detached(m)（不随取消的 Mux）。夹具内嵌了 TmuxMux，Detached 会被提升成「没有注入的那份」，
+// 注入就丢了；让夹具自己的 Detached 返回自己，注入照旧生效（断言不变）。
+func (m unparkFails) Detached() Mux { return m }
+
 func TestToggleReportsFailedRestore(t *testing.T) {
 	m, s, _ := realLayout(t)
 	if err := Toggle(m, s, "right"); err != nil { // 先隐藏右栏

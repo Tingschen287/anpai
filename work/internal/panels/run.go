@@ -21,6 +21,7 @@ type tickMsg struct{}
 type dataMsg struct {
 	view string
 	decs []deckstore.Decision
+	prog *deckd.Progress // 进度面板：存数据，不存画好的字；宽度、语言以 View 那一刻为准
 	err  error
 }
 
@@ -29,6 +30,7 @@ type model struct {
 	project string
 	c       *deckclient.Client
 	view    string
+	prog    *deckd.Progress
 	err     error
 	decs    []deckstore.Decision
 	sel     int
@@ -79,17 +81,13 @@ func (m *model) fetch() tea.Cmd {
 			}
 			return dataMsg{decs: ds}
 		case "progress":
-			if m.project == "" {
-				// 没指定项目：提示照旧，但这条路径不会向 deckd 取任何东西，所以每轮自己对一次界面语言，
-				// 否则别处换了语言，这个面板永远收不到新的语言头（返工 2，M3）。先对语言再造错误，提示就是新语言
-				m.syncLang(ctx)
-				return dataMsg{err: i18n.Errorf("panel.err.project")}
-			}
+			// 没指定 -project：跟着中间窗格正在看的会话所属的项目（n069，deckd 按当前看的会话解析）；
+			// 指定了就按指定的，优先生效（owner 的 panels.yaml 里就写着 -project）
 			var p deckd.Progress
 			if err := m.c.Get(ctx, "/v1/progress"+m.q(), &p); err != nil {
 				return dataMsg{err: err}
 			}
-			return dataMsg{view: RenderProgress(p)}
+			return dataMsg{prog: &p}
 		case "notifications":
 			var ns []deckstore.Notification
 			if err := m.c.Get(ctx, "/v1/notifications"+m.q(), &ns); err != nil {
@@ -125,7 +123,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dataMsg:
 		m.err = msg.err
 		if msg.err == nil {
-			m.view, m.decs = msg.view, msg.decs
+			m.view, m.decs, m.prog = msg.view, msg.decs, msg.prog
 			if n := len(OpenDecisions(m.decs)); m.sel >= n {
 				m.sel = n - 1
 			}
@@ -192,6 +190,9 @@ func (m *model) View() string {
 			note = m.note()
 		}
 		return RenderDecisions(m.decs, m.sel, note)
+	}
+	if m.name == "progress" && m.prog != nil {
+		return RenderProgressW(*m.prog, m.width) // 在事件循环里画：取数的 goroutine 不碰 m.width（避免数据竞争），改语言、改窗口大小下一帧就生效
 	}
 	return m.view
 }

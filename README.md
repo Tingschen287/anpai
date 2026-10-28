@@ -52,8 +52,11 @@ deck 起会话前会检查 upstream agent-deck 的 `config.toml`（`$XDG_CONFIG_
 git clone https://github.com/Tingschen287/anpai.git
 cd anpai/work
 go build -o deck ./cmd/deck
-install -D -m 0755 deck ~/.local/bin/deck
+mkdir -p ~/.local/bin
+install -m 0755 deck ~/.local/bin/deck
 ```
+
+（macOS 与 Linux 通用：`install -D` 是 GNU 写法，macOS 自带的 BSD `install` 不认，所以先 `mkdir -p`。）
 
 确认 `~/.local/bin` 在 `PATH` 里。`deck up` 会把 `deck` 自己的路径写进布局，所以请装到固定位置再用。
 仓库原名 `terminal-deck`，改名后旧地址仍会跳转；Go 模块路径还是 `github.com/Tingschen287/terminal-deck/work`，没有改。
@@ -126,7 +129,7 @@ deck 不替你选、也不发任务，侧栏和通知会说明，你在中间自
 | `deck agent escalate`、`wait` | 主 agent 上报需要 owner 决定的事、等子 agent 的汇报 | 主 agent |
 | `deck agent report [--done] --text <内容>` | 子 agent 向主 agent 汇报 | 子 agent |
 | `deck agent decisions` | 看待决定的事 | 主 agent 或 owner |
-| `deck panel <名字>` | 在当前窗格里跑一块面板：`decisions`、`quota`、`progress`、`notifications`、`activity`。`progress` 必须带 `-project <id>`；`quota` 任何进程都能看，其他几块要 owner 或 agent 身份（`decisions`、`notifications`、`progress` 要 owner 或主 agent，`activity` 子 agent 也行） | 见左 |
+| `deck panel <名字>` | 在当前窗格里跑一块面板：`decisions`、`quota`、`progress`、`notifications`、`activity`。`progress` 不带 `-project` 时跟着中间正在看的会话所属的项目（没有在看的会话或会话不属于项目就写一句说明），带了 `-project <id>` 就只看那个项目，优先生效；`quota` 任何进程都能看，其他几块要 owner 或 agent 身份（`decisions`、`notifications`、`progress` 要 owner 或主 agent，`activity` 子 agent 也行） | 见左 |
 | `deck daemon` | 只起 `deckd`。平时不用，`deck up` 会替你起；要改看板地址时才自己运行 | 任何终端 |
 
 `deck agent <子命令> -h` 只对有参数的几个有用（`spawn`、`escalate`、`wait`、`report`、`start-main`）；`list`、`decisions` 没有参数，

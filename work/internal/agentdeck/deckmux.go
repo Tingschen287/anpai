@@ -18,6 +18,7 @@ import (
 	"github.com/Tingschen287/terminal-deck/work/internal/i18n"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -375,6 +376,95 @@ func EnsureSession(ctx context.Context, socket, session, command string) error {
 	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "new-session", "-d", "-s", session, command))
 	if err != nil {
 		return i18n.E("err.agentdeck.ensuresession.1", session, err)
+	}
+	return nil
+}
+
+// TitleOption 是布局 server 上存标签标题文字的用户选项；set-titles-string 引用它，所以换语言只要改这一个选项。
+const TitleOption = "@deck_title"
+
+// TitleFormat 是 set-titles-string 的值：标签标题就是 TitleOption 的内容。
+const TitleFormat = "#{" + TitleOption + "}"
+
+// LayoutEnsureTitle 让布局 server 把外层终端的标签标题设成 title（n069）：打开 set-titles、标题串指向 TitleOption、写入文字。
+// 布局可能是早先起的（旧的 BaseConf 没有这几项），所以每次 deck up 都调；已经是这样也不出错（幂等）。对之后的重画立即生效。
+func LayoutEnsureTitle(ctx context.Context, socket, title string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	for _, a := range [][]string{
+		{"set-option", "-g", TitleOption, title},
+		{"set-option", "-g", "set-titles-string", TitleFormat},
+		{"set-option", "-g", "set-titles", "on"},
+	} {
+		if _, err := runMux(exec.CommandContext(ctx, "tmux", append([]string{"-S", socket}, a...)...)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LayoutSetTitle 只改标题文字（界面语言换了之后由侧栏调）。
+func LayoutSetTitle(ctx context.Context, socket, title string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	_, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "set-option", "-g", TitleOption, title))
+	return err
+}
+
+// LayoutRemovePane 拆掉布局 server 上的一个面板窗格（n069：F9 设置里「拔掉」一块面板，立即作用于正在运行的布局）。
+// 只许拆角色以 panel: 开头的窗格——中间、侧栏、标签条不是面板，拆了布局就残了；这里再核对一次，不全信调用方。
+// 这是布局 server（deck 自己的）上的窗格，不是 agent-deck 的会话：会话的停止与删除不归这里管。
+func LayoutRemovePane(ctx context.Context, socket, pane string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	// 只认 %数字 的窗格 id：空串、{active}、窗口名、带分号的串都会被 tmux 解析成别的窗格（或让参数被当成命令分隔）
+	if !paneIDRe.MatchString(pane) {
+		return i18n.E("err.agentdeck.removepane.notpanel", pane, "")
+	}
+	// 按 id 精确查：窗格已经不在（被外面关了）就是目标状态，不算错；display-message 对不存在的目标也返回成功、角色为空，分不出来
+	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{@deck_role}"))
+	if err != nil {
+		return err
+	}
+	role, found := "", false
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, r, ok := strings.Cut(line, "\t"); ok && id == pane {
+			role, found = strings.TrimSpace(r), true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if !strings.HasPrefix(role, "panel:") {
+		return i18n.E("err.agentdeck.removepane.notpanel", pane, role)
+	}
+	_, err = runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "kill-pane", "-t", pane))
+	return err
+}
+
+var paneIDRe = regexp.MustCompile(`^%[0-9]+$`)
+
+// LayoutDiscardUntaggedPane 撤回刚建出来、还没有角色的窗格（n069：新开面板窗格后打角色失败时，不留孤儿）。
+// 只认 %数字 的窗格 id，且只拆角色为空的窗格——中间、侧栏、标签条和面板窗格都有角色，这里拆不到；窗格已经不在算撤回成功。
+func LayoutDiscardUntaggedPane(ctx context.Context, socket, pane string) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+	if !paneIDRe.MatchString(pane) {
+		return i18n.E("err.agentdeck.removepane.notpanel", pane, "")
+	}
+	out, err := runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}\t#{@deck_role}"))
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, r, ok := strings.Cut(line, "\t"); ok && id == pane {
+			if role := strings.TrimSpace(r); role != "" {
+				return i18n.E("err.agentdeck.removepane.notpanel", pane, role)
+			}
+			_, err = runMux(exec.CommandContext(ctx, "tmux", "-S", socket, "kill-pane", "-t", pane))
+			return err
+		}
 	}
 	return nil
 }

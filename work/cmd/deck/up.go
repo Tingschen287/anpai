@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,6 +48,42 @@ func probeTerminal() (termprobe.Result, bool) {
 		native = true
 	}
 	return r, native
+}
+
+// decideGraphics 判断 logo 画法与（iTerm2 才有的）合成背景色：问终端前先认是不是 iTerm2，是才多问一次 XTVERSION 与 OSC 11。
+// 别的终端不多发任何查询，画法与以前完全一致（n069）。
+func decideGraphics(forced string, probe termprobe.Result, native bool) termprobe.Decision {
+	iterm := termprobe.IsITerm2Env(os.Getenv)
+	var bg termprobe.BGResult
+	if iterm && term.IsTerminal(os.Stdin.Fd()) {
+		bg = termprobe.QueryBackground(os.Stdin, time.Second)
+	}
+	return termprobe.Decide(forced, probe, native, iterm, bg)
+}
+
+// pushTitle 把外层终端当前的标签标题压栈（xterm 的 CSI 22;0 t），并先发一次 OSC 0 设成品牌名，
+// 返回的函数在退出布局时弹栈（CSI 23;0 t）：不让「安排 Anpai」留在 owner 的标签上（n069）。终端不认栈就什么也不会发生。
+// 不是终端（脚本里跑）时什么都不发。
+func pushTitle(title string) func() {
+	if !term.IsTerminal(os.Stdout.Fd()) {
+		return func() {}
+	}
+	fmt.Fprint(os.Stdout, "\x1b[22;0t\x1b]0;"+title+"\x07")
+	var once sync.Once
+	pop := func() { once.Do(func() { fmt.Fprint(os.Stdout, "\x1b[23;0t") }) }
+	// 被 SIGTERM、SIGHUP 杀掉时也弹栈（对抗自查 C-8）：先弹、再按默认方式退出
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		s, ok := <-sig
+		if !ok {
+			return
+		}
+		pop()
+		signal.Reset(syscall.SIGTERM, syscall.SIGHUP)
+		syscall.Kill(os.Getpid(), s.(syscall.Signal))
+	}()
+	return func() { signal.Stop(sig); close(sig); pop() }
 }
 
 // keepPixels 在 tmux 客户端接上后把格子像素补进自己的终端，窗口每次改大小（WSL 会清零）后再补，
@@ -101,13 +138,19 @@ func up(dirs deckstore.Dirs, args []string) {
 	}
 	ctx := context.Background()
 	probe, native := probeTerminal()
-	mode := termprobe.Mode(strings.ToLower(*graphics), probe, native)
-	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: mode}
+	dec := decideGraphics(strings.ToLower(*graphics), probe, native)
+	mode := dec.Mode
+	// 标签标题按设置里的界面语言取品牌名（deck up 自己不跟界面语言，n060 约定）：中文「安排 Anpai」，英文「Anpai」
+	title := deckui.BrandIn(deckstore.ResolveUILang(dirs.Config, os.Getenv))
+	spec := layout.Spec{Deck: self, LayoutSocket: *layoutSock, AgentSocket: *agentSock, Graphics: mode, Title: title}
 	// 记下本次画法（在建布局之前：新起的窗格一开始就读到这次的，不先读到上次留下的；n056 评审 1 B2、attempt 2 自查）。
 	// 最后接上的说了算：退出或失败时都不恢复（n056 评审 2 R1、owner rev 124 选简化方案）。按字符串恢复分不清
 	// 文件是不是自己写的，较早的客户端退出会把后来者的画法改掉
-	if err := logo.WriteMode(dirs.State, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板不会切换）：%v\n", err)
+	// 画法与合成背景色（iTerm2 的 sixel 不能留透明像素，n069）作为一个整体写下（一个文件 graphics-decision，临时文件加 rename，没有锁；没有背景色就是明确的「sixel -」透明画法）；
+	// 背景色写不下时画法退回字母徽章（面板读不到背景色会按透明画法画，iTerm2 上是实心方块）
+	if eff, err := logo.WriteDecision(dirs.State, mode, dec.Background); err != nil {
+		fmt.Fprintf(os.Stderr, "deck：记不下画法与背景色（已在运行的面板可能不会切换）：%v\n", err)
+		mode, spec.Graphics = eff, eff
 	}
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		spec.Width, spec.Height = w, h
@@ -137,14 +180,20 @@ func up(dirs deckstore.Dirs, args []string) {
 			// 打不开就退回字母徽章：sixel 特性不在时 tmux 对所有客户端画占位（n056 attempt 2 自查）
 			fmt.Fprintf(os.Stderr, "deck：打开布局的 sixel 支持失败，改用字母徽章：%v\n", err)
 			mode = "none"
-			if err := logo.WriteMode(dirs.State, mode); err != nil {
+			if _, err := logo.WriteDecision(dirs.State, mode, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "deck：记不下画法（已在运行的面板可能仍按 sixel 画，显示成占位）：%v\n", err)
 			}
 		}
 	}
+	// 终端标签标题（n069）：复用的布局可能是旧配置起的，补设 set-titles 与标题文字；设不上不拦着进布局，只说一声
+	if err := agentdeck.LayoutEnsureTitle(ctx, *layoutSock, title); err != nil {
+		fmt.Fprintf(os.Stderr, "deck：设不上终端标签标题：%v\n", err)
+	}
+	popTitle := pushTitle(title)
 	cmd := agentdeck.LayoutAttachCommand(*layoutSock, "deck")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
+		popTitle()
 		fail("接不上布局：%v", err)
 	}
 	stop := func() {}
@@ -155,6 +204,7 @@ func up(dirs deckstore.Dirs, args []string) {
 	}
 	err = cmd.Wait()
 	stop()
+	popTitle()
 	if err != nil {
 		fail("接不上布局：%v", err)
 	}
@@ -419,6 +469,21 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 // idleLines 是空闲页的文字（第一行是产品名。中文窄时只写「Anpai」，n058；英文一律「Anpai」，n060）。
 func idleLines(w int) []string { return deckui.IdleLines(w) }
 
+// idleArt 选空闲页上 logo 的色块大小：返回画好的各行与宽度（格）。放不下就返回空。
+func idleArt(w, h, textLines int) ([]string, int) {
+	im := logo.Deck()
+	if im == nil {
+		return nil, 0
+	}
+	for _, sz := range [][2]int{{32, 16}, {16, 8}} {
+		cols, rows := sz[0], sz[1]
+		if w >= cols+4 && h >= textLines+rows+3 {
+			return logo.Blocks(im, cols, rows), cols
+		}
+	}
+	return nil, 0
+}
+
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
 func idle(dirs deckstore.Dirs) {
 	c := uiClient(dirs) // 空闲页在 agent-deck 的 tmux 里，也跟着界面语言走：每个 tick 向 deckd 对一次，变了就重画（n060 段 3）
@@ -427,16 +492,14 @@ func idle(dirs deckstore.Dirs) {
 		if err != nil {
 			w, h = 80, 24
 		}
-		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 用 16×8 格的半格色块（16×16 点）画在标题上方（n056）
-		var art []string
-		if im := logo.Deck(); im != nil && h >= 12+8+2 && w >= 20 {
-			art = logo.Blocks(im, 16, 8) // 高度放不下就不画，免得挤掉按键说明（n056 自查）
-		}
+		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 画成半格色块。16×8 格只有 16×16 个点，A4 的线条认不出
+		// （n069 真机：16x8 是一团，32x16 清楚）；高、宽放得下就用 32×16，放不下退回 16×8，再放不下就不画（免得挤掉按键说明，n056 自查）
 		lines := idleLines(w)
+		art, artW := idleArt(w, h, len(lines))
 		fmt.Print("\x1b[2J\x1b[?25l")
 		top := max(1, (h-len(lines)-len(art)-1)/2)
 		for i, l := range art {
-			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-16)/2), l)
+			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-artW)/2), l)
 		}
 		if len(art) > 0 {
 			top += len(art) + 1
