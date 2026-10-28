@@ -874,7 +874,8 @@ func (s *Server) setPanel(w http.ResponseWriter, r *http.Request) {
 	defs := s.store.Panels()
 	body := map[string]any{"panels": defs, "applied": false, "attached": []string{}, "removed": []string{}}
 	if s.cfg.PanelApplier != nil {
-		// 注册表已存下：让布局收敛的总期限 30 秒，从 deckd 的生命周期派生（见上），传进锁等待和每一条 tmux 命令
+		// 注册表已存下：让布局收敛的批次期限 30 秒，从 deckd 的生命周期派生（见上）。这是批次边界 ctx：管锁等待和每个结构步骤之间的检查，
+		// 取消或到期后不再开始下一步；已开始的步骤用自己的步骤 ctx（不随取消，每步 30 秒、每条 tmux 命令 5 秒），做完再返回
 		ctx, cancel := context.WithTimeout(work, 30*time.Second)
 		defer cancel()
 		attached, removed, err := s.cfg.PanelApplier(ctx, defs)

@@ -12,7 +12,11 @@ import (
 // TmuxMux 是真实的布局 server（经 agentdeck 适配层）。
 type TmuxMux struct {
 	Socket string
-	// Ctx 是这一批 tmux 操作共用的 context（n069 Codex 审查 R1：挂拔面板的总 deadline 与 deckd 关闭要传到每一条 tmux 命令）；nil 是 Background。
+	// Ctx 是这一批 tmux 操作共用的 context；nil 是 Background。分两层看：
+	//   - 批次边界 ctx：挂拔面板的总 deadline 与 deckd 关闭从这里传入，只在步骤边界（ApplyPanels 的 Err 检查）和等锁时生效，
+	//     取消后不再开始下一步；它并不传给一个已经开始的步骤里的每条 tmux 命令。
+	//   - 步骤 ctx：Step/Detached 派生，不随批次取消（context.WithoutCancel），每个结构步骤 30 秒总时限、每条 tmux 命令另有 5 秒上限。
+	// 所以「ctx 传进每条 tmux 命令」的旧说法不再成立（n069 Codex 审查 R1 的原意被复审 2 的 R2-2 取代）。
 	Ctx context.Context
 }
 

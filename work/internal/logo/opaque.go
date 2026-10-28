@@ -132,6 +132,9 @@ func parseHex6(s string) (color.RGBA, bool) {
 // DecisionFile 是画法与背景色的决策文件（状态目录下）。
 func DecisionFile(stateDir string) string { return filepath.Join(stateDir, "graphics-decision") }
 
+// maxDecisionBytes 是决策文件允许的最大长度；超过按坏文件处理。
+const maxDecisionBytes = 128
+
 func validMode(m string) bool { return m == "sixel" || m == "blocks" || m == "none" }
 
 // 决策文件的读取结果：不存在 / 读到了完整决策 / 在却读不了或读不懂。
@@ -156,8 +159,10 @@ func loadDecision(stateDir string) (mode string, bg *color.RGBA, st int) {
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		return "", nil, decBad
 	}
-	b, err := io.ReadAll(io.LimitReader(f, 128))
-	if err != nil {
+	// 多探一个字节：合法内容远小于 128 字节，读到 129 字节就说明文件超限，是坏文件。只截断到 128 字节再解析的话，
+	// 「合法前缀 + 后面的额外内容」会被当成有效决策（Codex 复审 3 的 R3-1）。读取仍是有界的（最多 129 字节）。
+	b, err := io.ReadAll(io.LimitReader(f, maxDecisionBytes+1))
+	if err != nil || len(b) > maxDecisionBytes {
 		return "", nil, decBad
 	}
 	fields := strings.Fields(string(b))
