@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 
 	"github.com/Tingschen287/terminal-deck/work/internal/deckd"
 	"github.com/Tingschen287/terminal-deck/work/internal/deckstore"
@@ -136,25 +137,71 @@ func padLeft(s string, w int) string {
 	return s
 }
 
-// oneLine 把外部文字清洗成一行：去控制序列、限长、折空白（同其他面板的出口）。
+// oneLine 把外部文字清洗成一行：去控制序列、打码、折空白、按显示宽度截短（cols 列）。同其他面板的外部文字出口。
 //
-// 顺序（n071 attempt 2，Codex 审查 R1）：先删格式字符，再走打码出口。反过来的话，夹在 sk- 中间的零宽字符会躲过打码、
-// 删掉之后拼回一个完整的疑似密钥。最后把折成一行的结果再过一次出口——折空白不会拼出新的密钥，这一遍只是保证
-// 「显示出去的字，再走一次出口不会再变」。
-func oneLine(s string, limit int) string {
-	s = deckstore.Display(stripFormat(s), limit)
-	s = strings.Join(strings.Fields(stripFormat(s)), " ")
-	return deckstore.Display(s, limit)
+// 一条单向管线（n071 attempt 3，Codex 复审 2 R1 根治），每一步只在前一步全部做完之后才做：
+//  1. 完整归一化：删掉格式字符（Cf：RLO/RLI、零宽空格、BOM 等），把所有 Unicode 空白（NBSP、全角空格、U+2003、U+202F、换行、制表……）
+//     归成一个 ASCII 空格并折叠，去首尾。n060 的打码正则用 ASCII 的 \s，归一化之前它认不出 bearer\u00a0XXXX；
+//  2. 走现有的显示出口 deckstore.Display（n060 规定界面文字都走它；不限长——限长发生在匹配信息被截掉之前就不行）：
+//     去控制序列、疑似密钥打码、中性标记换成当前语言的记号；
+//  3. 折掉去控制序列后留下的相邻空格，按显示宽度截短。呈现出来的打码记号是一个整体，不会被截成「[redacte…」
+//     （截在记号里就把整个记号留下，宽出一点没关系：排版按实际宽度算）；之后不再清洗、不再截短。
+//
+// 从前先 Display 再删 Cf 会拼回被零宽字符隔开的 sk-；先限长再归一化会把 bearer 之类的凭据前缀露在屏幕上。
+func oneLine(s string, cols int) string {
+	s = strings.Join(strings.Fields(deckstore.Display(normalizeText(s), 0)), " ")
+	return clipKeepingMarks(s, cols, deckstore.RedactLabel())
 }
 
-// stripFormat 删掉 Unicode 格式控制符（Cf：从右到左的 RLO/RLI、零宽空格、BOM 等）：它们宽度为 0，却能把后面的数字整段反排。
-func stripFormat(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
-			return -1
+// clipKeepingMarks 把 s 截到 cols 列（超出写「…」），但呈现出来的打码记号 mark 当作不可分的整体：
+// 记号一定完整留下（可能比 cols 宽一点），记号之后放不下的文字被省掉。cols<=0 不截。
+func clipKeepingMarks(s string, cols int, mark string) string {
+	if cols <= 0 || lipgloss.Width(s) <= cols {
+		return s
+	}
+	var out strings.Builder
+	used := 0
+	parts := strings.Split(s, mark)
+	for i, seg := range parts {
+		if i > 0 {
+			out.WriteString(mark)
+			used += lipgloss.Width(mark)
 		}
-		return r
-	}, s)
+		room := cols - used
+		if lipgloss.Width(seg) <= room {
+			out.WriteString(seg)
+			used += lipgloss.Width(seg)
+			continue
+		}
+		if room > 0 {
+			out.WriteString(ansi.Truncate(seg, room, "…"))
+		} else if seg != "" || i < len(parts)-1 {
+			out.WriteString("…")
+		}
+		return out.String()
+	}
+	return out.String()
+}
+
+// normalizeText 是管线第 1 步：删 Cf 格式字符；任何 Unicode 空白归成 ASCII 空格，连续的折成一个，去首尾。
+func normalizeText(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.Is(unicode.Cf, r):
+			continue
+		case unicode.IsSpace(r):
+			space = true
+		default:
+			if space && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			space = false
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ---------------- 状态计数网格 ----------------
@@ -243,7 +290,7 @@ func budgetRows(bs []deckd.BudgetView) []budgetRow {
 		if bl.Limit != nil {
 			r.limNum = formatCount(*bl.Limit)
 			r.limit = r.limNum
-			if r.unit = ansi.Truncate(oneLine(unitText(bl), 12), 12, "…"); r.unit != "" {
+			if r.unit = oneLine(unitText(bl), 12); r.unit != "" { // oneLine 已按宽度截短；呈现之后不再截（否则「[redacted]」会被截成「[redacte…」）
 				r.limit += " " + r.unit
 			}
 		}
@@ -315,21 +362,22 @@ func hangLines(indent int, text string, width int) []string {
 		indent--
 	}
 	room := max(1, width-indent)
+	// 按字素簇（用户感知的一个字）逐簇试放，宽度以「候选整行」的实际显示宽度为准，不逐 rune 累加：
+	// ❤+变体选择符、ZWJ 序列、组合附加符的宽度不是各 rune 宽度之和（n071 attempt 3，Codex 复审 2 R3）。
 	var out []string
-	var cur strings.Builder
-	cw := 0
-	for _, r := range text {
-		rw := lipgloss.Width(string(r))
-		if cw > 0 && cw+rw > room {
-			out = append(out, strings.Repeat(" ", indent)+cur.String())
-			cur.Reset()
-			cw = 0
+	cur := ""
+	rest := text
+	for rest != "" {
+		cluster, tail := firstCluster(rest)
+		rest = tail
+		if cur != "" && lipgloss.Width(cur+cluster) > room {
+			out = append(out, strings.Repeat(" ", indent)+cur)
+			cur = ""
 		}
-		cur.WriteRune(r)
-		cw += rw
+		cur += cluster
 	}
-	if cw > 0 || len(out) == 0 {
-		out = append(out, strings.Repeat(" ", indent)+cur.String())
+	if cur != "" || len(out) == 0 {
+		out = append(out, strings.Repeat(" ", indent)+cur)
 	}
 	return out
 }
@@ -340,4 +388,10 @@ func fitLabel(label string, width int) string {
 		return ansi.Truncate(label, width, "…")
 	}
 	return label
+}
+
+// firstCluster 取出 s 开头的一个字素簇与剩下的部分（测试也用它数簇）。
+func firstCluster(s string) (cluster, rest string) {
+	cluster, rest, _, _ = uniseg.FirstGraphemeClusterInString(s, -1)
+	return
 }

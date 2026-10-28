@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 )
 
 // n071：折行工具——不超宽、不丢字、不拆英文词、收尾标点不留在行首。
@@ -57,4 +58,38 @@ func TestN071WrapText(t *testing.T) {
 			}
 		}
 	}
+}
+
+// attempt 3（Codex 复审 2 R3）：硬断按字素簇，宽度以前缀整体的显示宽度为准：
+// 变体选择符 emoji、ZWJ 序列、组合附加符不被拆开，也不因逐 rune 累加低估宽度而超宽。
+func TestN071WrapHardSplitGraphemes(t *testing.T) {
+	texts := []string{
+		strings.Repeat("❤️", 6),
+		strings.Repeat("\U0001F468‍\U0001F469‍\U0001F467", 3),
+		strings.Repeat("é", 8),
+		strings.Repeat("\U0001F1E8\U0001F1F3", 3),
+	}
+	for _, s := range texts {
+		for limit := 2; limit <= 30; limit++ {
+			lines := wrapText(s, limit)
+			var back strings.Builder
+			for _, l := range lines {
+				if lipgloss.Width(l) > limit {
+					// 单个字素簇比 limit 宽（limit=2 的 ZWJ 家庭等）：无法再窄
+					if _, rest := firstGrapheme(l); rest != "" {
+						t.Fatalf("%q limit %d：超宽 %d 列且不止一个字素簇：%q", s, limit, lipgloss.Width(l), l)
+					}
+				}
+				back.WriteString(l)
+			}
+			if back.String() != s {
+				t.Fatalf("%q limit %d：拆开后字符或顺序变了：%q", s, limit, back.String())
+			}
+		}
+	}
+}
+
+func firstGrapheme(s string) (cluster, rest string) {
+	cluster, rest, _, _ = uniseg.FirstGraphemeClusterInString(s, -1)
+	return
 }

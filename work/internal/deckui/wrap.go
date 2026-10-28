@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 )
 
 // n071：按显示宽度折行，中英混排都能用。
@@ -90,20 +91,16 @@ func wrapText(s string, limit int) []string {
 			emit()
 		}
 		for w > limit { // 单元自己就比一行宽：硬断
-			cut, cw := 0, 0
-			for i, r := range u {
-				rw := lipgloss.Width(string(r))
-				if cw+rw > limit {
+			// 按字素簇逐簇试放，宽度以前缀整体的显示宽度为准（变体选择符、ZWJ 序列、组合附加符的宽度不是各 rune 之和）
+			cut := 0
+			for rest := u; rest != ""; {
+				_, tail, _, _ := uniseg.FirstGraphemeClusterInString(rest, -1)
+				next := len(u) - len(tail)
+				if cut > 0 && lipgloss.Width(u[:next]) > limit {
 					break
 				}
-				cw += rw
-				cut = i + len(string(r))
-			}
-			if cut == 0 { // limit 比一个字还窄：至少放一个
-				for _, r := range u {
-					cut = len(string(r))
-					break
-				}
+				cut = next
+				rest = tail
 			}
 			line.WriteString(u[:cut])
 			lineW += lipgloss.Width(u[:cut])
