@@ -468,7 +468,7 @@ func announce(ctx context.Context, c *deckclient.Client, logPath, agentSock, op 
 
 // idleLines 是空闲页的文字（第一行是产品名。中文窄时只写「Anpai」，n058；英文一律「Anpai」，n060）。
 func idleLines(w int) []string {
-	rows := deckui.IdleRows(w, 0)
+	rows := deckui.IdleRows(w)
 	out := make([]string, len(rows))
 	for i, r := range rows {
 		out[i] = r.Text
@@ -491,6 +491,38 @@ func idleArt(w, h, textLines int) ([]string, int) {
 	return nil, 0
 }
 
+// idlePut 是空闲页上要写到终端的一块：第 Row 行、第 Col 列（都从 1 起）、前面的样式转义与文字。
+type idlePut struct {
+	Row, Col int
+	Style    string
+	Text     string
+}
+
+// idleFrame 是空闲页在 w×h 的窗口里要画的全部内容：先是 logo 色块，再是文字行。idle() 照它写终端，
+// 测试也走同一条路（黄金样张是这里的结果摆成的屏幕，不是未摆放的逻辑行；n071 attempt 2）。
+func idleFrame(w, h int) []idlePut {
+	// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 画成半格色块。16×8 格只有 16×16 个点，A4 的线条认不出
+	// （n069 真机：16x8 是一团，32x16 清楚）；高、宽放得下就用 32×16，放不下退回 16×8，再放不下就不画（免得挤掉按键说明，n056 自查）
+	rows := deckui.IdleRows(w) // n071：品牌与提示句各自居中，快捷键表整块居中、块内左对齐；矮窗不改版式，画不下的行在底部裁掉
+	art, artW := idleArt(w, h, len(rows))
+	top := max(1, (h-len(rows)-len(art)-1)/2)
+	var out []idlePut
+	for i, l := range art {
+		out = append(out, idlePut{Row: top + i, Col: max(1, (w-artW)/2+1), Text: l})
+	}
+	if len(art) > 0 {
+		top += len(art) + 1
+	}
+	for _, put := range deckui.IdlePlace(rows, top, h) { // 矮窗：画到窗外的行不画（n071）
+		style := "\x1b[2m"
+		if put.Brand {
+			style = "\x1b[1;38;2;180;245;70m"
+		}
+		out = append(out, idlePut{Row: put.Row, Col: put.Col, Style: style, Text: put.Text})
+	}
+	return out
+}
+
 // idle：空白占位画面（agent-deck server 上的 deck-idle 会话里跑它）。
 func idle(dirs deckstore.Dirs) {
 	c := uiClient(dirs) // 空闲页在 agent-deck 的 tmux 里，也跟着界面语言走：每个 tick 向 deckd 对一次，变了就重画（n060 段 3）
@@ -499,24 +531,9 @@ func idle(dirs deckstore.Dirs) {
 		if err != nil {
 			w, h = 80, 24
 		}
-		// 空闲页在 agent-deck 的嵌套 tmux 里，画不了 sixel：deck logo 画成半格色块。16×8 格只有 16×16 个点，A4 的线条认不出
-		// （n069 真机：16x8 是一团，32x16 清楚）；高、宽放得下就用 32×16，放不下退回 16×8，再放不下就不画（免得挤掉按键说明，n056 自查）
-		rows := deckui.IdleRows(w, h) // n071：品牌与提示句各自居中，快捷键表整块居中、块内左对齐
-		art, artW := idleArt(w, h, len(rows))
 		fmt.Print("\x1b[2J\x1b[?25l")
-		top := max(1, (h-len(rows)-len(art)-1)/2)
-		for i, l := range art {
-			fmt.Printf("\x1b[%d;%dH%s\x1b[0m", top+i, max(1, (w-artW)/2+1), l)
-		}
-		if len(art) > 0 {
-			top += len(art) + 1
-		}
-		for _, put := range deckui.IdlePlace(rows, top, h) { // 矮窗：画到窗外的行不画（n071）
-			style := "\x1b[2m"
-			if put.Brand {
-				style = "\x1b[1;38;2;180;245;70m"
-			}
-			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", put.Row, put.Col, style, put.Text)
+		for _, put := range idleFrame(w, h) {
+			fmt.Printf("\x1b[%d;%dH%s%s\x1b[0m", put.Row, put.Col, put.Style, put.Text)
 		}
 	}
 	draw()

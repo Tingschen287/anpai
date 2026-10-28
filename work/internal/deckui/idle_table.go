@@ -22,23 +22,24 @@ type IdleRow struct {
 // idleMinDesc 是说明列最窄的列数；再窄就退回逐行写法（说明折成太多行比整行居中更难读）。
 const idleMinDesc = 16
 
-// idleMinWrap 是折行的最小行宽：窗口小到一行放不下 8 列，折行只会把「Anpai」「Ctrl-Q」这样的词硬拆开，不如照旧整行写（超出的部分由终端截去）。
-const idleMinWrap = 8
-
 // idleCenterCol 是整行居中时的起始列（从 1 起；左右边距相差不超过 1 列。n058 以来的旧公式少算了 1，行宽接近窗口宽时会贴左边缘）。
 func idleCenterCol(w, textW int) int { return max(1, (w-textW)/2+1) }
 
-// IdleRows 是空闲页的全部文字行及各自的起始列。w、h 是终端的列数与行数（h<=0 表示不知道）。
+// IdleRows 是空闲页的全部文字行及各自的起始列。w 是终端的列数（<=0 表示不知道，不折行）。
 // 前四行（产品名、空行、提示句、空行）各自居中；其后是快捷键表格。
-func IdleRows(w, h int) []IdleRow {
+// 高度不够不改版式：宽度够就一直是两列表格，画不下的行由 IdlePlace 在底部裁掉（n071 attempt 2，Codex 审查 R2）。
+func IdleRows(w int) []IdleRow {
 	flat := IdleLines(w)
-	limit := w - 2 // 两侧各留 1 列；窗口小到放不下 idleMinWrap 列就不折行了
+	limit := w - 2 // 两侧各留 1 列；窗口窄到 10 列以下就不留边（R4）：没有一行会超过窗口宽度，必要时词也按显示宽度拆开
+	if w < 10 {
+		limit = w
+	}
 	// centered 把每一行各自居中；这一行比窗口宽就折行，每一段各自居中
 	centered := func(lines []string) []IdleRow {
 		var out []IdleRow
 		for _, l := range lines {
 			pieces := []string{l}
-			if limit >= idleMinWrap {
+			if limit >= 1 {
 				pieces = wrapText(l, limit)
 			}
 			for _, p := range pieces {
@@ -80,12 +81,6 @@ func IdleRows(w, h int) []IdleRow {
 	col := idleCenterCol(w, tableW)
 	for _, l := range table {
 		out = append(out, IdleRow{Text: l, Col: col})
-	}
-	// 矮窗：表格折行后放不下，而逐行写法更短（放得下最好，放不下也少画出去一些），用逐行写法（不让底下的说明画到窗外）
-	if h > 0 && len(out) > h {
-		if fb := centered(flat); len(fb) < len(out) {
-			return fb
-		}
 	}
 	return out
 }

@@ -1,0 +1,25 @@
+# en 9x24：idle() 真实摆放与裁剪后的屏幕（竖线是窗口右缘）
+  Anpai  |
+         |
+ Pick a  |
+ session |
+ in the  |
+left pane|
+ to show |
+it here. |
+Sessions |
+  keep   |
+ running |
+ in the  |
+backgroun|
+   d.    |
+         |
+   F2    |
+Take over|
+ the sub |
+agent on |
+ screen  |
+(switchin|
+ g away, |
+ hiding, |
+or Ctrl-Q|

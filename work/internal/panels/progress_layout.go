@@ -137,14 +137,24 @@ func padLeft(s string, w int) string {
 }
 
 // oneLine 把外部文字清洗成一行：去控制序列、限长、折空白（同其他面板的出口）。
+//
+// 顺序（n071 attempt 2，Codex 审查 R1）：先删格式字符，再走打码出口。反过来的话，夹在 sk- 中间的零宽字符会躲过打码、
+// 删掉之后拼回一个完整的疑似密钥。最后把折成一行的结果再过一次出口——折空白不会拼出新的密钥，这一遍只是保证
+// 「显示出去的字，再走一次出口不会再变」。
 func oneLine(s string, limit int) string {
-	s = strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) { // 格式控制符（从右到左的 RLO/RLI、零宽空格、BOM 等）宽度为 0，却能把后面的数字整段反排，不显示
+	s = deckstore.Display(stripFormat(s), limit)
+	s = strings.Join(strings.Fields(stripFormat(s)), " ")
+	return deckstore.Display(s, limit)
+}
+
+// stripFormat 删掉 Unicode 格式控制符（Cf：从右到左的 RLO/RLI、零宽空格、BOM 等）：它们宽度为 0，却能把后面的数字整段反排。
+func stripFormat(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
-	}, deckstore.Display(s, limit))
-	return strings.Join(strings.Fields(s), " ")
+	}, s)
 }
 
 // ---------------- 状态计数网格 ----------------
@@ -281,13 +291,45 @@ func layoutBudget(rows []budgetRow, width int) []string {
 			}
 			out = append(out, strings.TrimRight(line, " "))
 		}
-	default: // 已用、上限、单位各占一行（这时连「/ 上限 单位」都放不下，数字与单位谁也不截）
+	default: // 已用、上限、单位各占一行（这时连「/ 上限 单位」都放不下）；缩进按剩余宽度缩，仍放不下就按宽度拆开（n071 attempt 2，R3）
 		for _, r := range rows {
-			out = append(out, fitLabel(r.label, width), "  "+r.used, "  / "+r.limNum)
+			out = append(out, fitLabel(r.label, width))
+			out = append(out, hangLines(2, r.used, width)...)
+			out = append(out, hangLines(2, "/ "+r.limNum, width)...)
 			if r.unit != "" {
-				out = append(out, "    "+r.unit)
+				out = append(out, hangLines(4, r.unit, width)...)
 			}
 		}
+	}
+	return out
+}
+
+// hangLines 把 text 缩进 indent 列写出来，一行绝不超过 width 列：缩进放不下就缩小（直到 0），
+// 文字比整行还宽就按显示宽度拆成几行。拆开总比超宽被终端截断好；width 比一个字还窄（<2）时每个字单独一行，宽字符仍会超宽，无法再窄。
+func hangLines(indent int, text string, width int) []string {
+	if width < 1 {
+		return []string{text}
+	}
+	tw := lipgloss.Width(text)
+	for indent > 0 && indent+tw > width {
+		indent--
+	}
+	room := max(1, width-indent)
+	var out []string
+	var cur strings.Builder
+	cw := 0
+	for _, r := range text {
+		rw := lipgloss.Width(string(r))
+		if cw > 0 && cw+rw > room {
+			out = append(out, strings.Repeat(" ", indent)+cur.String())
+			cur.Reset()
+			cw = 0
+		}
+		cur.WriteRune(r)
+		cw += rw
+	}
+	if cw > 0 || len(out) == 0 {
+		out = append(out, strings.Repeat(" ", indent)+cur.String())
 	}
 	return out
 }

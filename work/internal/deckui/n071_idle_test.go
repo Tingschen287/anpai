@@ -1,9 +1,6 @@
 package deckui
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,15 +12,6 @@ import (
 
 // n071：空闲页的版式（owner 确认的草图 A「整块居中，块内左对齐」）。
 
-// idleScreen 按 cmd/deck 画空闲页的方式把各行摆到 w 列的屏幕上，返回每行的起始列、文字与结束列（显示宽度）。
-func idleScreen(w, h int) (rows []IdleRow, ends []int) {
-	rows = IdleRows(w, h)
-	for _, r := range rows {
-		ends = append(ends, r.Col-1+lipgloss.Width(r.Text))
-	}
-	return
-}
-
 func keyRowCount() int { return len(layout.Keys()) }
 
 // 表格整块居中、块内两列各自左对齐：所有表格行起始列相同；按键列起点一致；说明列的左边界一致；续行也从说明列左边界开始。
@@ -32,7 +20,7 @@ func TestN071IdleTableAlignsLeftAsOneBlock(t *testing.T) {
 	for _, lang := range []string{i18n.ZH, i18n.EN} {
 		i18n.SetLang(lang)
 		for _, w := range []int{60, 80, 100, 120, 200} {
-			rows := IdleRows(w, 40)
+			rows := IdleRows(w)
 			start := -1
 			for i, r := range rows {
 				if strings.HasPrefix(r.Text, "F2 ") { // 提示句比窗口宽时会折成几行，表格从 F2 那一行开始
@@ -119,7 +107,7 @@ func TestN071IdleHeadStaysCentered(t *testing.T) {
 	for _, lang := range []string{i18n.ZH, i18n.EN} {
 		i18n.SetLang(lang)
 		for _, w := range []int{60, 80, 120} {
-			rows := IdleRows(w, 40)
+			rows := IdleRows(w)
 			for _, i := range []int{0, 2} {
 				want := max(1, (w-lipgloss.Width(rows[i].Text))/2+1)
 				if rows[i].Col != want {
@@ -134,7 +122,7 @@ func TestN071IdleHeadStaysCentered(t *testing.T) {
 func TestN071IdleWrapsLongTexts(t *testing.T) {
 	i18n.SetLang(i18n.EN)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	rows := IdleRows(80, 40)
+	rows := IdleRows(80)
 	if len(rows) <= len(IdleLines(80)) {
 		t.Fatalf("英文 80 列下 F2 的说明与提示句应折行，行数 %d", len(rows))
 	}
@@ -145,36 +133,38 @@ func TestN071IdleWrapsLongTexts(t *testing.T) {
 	}
 }
 
-// 窄窗（放不下按键列 + 最短说明）：退回逐行居中；每一行（太长就折成几段）各自居中，不超窗口，字一个不少。
-func TestN071IdleNarrowFallsBackToPerLine(t *testing.T) {
+// 窄窗（放不下按键列 + 最短说明，窗口 <26 列）：退回逐行居中；每一行（太长就折成几段）各自居中，一行都不超窗口，字一个不少。
+// 窗口 <10 列时不留边，必要时英文词与按键也按显示宽度拆开（n071 attempt 2，Codex 审查 R4：从 6 到 9 列也不能整行超宽）。
+func TestN071IdleNarrowNeverOverflows(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	for _, lang := range []string{i18n.ZH, i18n.EN} {
 		i18n.SetLang(lang)
-		for _, w := range []int{10, 12, 20, 24} {
-			rows := IdleRows(w, 0)
+		for w := 2; w <= 60; w++ {
+			rows := IdleRows(w)
 			for i, r := range rows {
-				if r.Col != max(1, (w-lipgloss.Width(r.Text))/2+1) {
-					t.Errorf("%s w%d 行 %d：没居中：%+v", lang, w, i, r)
-				}
-				if r.Col-1+lipgloss.Width(r.Text) > w && lipgloss.Width(r.Text) <= w-2 {
-					t.Errorf("%s w%d 行 %d：超出窗口：%+v", lang, w, i, r)
-				}
-				if lipgloss.Width(r.Text) > w {
-					t.Errorf("%s w%d 行 %d：比窗口还宽 %d：%q", lang, w, i, lipgloss.Width(r.Text), r.Text)
+				if end := r.Col - 1 + lipgloss.Width(r.Text); end > w || r.Col < 1 {
+					t.Errorf("%s w%d 行 %d：超出窗口（起始列 %d，结束列 %d）：%q", lang, w, i, r.Col, end, r.Text)
 				}
 			}
 			var got []string
 			for _, r := range rows {
 				got = append(got, r.Text)
 			}
-			if a, b := squashAll(strings.Join(got, "")), squashAll(strings.Join(IdleLines(w), "")); a != b {
+			if a, b := squashAll(strings.Join(got, "")), squashAll(strings.Join(IdleLines(w), "")); w < 26 && a != b {
 				t.Errorf("%s w%d：折行丢了字：\n%q\n%q", lang, w, a, b)
 			}
+			if w >= 10 && w < 26 {
+				for i, r := range rows {
+					if r.Col != max(1, (w-lipgloss.Width(r.Text))/2+1) {
+						t.Errorf("%s w%d 行 %d：逐行写法没居中：%+v", lang, w, i, r)
+					}
+				}
+			}
 		}
-		// 没有窗口宽度（0、负数）与极窄：原样逐行，不 panic
-		for _, w := range []int{-5, 0, 1, 2, 3, 4, 6, 8, 9} { // 窗口小到放不下 8 列（w<10）：不折行，免得把 Anpai、Ctrl-Q 拆开
-			if rows := IdleRows(w, 0); len(rows) != len(IdleLines(w)) {
-				t.Errorf("%s w%d：太窄不折行，应与 IdleLines 同样 %d 行，实际 %d", lang, w, len(IdleLines(w)), len(rows))
+		// 没有窗口宽度（0、负数）：原样逐行，不 panic
+		for _, w := range []int{-5, 0} {
+			if rows := IdleRows(w); len(rows) != len(IdleLines(w)) {
+				t.Errorf("%s w%d：宽度未知不折行，应与 IdleLines 同样 %d 行，实际 %d", lang, w, len(IdleLines(w)), len(rows))
 			}
 		}
 	}
@@ -182,105 +172,24 @@ func TestN071IdleNarrowFallsBackToPerLine(t *testing.T) {
 
 func squashAll(s string) string { return strings.Join(strings.Fields(s), "") }
 
-// 矮窗：表格折行后比窗口高、逐行写法放得下，就换成逐行写法；矮窗永远不会比不限高时更长。
-func TestN071IdleShortWindow(t *testing.T) {
-	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	switched := 0
-	for _, lang := range []string{i18n.ZH, i18n.EN} {
-		i18n.SetLang(lang)
-		for w := 30; w <= 120; w++ {
-			tab := IdleRows(w, 0)
-			for h := 1; h <= 45; h++ {
-				res := IdleRows(w, h)
-				switch {
-				case len(tab) <= h:
-					if len(res) != len(tab) {
-						t.Fatalf("%s %dx%d：窗口放得下表格却没用表格（%d 对 %d）", lang, w, h, len(res), len(tab))
-					}
-				case len(res) != len(tab):
-					switched++
-					if len(res) >= len(tab) {
-						t.Fatalf("%s %dx%d：换成的写法没有更短（%d 对 %d）", lang, w, h, len(res), len(tab))
-					}
-				}
-				if len(res) > len(tab) {
-					t.Fatalf("%s %dx%d：矮窗比不限高还长（%d 对 %d）", lang, w, h, len(res), len(tab))
-				}
-			}
-		}
-	}
-	if switched == 0 {
-		t.Fatal("扫了一圈也没遇到换成逐行写法的情形：这一支没被测到")
-	}
-}
-
-// 不丢键：任何宽高下，8 个按键每个都在输出里恰好出现一次（作为说明列左边的按键）。
-func TestN071IdleNeverDropsAKey(t *testing.T) {
+// 逻辑行里 8 个按键一个不少（太窄时按键本身也可能被拆成两段）。这只说明「没有被折行逻辑吃掉」，不说明屏幕上看得见——
+// 高度不够时底部的行会被 IdlePlace 裁掉，屏幕上可见的按键见 cmd/deck 的 TestN071IdleScreen*。
+func TestN071IdleLogicalRowsKeepEveryKey(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
 	for _, lang := range []string{i18n.ZH, i18n.EN} {
 		i18n.SetLang(lang)
 		for w := 0; w <= 160; w += 3 {
-			for _, h := range []int{0, 3, 12, 24, 60} {
-				text := ""
-				for _, r := range IdleRows(w, h) {
-					text += r.Text
-				}
-				text = squashAll(text) // 太窄时按键本身也可能被折成两段
-				for _, k := range layout.Keys() {
-					if !strings.Contains(text, squashAll(k.Key)) {
-						t.Fatalf("%s %dx%d：按键 %s 丢了", lang, w, h, k.Key)
-					}
+			text := ""
+			for _, r := range IdleRows(w) {
+				text += r.Text
+			}
+			text = squashAll(text)
+			for _, k := range layout.Keys() {
+				if !strings.Contains(text, squashAll(k.Key)) {
+					t.Fatalf("%s w%d：按键 %s 丢了", lang, w, k.Key)
 				}
 			}
 		}
-	}
-}
-
-// 黄金输出：把各行摆到屏幕上（用空格补到起始列）的纯文本，评审直接看版式。
-// 重新生成：N071_UPDATE=1 go test ./internal/deckui -run N071IdleGolden；导出到别处：N071_RENDER_OUT=<目录>。
-func TestN071IdleGolden(t *testing.T) {
-	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	for _, lang := range []string{i18n.ZH, i18n.EN} {
-		i18n.SetLang(lang)
-		for _, sz := range [][2]int{{80, 24}, {120, 40}, {44, 24}, {30, 24}} {
-			rows := IdleRows(sz[0], sz[1])
-			var b strings.Builder
-			fmt.Fprintf(&b, "# %s %dx%d（竖线是窗口右缘）\n", lang, sz[0], sz[1])
-			for _, r := range rows {
-				line := strings.Repeat(" ", r.Col-1) + r.Text
-				pad := sz[0] - lipgloss.Width(line)
-				if pad > 0 {
-					line += strings.Repeat(" ", pad)
-				}
-				b.WriteString(line + "|\n")
-			}
-			goldenCheckIdle(t, fmt.Sprintf("idle-%s-%dx%d.txt", lang, sz[0], sz[1]), b.String())
-		}
-	}
-}
-
-func goldenCheckIdle(t *testing.T, name, got string) {
-	t.Helper()
-	if dir := os.Getenv("N071_RENDER_OUT"); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path := filepath.Join("testdata", "n071", name)
-	if os.Getenv("N071_UPDATE") != "" {
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("没有黄金文件 %s（N071_UPDATE=1 生成）：%v", path, err)
-	}
-	if string(want) != got {
-		t.Fatalf("%s 与黄金输出不同。\n--- 黄金\n%s--- 实际\n%s", name, want, got)
 	}
 }
 

@@ -1,0 +1,25 @@
+# en 6x24：idle() 真实摆放与裁剪后的屏幕（竖线是窗口右缘）
+Anpai |
+      |
+Pick a|
+sessio|
+ n in |
+ the  |
+ left |
+ pane |
+  to  |
+ show |
+  it  |
+here. |
+Sessio|
+  ns  |
+ keep |
+runnin|
+ g in |
+ the  |
+backgr|
+ound. |
+      |
+  F2  |
+ Take |
+ over |
