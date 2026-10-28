@@ -1,0 +1,13 @@
+# en 44x12：idle() 真实摆放与裁剪后的屏幕（竖线是窗口右缘）
+                   Anpai                    |
+                                            |
+ Pick a session in the left pane to show it |
+     here. Sessions keep running in the     |
+                background.                 |
+                                            |
+ F2      Take over the sub agent on screen  |
+         (switching away, hiding, or Ctrl-Q |
+         hands it back)                     |
+ Ctrl-Q  Send the session in the center     |
+         back to the background (it keeps   |
+         running)                           |

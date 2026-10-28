@@ -1,0 +1,11 @@
+Progress · it-req-automation
+██████████████████████████████████████
+Accepted        37  Blocked          3
+Failed           1  Other           16
+In progress      1  Planned          7
+Unknown          8
+
+Worker rounds       25 / 220 rounds  11%
+Frontier calls      26 / 80 calls    33%
+Elapsed        unknown / 400 h         —
+Tokens            9.9M / 15M         66%

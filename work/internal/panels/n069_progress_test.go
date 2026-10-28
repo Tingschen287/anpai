@@ -89,12 +89,14 @@ func TestRenderProgressWMatchesPrototype(t *testing.T) {
 		t.Fatalf("分段条应是 38 格的块：%q（%d）", lines[1], w)
 	}
 	// 数字格：已验收 37 / 阻塞 3 / 失败 1 / 其余 8（其余 = 总数 49 - 37 - 3 - 1）
-	for _, want := range []string{"已验收 37", "阻塞 3", "失败 1", "其余 8", "进行中 1 · 计划中 7"} {
-		if !strings.Contains(out, want) {
+	// n071：数字格改成对齐的网格（标签左对齐、数字右对齐），明细也排进网格；断言先把对齐用的空格压成一个再比，数据一项没少
+	// （原来是「进行中 1 · 计划中 7」一行，现在是网格里的两格）
+	for _, want := range []string{"已验收 37", "阻塞 3", "失败 1", "其余 8", "进行中 1 计划中 7"} {
+		if !hasOnLine(out, want) {
 			t.Fatalf("缺 %q：\n%s", want, out)
 		}
 	}
-	if !strings.Contains(lines[2], "已验收 37") || !strings.Contains(lines[2], "阻塞 3") || !strings.Contains(lines[3], "失败 1") || !strings.Contains(lines[3], "其余 8") {
+	if !hasOnLine(lines[2], "已验收 37") || !hasOnLine(lines[2], "阻塞 3") || !hasOnLine(lines[3], "失败 1") || !hasOnLine(lines[3], "其余 8") {
 		t.Fatalf("数字格应是两行两列：\n%s", out)
 	}
 	if !strings.Contains(raw, "█") {
@@ -138,9 +140,9 @@ func TestProgressBarSegmentColoursAndOrder(t *testing.T) {
 func TestRenderProgressWEnglishAndNarrow(t *testing.T) {
 	i18n.SetLang(i18n.EN)
 	t.Cleanup(func() { i18n.SetLang(i18n.ZH) })
-	out := plain(RenderProgressW(prog(), 12)) // 窄到只有 12 列
-	for _, want := range []string{"Accepted 37", "Blocked 3", "Failed 1", "Other 8"} {
-		if !strings.Contains(out, want) {
+	out := plain(RenderProgressW(prog(), 12))                                          // 窄到只有 12 列
+	for _, want := range []string{"Accepted 37", "Blocked 3", "Failed 1", "Other 8"} { // n071：对齐空格压成一个再比
+		if !hasOnLine(out, want) {
 			t.Fatalf("缺 %q：\n%s", want, out)
 		}
 	}
@@ -158,11 +160,11 @@ func TestRenderProgressWEnglishAndNarrow(t *testing.T) {
 func TestRenderProgressWEmptyGraphAndUnknown(t *testing.T) {
 	i18n.SetLang(i18n.ZH)
 	out := plain(RenderProgressW(deckd.Progress{Project: "p", Graph: true, Counts: map[string]int{}}, 40))
-	if !strings.Contains(out, "已验收 0") || !strings.Contains(out, "其余 0") {
+	if !hasOnLine(out, "已验收 0") || !hasOnLine(out, "其余 0") { // n071：对齐空格压成一个再比
 		t.Fatalf("没有节点也画数字格：\n%s", out)
 	}
 	out = plain(RenderProgressW(deckd.Progress{Project: "p", Graph: true, Unknown: 2, Counts: map[string]int{"accepted": 1}}, 40))
-	if !strings.Contains(out, "其余 2") || !strings.Contains(out, "状态未知 2") {
+	if !hasOnLine(out, "其余 2") || !hasOnLine(out, "状态未知 2") { // n071：同上
 		t.Fatalf("状态未知的算进其余并列出：\n%s", out)
 	}
 	if !strings.Contains(plain(RenderProgressW(deckd.Progress{Project: "p"}, 40)), "这个项目没有接 Graph") {
@@ -231,7 +233,7 @@ func TestProgressPanelAsksDeckdByProject(t *testing.T) {
 	if len(*urls) != 1 || (*urls)[0] != "/v1/progress" {
 		t.Fatalf("没指定项目不带参数：%v", *urls)
 	}
-	if v := plain(m.View()); !strings.Contains(v, "项目进度 · alpha") || !strings.Contains(v, "已验收 2") {
+	if v := plain(m.View()); !strings.Contains(v, "项目进度 · alpha") || !hasOnLine(v, "已验收 2") { // n071：同上
 		t.Fatalf("应显示 deckd 跟出来的项目：\n%s", v)
 	}
 	m2 := &model{name: "progress", project: "it-req-automation", c: c, width: 40}
@@ -250,4 +252,18 @@ func TestProgressPanelFollowReplyRendersExplanation(t *testing.T) {
 	if !strings.Contains(strings.ReplaceAll(v, "\n", ""), "现在没有在看的会话") || strings.Contains(v, "--project") || strings.Contains(v, "取不到") {
 		t.Fatalf("\n%s", v)
 	}
+}
+
+// squash 把连续的空白压成一个空格：n071 之后数字格与预算行按列对齐，里面的空格数随最宽的一项变；
+// 想比的是「标签 数字」这对内容，不是对齐用的空格数。
+func squash(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// hasOnLine 是说某一行（压掉对齐空格后）含 want：「标签 数字」「数字 / 上限 单位」这些必须在同一行，不能跨行拼出来。
+func hasOnLine(out, want string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(squash(l), want) {
+			return true
+		}
+	}
+	return false
 }

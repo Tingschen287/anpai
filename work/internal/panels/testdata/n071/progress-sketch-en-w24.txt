@@ -1,0 +1,14 @@
+Progress · it-req-autom…
+██████████████████████
+Accepted  0  Blocked   1
+Failed    0  Other     8
+Unknown   8
+
+Worker rounds
+       25 / 220 rounds
+Frontier calls
+       26 / 80 calls
+Elapsed
+  unknown / 400 h
+Tokens
+     9.9M / 15M

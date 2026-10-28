@@ -94,8 +94,9 @@ func TestProgressPanelSaysUnknownForMissingBudget(t *testing.T) {
 	limit, used := 214.0, 202.0
 	out := plain(RenderProgress(deckd.Progress{Project: "deck", Graph: true, Counts: map[string]int{"accepted": 37, "blocked": 3},
 		Budgets: []deckd.BudgetView{{Label: "frontier", Used: &used, Limit: &limit}, {Label: "elapsed", Limit: &limit, Unit: "小时"}}}))
-	for _, want := range []string{"已验收 37", "阻塞 3", "frontier 202 / 214", "elapsed 未知 / 214小时"} {
-		if !strings.Contains(out, want) {
+	// n071：预算改成一行一项、按列对齐，标签按语言（elapsed → 耗时），单位前有空格；比之前先压掉对齐空格
+	for _, want := range []string{"已验收 37", "阻塞 3", "frontier 202 / 214", "耗时 未知 / 214 小时"} {
+		if !hasOnLine(out, want) {
 			t.Errorf("进度面板缺 %q：\n%s", want, out)
 		}
 	}
